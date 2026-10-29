@@ -160,14 +160,16 @@ describe("nativeEditorTheme (#1612)", () => {
   it("constructs the real pi-tui Editor with a functional borderColor", () => {
     const codingAgent = piTuiCodingAgent();
     const terminal = new piTui.ProcessTerminal();
-    const ui = new piTui.TUI(terminal, true);
+    // Pi 0.84 (#1713): TuiMainScreen is the concrete main-screen renderer;
+    // `TUI` exists only as a type.
+    const ui = new piTui.TuiMainScreen(terminal, true);
     const editor = new piTui.Editor(ui, nativeEditorTheme(codingAgent));
     expect(typeof editor.borderColor).toBe("function");
   });
 
   it("renders the editor without throwing at any width", () => {
     const terminal = new piTui.ProcessTerminal();
-    const ui = new piTui.TUI(terminal, true);
+    const ui = new piTui.TuiMainScreen(terminal, true);
     const editor = new piTui.Editor(ui, nativeEditorTheme(piTuiCodingAgent()));
     expect(() => editor.render(40)).not.toThrow();
     expect(() => editor.render(10)).not.toThrow();

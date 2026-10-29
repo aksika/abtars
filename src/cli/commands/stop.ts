@@ -25,7 +25,10 @@ async function killGracefully(pid: number, expectedIdentity: string | null, need
   }
   if (expectedIdentity === null) return "stale";
 
-  try { process.kill(pid, "SIGTERM"); } catch { return "not-running"; }
+  try { process.kill(pid, "SIGTERM"); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return "not-running";
+    throw err;
+  }
 
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
@@ -33,7 +36,9 @@ async function killGracefully(pid: number, expectedIdentity: string | null, need
   }
 
   if (validateBridgePid(pid, expectedIdentity, needles).safeToSignal) {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    try { process.kill(pid, "SIGKILL"); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+    }
   }
   await new Promise(r => setTimeout(r, 500));
   return isPidAlive(pid) ? "not-running" : "forced";
@@ -41,7 +46,62 @@ async function killGracefully(pid: number, expectedIdentity: string | null, need
 
 function removeLock(path: string): void {
   try { if (existsSync(path)) unlinkSync(path); }
-  catch (err) { logAndSwallow("stop", "op", err); }
+  catch (err) { logAndSwallow("stop", "remove bridge lock", err); }
+}
+
+function commandErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "stderr" in err) {
+    const stderr = (err as { stderr?: unknown }).stderr;
+    if (Buffer.isBuffer(stderr) && stderr.length > 0) return stderr.toString().trim();
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+  }
+  return (err instanceof Error ? err.message : String(err)).trim();
+}
+
+function isExpectedWatchdogAbsence(err: unknown): boolean {
+  const message = commandErrorMessage(err).toLowerCase();
+  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled|not found$|no such process/.test(message);
+}
+
+function isLaunchctlIoError(err: unknown): boolean {
+  const message = commandErrorMessage(err).toLowerCase();
+  return /input\/output error|error 5\b/.test(message);
+}
+
+type StopDelay = (ms: number) => Promise<void>;
+
+/**
+ * Unload the macOS watchdog LaunchAgent, retrying launchd's transient EIO
+ * response once while it finishes removing the job from the GUI domain.
+ *
+ * A persistent EIO is deliberately rethrown: the caller must not report a
+ * successful service unload when launchd never accepted either request.
+ */
+export async function bootoutLaunchAgent(
+  uid: string,
+  plistPath: string,
+  execFn: typeof execFileSync = execFileSync,
+  delayFn: StopDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+): Promise<boolean> {
+  const bootout = () => execFn("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: "pipe" });
+
+  try {
+    bootout();
+    return true;
+  } catch (err) {
+    if (isExpectedWatchdogAbsence(err)) return false;
+    if (!isLaunchctlIoError(err)) throw err;
+  }
+
+  await delayFn(1000);
+
+  try {
+    bootout();
+    return true;
+  } catch (err) {
+    if (isExpectedWatchdogAbsence(err)) return false;
+    throw err;
+  }
 }
 
 function sigusrWatchdog(home: string): void {
@@ -72,12 +132,10 @@ export async function stop(_opts: {}): Promise<number> {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;
-      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
-      await new Promise(r => setTimeout(r, 1000));
-      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
+      serviceWasStopped = await bootoutLaunchAgent(uid, plistPath);
     } else {
-      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
-      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 10000, stdio: 'pipe' }); serviceWasStopped = true; } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 10000, stdio: 'pipe' }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
     }
   }
 

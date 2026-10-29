@@ -38,6 +38,9 @@ export type SessionControlStatus =
   | "stale"
   | "failed";
 
+/** #1940: bound for /compact custom instructions (moved from the retired
+ * abmind summarizer; shared by the Pi-route and local-run compact commands). */
+export const MAX_COMPACT_INSTRUCTIONS_BYTES = 4_000;
 export interface SessionControlResult {
   status: SessionControlStatus;
   targetKind: SessionControlTarget["kind"];

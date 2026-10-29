@@ -18,11 +18,17 @@ vi.mock("../components/message-pipeline.js", () => ({
 }));
 
 function makeMockPipelineDeps(): PipelineDeps {
-  return { handleInbound: vi.fn() } as unknown as PipelineDeps;
+  // #1800: the pipeline fixture carries its own transport holder, distinct
+  // from ctx.transport, so getter tests can prove read-through.
+  return { handleInbound: vi.fn(), transport: makeMockPipelineTransport() } as unknown as PipelineDeps;
 }
 
 function makeMockTransport() {
   return { isReady: true } as unknown as BootCtx["transport"];
+}
+
+function makeMockPipelineTransport() {
+  return { isReady: true, kind: "pipeline-holder" };
 }
 
 function makeTelegramAdapter() {
@@ -83,7 +89,30 @@ describe("wireTelegram (#1306)", () => {
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
     const call = adapter.setMessageHandler.mock.calls[0]![0] as Record<string, unknown>;
     expect(call["pipeline"]).toBe(ctx.pipelineDeps);
-    expect(call["transport"]).toBe(ctx.transport);
+    // #1800: the adapter reads the pipeline holder, not the wire-time ctx copy.
+    expect(call["transport"]).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    expect(call["transport"]).not.toBe(ctx.transport);
+  });
+
+  it("tracks pipeline publication and survives ctx.transport clearing (#1800)", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeTelegramAdapter();
+    ctx.telegramAdapter = adapter as unknown as BootCtx["telegramAdapter"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    ctx.config = { mainChatId: null } as unknown as BootCtx["config"];
+
+    const { wireTelegram } = await import("./wire-platform.js");
+    await wireTelegram(ctx);
+
+    const deps = adapter.setMessageHandler.mock.calls[0]![0] as { transport: unknown };
+    expect(deps.transport).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    const replacement = makeMockPipelineTransport();
+    (ctx.pipelineDeps as PipelineDeps).transport = replacement as never;
+    expect(deps.transport).toBe(replacement);
+    // Degraded branch: clearing BootCtx transport must not surface null.
+    ctx.transport = null;
+    expect(deps.transport).toBe(replacement);
   });
 });
 
@@ -114,6 +143,24 @@ describe("wireDiscord (#1306)", () => {
     await wireDiscord(ctx);
 
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
+  });
+
+  it("tracks pipeline publication (#1800)", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeDiscordAdapter();
+    ctx.discordAdapter = adapter as unknown as BootCtx["discordAdapter"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    ctx.config = { mainChatId: null } as unknown as BootCtx["config"];
+
+    const { wireDiscord } = await import("./wire-platform.js");
+    await wireDiscord(ctx);
+
+    const deps = adapter.setMessageHandler.mock.calls[0]![0] as { transport: unknown };
+    expect(deps.transport).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    const replacement = makeMockPipelineTransport();
+    (ctx.pipelineDeps as PipelineDeps).transport = replacement as never;
+    expect(deps.transport).toBe(replacement);
   });
 });
 
@@ -194,5 +241,73 @@ describe("drainRecoveryQueue (#1306)", () => {
     const { handleInboundMessage } = await import("../components/message-pipeline.js");
     expect(handleInboundMessage).toHaveBeenCalledTimes(2);
     expect(queue).toHaveLength(0);
+  });
+
+  it("resets the per-chat notice throttle so a later episode notifies again (#1831)", async () => {
+    const ctx = createBootCtx();
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    const throttle = new Set<string>(["telegram:42"]);
+    (ctx as unknown as { _recoveryNoticeThrottle: Set<string> })._recoveryNoticeThrottle = throttle;
+
+    const { drainRecoveryQueue } = await import("./wire-platform.js");
+    await drainRecoveryQueue(ctx);
+
+    expect(throttle.size).toBe(0);
+  });
+
+  it("keeps the notice throttle while the adapters are still unwired (#1831)", async () => {
+    // A drain during a transport-rebuild gap: wireTelegram/wireDiscord both
+    // no-op without ctx.transport, so the unwired episode is not over and the
+    // chat must not be notified a second time.
+    const ctx = createBootCtx();
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = null;
+    const throttle = new Set<string>(["telegram:42"]);
+    (ctx as unknown as { _recoveryNoticeThrottle: Set<string> })._recoveryNoticeThrottle = throttle;
+
+    const { drainRecoveryQueue } = await import("./wire-platform.js");
+    await drainRecoveryQueue(ctx);
+
+    expect([...throttle]).toEqual(["telegram:42"]);
+  });
+});
+
+// ── #1706: captured runtime reference upgrades in place ────────────────────
+
+describe("#1706 wireTelegram — captured memoryRuntime reference", () => {
+  it("the deps object handed to the adapter upgrades in place when memory composes late", async () => {
+    const { RecomposableMemoryRuntime } = await import("../components/memory-recomposition.js");
+    const controller = new RecomposableMemoryRuntime();
+    const ctx = createBootCtx({ memoryRuntime: controller.runtime });
+    ctx.config = { mainChatId: null } as unknown as BootCtx["config"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    const adapter = makeTelegramAdapter();
+    ctx.telegramAdapter = adapter as unknown as BootCtx["telegramAdapter"];
+
+    const { wireTelegram } = await import("./wire-platform.js");
+    await wireTelegram(ctx);
+
+    const capturedDeps = (adapter.setMessageHandler as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      memoryRuntime: { state: string; recordMessage: (...args: unknown[]) => Promise<unknown> };
+    };
+    expect(capturedDeps.memoryRuntime.state).toBe("unavailable");
+    await expect(capturedDeps.memoryRuntime.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi", timestamp: 1 }, "op")).rejects.toThrow();
+
+    // Late composition through the SAME reference — no re-wiring.
+    const readyRuntime = {
+      state: "ready",
+      capabilities: new Set(["recall"]),
+      routeSnapshot: { version: 1, state: "ready", generation: 1, retryEligible: 0, terminalUnknown: 0 },
+      supports: () => true,
+      recordMessage: vi.fn(async () => ({ id: 7 })),
+      close: vi.fn(async () => undefined),
+    };
+    controller.upgrade(readyRuntime as never);
+
+    expect(capturedDeps.memoryRuntime.state).toBe("ready");
+    const result = await capturedDeps.memoryRuntime.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi again", timestamp: 2 }, "op-2");
+    expect(result).toEqual({ id: 7 });
   });
 });

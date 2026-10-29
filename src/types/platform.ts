@@ -9,6 +9,64 @@ export interface DeliveryCorrelation {
   kind: "final_assistant" | "system" | "tool_status" | "error";
 }
 
+/** #1515: bounded question attached to the automatic boot greeting. Never
+ *  enters provider input; only Spin's automatic boot injection creates it. */
+export interface BootGreetingQuestion {
+  id: string;
+  text: string;
+}
+
+/** #1515: trusted internal boot metadata. Only Spin's automatic master boot
+ *  injection may construct it; external platform/TUI/API adapters never read
+ *  an inbound `internal` property and never populate it. */
+export const BOOT_GREETING_TOKEN: unique symbol = Symbol("abtars.boot-greeting");
+export interface InternalBootMetadata {
+  /** Runtime-only provenance marker; never serialized to an adapter. */
+  readonly [BOOT_GREETING_TOKEN]?: true;
+  kind: "boot_greeting";
+  dreamQuestion?: BootGreetingQuestion;
+}
+
+/**
+ * #1724: delivery outcome of a receipt-bearing internal submission.
+ * `sent` means every response chunk was externally delivered; `not_sent`
+ * means definitely nothing reached the platform (rejected admission,
+ * empty/no-reply turn, failed first chunk); `unknown` means a partial or
+ * ambiguous send — never automatically resent.
+ */
+export type MainDeliveryResult = "sent" | "not_sent" | "unknown";
+
+/** #1724: trusted internal scheduled-announcement metadata. Only the local
+ *  MainConversationIngress may construct it; external platform/TUI/API
+ *  adapters never read an inbound `internal` property and never populate it.
+ *  The event ID (`scheduled-card:<cardId>`) is derived from the durable Kanban
+ *  card and doubles as the inbound durable-operation identity, so retries
+ *  deduplicate instead of re-recording the announcement. */
+export const SCHEDULED_ANNOUNCEMENT_TOKEN: unique symbol = Symbol("abtars.scheduled-announcement");
+export interface InternalScheduledAnnouncementMetadata {
+  /** Runtime-only provenance marker; never serialized to an adapter. */
+  readonly [SCHEDULED_ANNOUNCEMENT_TOKEN]?: true;
+  kind: "scheduled_announcement";
+  eventId: string;
+  cardId: number;
+  /** #1873: non-imperative durable-record form of the same event payload.
+   *  The live inbound `text` keeps the one-time announcement instruction for
+   *  the delivery attempt; the durable conversation records this form instead,
+   *  so later projections and compaction inputs never replay the instruction. */
+  savedText: string;
+}
+
+/** Runtime trust check for the scheduler-only metadata. The discriminant is
+ * intentionally insufficient on its own: platform-shaped objects can carry
+ * ordinary string fields, while this non-serializable token is constructed
+ * only by MainConversationIngress. */
+export function isTrustedScheduledAnnouncement(
+  internal: InternalBootMetadata | InternalScheduledAnnouncementMetadata | undefined,
+): internal is InternalScheduledAnnouncementMetadata {
+  return internal?.kind === "scheduled_announcement"
+    && internal[SCHEDULED_ANNOUNCEMENT_TOKEN] === true;
+}
+
 export interface SendOpts {
   threadId?: string;
   parseMode?: string;
@@ -36,6 +94,22 @@ export interface InboundMessage {
   rawPlatformData?: unknown;
   /** #1336: Internal routing hint — only TuiSocketAdapter sets it. Untrusted routing request. */
   targetSessionId?: string;
+  /** #1515: trusted internal boot metadata — set ONLY by Spin's automatic boot
+   *  injection. #1724: or by the trusted MainConversationIngress for scheduled
+   *  announcements. External adapters never construct it. */
+  internal?: InternalBootMetadata | InternalScheduledAnnouncementMetadata;
+}
+
+/**
+ * #1831: degraded-mode inbound route. Boot installs it on platform adapters
+ * while the full message pipeline is unwired (transport init failed, so
+ * phase-pipeline-deps never ran); `setMessageHandler` wiring replaces the
+ * whole deps object with one that has no degraded route. Presence of the
+ * route therefore means "unwired" — adapters route every inbound path to it
+ * instead of calling the pipeline or returning silently.
+ */
+export interface DegradedInboundRoute {
+  handle(msg: InboundMessage, adapter: PlatformAdapter): Promise<void>;
 }
 
 /** What a platform adapter can do — pipeline checks these. */

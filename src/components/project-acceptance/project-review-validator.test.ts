@@ -11,8 +11,8 @@ let ProjectReviewValidator: typeof import("./project-review-validator.js").Proje
 let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReviewStore;
 
 describe("ProjectReviewValidator", () => {
-  let validator: ProjectReviewValidator;
-  let store: ProjectReviewStore;
+  let validator: InstanceType<typeof ProjectReviewValidator>;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let seq = 0;
   let testSeq = 0;
 
@@ -43,8 +43,8 @@ describe("ProjectReviewValidator", () => {
         limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
       },
       criterion_inputs: [
-        { criterion_id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: ["v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: ["a1"], retry_lineage_ids: [], coverage_hint: "supported" },
-        { criterion_id: "c2", description: "Accurate", required: true, execution_owner: "delegated", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: ["v2"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: ["pc_child_c1"], successful_mapped_child_contract_ids: ["pc_child_c1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: ["a1"], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "c2", description: "Accurate", required: true, execution_owner: "delegated", evidence_expectation: "synthesis", mapped_child_contract_ids: ["pc_child_c2"], successful_mapped_child_contract_ids: ["pc_child_c2"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["v2"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
       ],
       contradiction_candidates: [],
       uncovered_criteria: [],
@@ -75,6 +75,7 @@ describe("ProjectReviewValidator", () => {
       contradictions: [],
       residual_risks: [],
       synthesis: "The feature is complete and all criteria are satisfied.",
+      authored_at: new Date().toISOString(),
       ...overrides,
     };
   }
@@ -262,7 +263,7 @@ describe("ProjectReviewValidator", () => {
 
     // #1605: required vs optional and ownership-aware acceptance
 
-    function snapshotWithCriteria(pid: number, criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc"; coverage_hint: string }>): ReviewCaseSnapshot {
+    function snapshotWithCriteria(pid: number, criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc"; coverage_hint: "supported" | "conflicting" | "gap" | "orc_owned" | "failed" }>): ReviewCaseSnapshot {
       const snap = makeSnapshot(pid);
       return {
         ...snap,
@@ -282,7 +283,10 @@ describe("ProjectReviewValidator", () => {
           required: c.required,
           execution_owner: c.execution_owner,
           evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "artifact",
-          mapped_child_contract_ids: [],
+          mapped_child_contract_ids: c.coverage_hint === "gap" ? [] : [`pc_child_${c.id}`],
+          // #1656: provenance arrays match the semantic hint
+          successful_mapped_child_contract_ids: (c.coverage_hint === "supported" || c.coverage_hint === "conflicting") ? [`pc_child_${c.id}`] : [],
+          unsuccessful_mapped_child_contract_ids: (c.coverage_hint === "failed" || c.coverage_hint === "conflicting") ? [`pc_child_${c.id}`] : [],
           observed_evidence_ids: [`ev_${c.id}`],
           worker_claim_ids: [],
           failed_or_inconclusive_check_ids: [],
@@ -324,6 +328,10 @@ describe("ProjectReviewValidator", () => {
           { criterion_id: "lane1", verdict: "satisfied", evidence_ids: ["ev_lane1"], rationale: "lane passed" },
           { criterion_id: "lane3", verdict: "unsatisfied", evidence_ids: [], rationale: "source lane failed; report still useful without it" },
         ],
+        // #1791: output evidence must reference case-known ids — "a1" was
+        // never evidence in this snapshot and only passed while outputs were
+        // unchecked.
+        outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: ["ev_lane1"] }],
       }, id);
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors).toHaveLength(0);
@@ -494,13 +502,108 @@ describe("ProjectReviewValidator", () => {
         action: "repair",
         repair: {
           items: [
-            { id: "r1", affected_criterion_ids: ["c1"], required_evidence: "", strategy: "", do_not_repeat: [], capabilities: [], budget: {} },
+            { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "", strategy: "", do_not_repeat: [], capabilities: [], budget: {} },
           ],
           rationale: "Fix it",
         },
       }, caseId);
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors.some(e => e.tag === "missing_field")).toBe(true);
+    });
+  });
+
+  describe("#1686 repair source-contract validation", () => {
+    function repairDecision(pid: number, caseId: string, items: unknown[]): ProjectReviewDecisionV1 {
+      return makeValidDecision(pid, {
+        action: "repair",
+        repair: { items: items as never, rationale: "Fix it" },
+      }, caseId);
+    }
+
+    it("accepts a repair item referencing a mapped source contract covering its affected criteria", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("rejects an empty or missing source_contract_id", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("source_contract_id") && e.tag === "missing_field")).toBe(true);
+    });
+
+    it("rejects a hallucinated source contract not mapped by any criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "c_fabricated", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("source_contract_id") && e.message.includes("unknown source contract"))).toBe(true);
+    });
+
+    it("rejects a source contract that does not cover the affected criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("does not cover affected criterion"))).toBe(true);
+    });
+
+    it("rejects Orc-owned or unknown affected criteria", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      // Orc-owned criterion "o-crit" is not in the snapshot, but the root
+      // contract in this fixture only has c1/c2 delegated — an unknown id.
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["ghost"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("not a delegated root criterion"))).toBe(true);
+    });
+
+    it("rejects duplicate affected criteria within one item", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1", "c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("duplicate affected criterion"))).toBe(true);
+    });
+
+    it("rejects conflicting items referencing the same source contract", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r2", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("already claimed by repair item"))).toBe(true);
+    });
+
+    it("allows two disjoint items on the same source contract", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r2", source_contract_id: "pc_child_c2", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("rejects a duplicate repair item id", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r1", source_contract_id: "pc_child_c2", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("duplicate repair item id"))).toBe(true);
     });
   });
 
@@ -540,5 +643,373 @@ describe("ProjectReviewValidator", () => {
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors.some(e => e.path === "$.input_request.question")).toBe(true);
     });
+  });
+});
+
+describe("ProjectReviewValidator #1656 positive provenance on accept", () => {
+  let validator: InstanceType<typeof ProjectReviewValidator>;
+  let store: InstanceType<typeof ProjectReviewStore>;
+  let seq = 0;
+
+  function snapshotWith(inputs: Array<{
+    criterion_id: string;
+    required: boolean;
+    execution_owner: "delegated" | "orc";
+    coverage_hint: "supported" | "conflicting" | "failed" | "gap" | "orc_owned";
+    successContracts: string[];
+    failContracts: string[];
+    positive: string[];
+    negative: string[];
+  }>): ReviewCaseSnapshot {
+    const base: ReviewCaseSnapshot = {
+      schema_version: 1,
+      project_card_id: 99,
+      generation: 1,
+      round: 1,
+      created_at: "2026-08-12T00:00:00.000Z",
+      root_contract: {
+        id: "pc_test_99",
+        digest: "digest_99",
+        goal: "Build the feature",
+        criteria: [],
+        required_outputs: [{ id: "o1", description: "Report", kind: "file", required: true }],
+        limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      },
+      criterion_inputs: [],
+      contradiction_candidates: [],
+      uncovered_criteria: [],
+      child_summaries: [],
+      peer_contributions: [],
+      budgets: { total_cost: 0, total_tokens: 0, wall_clock_ms: 1000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 0,
+      contradiction_count: 0,
+    };
+    return {
+      ...base,
+      root_contract: {
+        ...base.root_contract,
+        criteria: inputs.map(c => ({
+          id: c.criterion_id,
+          description: `Criterion ${c.criterion_id}`,
+          required: c.required,
+          execution_owner: c.execution_owner,
+          evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "artifact",
+        })),
+      },
+      criterion_inputs: inputs.map(c => ({
+        criterion_id: c.criterion_id,
+        description: `Criterion ${c.criterion_id}`,
+        required: c.required,
+        execution_owner: c.execution_owner,
+        evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "artifact",
+        mapped_child_contract_ids: [...c.successContracts, ...c.failContracts],
+        successful_mapped_child_contract_ids: c.successContracts,
+        unsuccessful_mapped_child_contract_ids: c.failContracts,
+        observed_evidence_ids: c.positive,
+        worker_claim_ids: [],
+        failed_or_inconclusive_check_ids: c.negative,
+        artifact_observation_ids: [],
+        retry_lineage_ids: [],
+        coverage_hint: c.coverage_hint,
+      })),
+      uncovered_criteria: inputs.filter(c => c.coverage_hint === "gap").map(c => c.criterion_id),
+    };
+  }
+
+  function decisionFor(pid: number, criteria: Array<{ criterion_id: string; verdict: string; evidence_ids: string[]; rationale: string }>, caseId: string): ProjectReviewDecisionV1 {
+    return {
+      schema_version: 1,
+      id: `rd_test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      project_card_id: pid,
+      review_case_id: caseId,
+      project_generation: 1,
+      action: "accept",
+      criteria: criteria as never,
+      outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "accepted",
+      authored_at: new Date().toISOString(),
+    } as unknown as ProjectReviewDecisionV1;
+  }
+
+  beforeEach(async () => {
+    const mod1 = await import("./project-review-validator.js");
+    ProjectReviewValidator = mod1.ProjectReviewValidator;
+    const mod2 = await import("./project-review-store.js");
+    ProjectReviewStore = mod2.ProjectReviewStore;
+    validator = new ProjectReviewValidator();
+    store = new ProjectReviewStore();
+  });
+
+  function seed(snapshot: ReviewCaseSnapshot): { pid: number; caseId: string } {
+    const pid = 8800 + (++seq);
+    store.insertContract({
+      schema_version: 1,
+      id: `pc_test_${pid}`,
+      digest: `digest_${pid}`,
+      project_card_id: pid,
+      goal: "Build the feature",
+      criteria: snapshot.root_contract.criteria as never,
+      required_outputs: [{ id: "o1", description: "Report", kind: "file", required: true }],
+      constraints: [],
+      limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+    store.initializeSupervision(pid, `pc_test_${pid}`);
+    const snap = { ...snapshot, project_card_id: pid };
+    const { id } = store.insertReviewCase(pid, 1, 1, snap, "digest_snap");
+    store.stateTransition(pid, ["executing"] as never, "review_ready", { review_round: 1 });
+    return { pid, caseId: id };
+  }
+
+  it("rejects citing artifact evidence from failed children (the #1656 shape)", () => {
+    const snapshot = snapshotWith([{
+      criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "failed",
+      successContracts: [], failContracts: ["pc_failed"],
+      positive: [], negative: ["attempt:a_fail:artifact:a1"],
+    }]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_fail:artifact:a1"], rationale: "handoff exists" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => /no successful mapped child/.test(e.message))).toBe(true);
+    expect(errors.some(e => /not positive evidence/.test(e.message))).toBe(true);
+  });
+
+  it("rejects citing negative evidence for a supported criterion", () => {
+    const snapshot = snapshotWith([{
+      criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "supported",
+      successContracts: ["pc_ok"], failContracts: [],
+      positive: ["attempt:a_ok:check:v1"], negative: ["attempt:a_ok:check:v2"],
+    }]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v2"], rationale: "check v2 ran" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => /not positive evidence/.test(e.message))).toBe(true);
+  });
+
+  it("accepts a satisfied criterion citing only positive evidence from a successful child", () => {
+    const snapshot = snapshotWith([{
+      criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "supported",
+      successContracts: ["pc_ok"], failContracts: [],
+      positive: ["attempt:a_ok:check:v1"], negative: [],
+    }]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors).toHaveLength(0);
+  });
+
+  it("a conflicting criterion accepts with positive evidence", () => {
+    const snapshot = snapshotWith([{
+      criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "conflicting",
+      successContracts: ["pc_ok"], failContracts: ["pc_failed"],
+      positive: ["attempt:a_ok:check:v1"], negative: ["attempt:a_fail:check:v9"],
+    }]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "positive lane evidence" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors).toHaveLength(0);
+  });
+
+  it("rejects a required failed criterion accepted as satisfied", () => {
+    const snapshot = snapshotWith([{
+      criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "failed",
+      successContracts: [], failContracts: ["pc_failed"],
+      positive: [], negative: ["attempt:a_fail:artifact:a1"],
+    }]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_fail:artifact:a1"], rationale: "report exists" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => /no successful mapped child/.test(e.message))).toBe(true);
+  });
+
+  it("an optional failed criterion is disclosed and accepted as unsatisfied with a rationale", () => {
+    const snapshot = snapshotWith([
+      {
+        criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "supported",
+        successContracts: ["pc_ok"], failContracts: [],
+        positive: ["attempt:a_ok:check:v1"], negative: [],
+      },
+      {
+        criterion_id: "r2", required: false, execution_owner: "delegated", coverage_hint: "failed",
+        successContracts: [], failContracts: ["pc_failed2"],
+        positive: [], negative: ["attempt:a_fail2:artifact:a2"],
+      },
+    ]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+      { criterion_id: "r2", verdict: "unsatisfied", evidence_ids: [], rationale: "source lane failed; report remains useful" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors).toHaveLength(0);
+  });
+
+  it("keeps Orc-owned criteria on their rationale-only evidence path", () => {
+    const snapshot = snapshotWith([
+      {
+        criterion_id: "r1", required: true, execution_owner: "delegated", coverage_hint: "supported",
+        successContracts: ["pc_ok"], failContracts: [],
+        positive: ["attempt:a_ok:check:v1"], negative: [],
+      },
+      {
+        criterion_id: "q1", required: true, execution_owner: "orc", coverage_hint: "orc_owned",
+        successContracts: [], failContracts: [],
+        positive: [], negative: [],
+      },
+    ]);
+    const { pid, caseId } = seed(snapshot);
+    const decision = decisionFor(pid, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+      { criterion_id: "q1", verdict: "satisfied", evidence_ids: [], rationale: "synthesis reads correctly" },
+    ], caseId);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors).toHaveLength(0);
+  });
+});
+
+describe("ProjectReviewValidator #1791 captured-report evidence", () => {
+  let validator: InstanceType<typeof ProjectReviewValidator>;
+  let store: InstanceType<typeof ProjectReviewStore>;
+  let seq = 0;
+
+  const REPORT_ID = "report:run-9:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+  function reportSnapshot(reportState: "captured" | "unavailable"): ReviewCaseSnapshot {
+    return {
+      schema_version: 1,
+      project_card_id: 99,
+      generation: 1,
+      round: 1,
+      created_at: "2026-09-09T00:00:00.000Z",
+      root_contract: {
+        id: "pc_test_99",
+        digest: "digest_99",
+        goal: "Build the feature",
+        criteria: [
+          { id: "r1", description: "Lane work", required: true, execution_owner: "delegated", evidence_expectation: "artifact" },
+          { id: "q1", description: "Meld into dossier", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        ],
+        required_outputs: [{ id: "o1", description: "Report", kind: "file", required: true }],
+        limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      },
+      criterion_inputs: [
+        { criterion_id: "r1", description: "Lane work", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: ["pc_ok"], successful_mapped_child_contract_ids: ["pc_ok"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["attempt:a_ok:check:v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "q1", description: "Meld into dossier", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: reportState === "captured" ? [REPORT_ID] : [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
+      ],
+      contradiction_candidates: [],
+      uncovered_criteria: [],
+      child_summaries: [],
+      peer_contributions: [],
+      budgets: { total_cost: 0, total_tokens: 0, wall_clock_ms: 1000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 1,
+      contradiction_count: 0,
+      report_evidence: reportState === "captured"
+        ? { state: "captured", evidence_id: REPORT_ID, run_id: "run-9", path: "/w/Dossier.md", captured_at: "2026-09-09T00:00:00.000Z", digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", size_bytes: 42, mtime_ms: 1, validation: { ok: true }, content: "# Dossier" }
+        : { state: "unavailable", code: "report_read_failed", run_id: "run-9", path: "/w/Dossier.md" },
+    };
+  }
+
+  function seedReport(pid: number, snapshot: ReviewCaseSnapshot): string {
+    store.insertContract({
+      schema_version: 1,
+      id: `pc_test_${pid}`,
+      digest: `digest_${pid}`,
+      project_card_id: pid,
+      goal: "Build the feature",
+      criteria: snapshot.root_contract.criteria as never,
+      required_outputs: [{ id: "o1", description: "Report", kind: "file", required: true }],
+      constraints: [],
+      limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+    store.initializeSupervision(pid, `pc_test_${pid}`);
+    const { id } = store.insertReviewCase(pid, 1, 1, { ...snapshot, project_card_id: pid }, "digest_snap");
+    store.stateTransition(pid, ["executing"] as never, "review_ready", { review_round: 1 });
+    return id;
+  }
+
+  function acceptDecision(pid: number, caseId: string, criteria: Array<{ criterion_id: string; verdict: string; evidence_ids: string[]; rationale: string }>, outputEvidence: string[]): ProjectReviewDecisionV1 {
+    return {
+      schema_version: 1,
+      id: `rd_rep_${Date.now()}_${++seq}`,
+      project_card_id: pid,
+      review_case_id: caseId,
+      project_generation: 1,
+      action: "accept",
+      criteria: criteria as never,
+      outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: outputEvidence }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "accepted",
+      authored_at: new Date().toISOString(),
+    } as unknown as ProjectReviewDecisionV1;
+  }
+
+  beforeEach(async () => {
+    const mod1 = await import("./project-review-validator.js");
+    ProjectReviewValidator = mod1.ProjectReviewValidator;
+    const mod2 = await import("./project-review-store.js");
+    ProjectReviewStore = mod2.ProjectReviewStore;
+    validator = new ProjectReviewValidator();
+    store = new ProjectReviewStore();
+  });
+
+  it("accepts an Orc-owned criterion and output evidence citing the captured report id", () => {
+    const pid = 9100 + (++seq);
+    const snapshot = reportSnapshot("captured");
+    const caseId = seedReport(pid, snapshot);
+    const decision = acceptDecision(pid, caseId, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+      { criterion_id: "q1", verdict: "satisfied", evidence_ids: [REPORT_ID], rationale: "dossier quality reviewed against the lane" },
+    ], [REPORT_ID]);
+    expect(validator.validateDecision(decision, { ...snapshot, project_card_id: pid })).toHaveLength(0);
+  });
+
+  it("rejects unknown output evidence ids", () => {
+    const pid = 9200 + (++seq);
+    const snapshot = reportSnapshot("captured");
+    const caseId = seedReport(pid, snapshot);
+    const decision = acceptDecision(pid, caseId, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+      { criterion_id: "q1", verdict: "satisfied", evidence_ids: [REPORT_ID], rationale: "reviewed" },
+    ], ["report:foreign:sha256:nope"]);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => e.path === "$.outputs[o1].evidence_ids" && /unknown evidence id/.test(e.message))).toBe(true);
+  });
+
+  it("rejects the captured report id cited as delegated-worker proof", () => {
+    const pid = 9300 + (++seq);
+    const snapshot = reportSnapshot("captured");
+    const caseId = seedReport(pid, snapshot);
+    const decision = acceptDecision(pid, caseId, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: [REPORT_ID], rationale: "report exists" },
+      { criterion_id: "q1", verdict: "satisfied", evidence_ids: [REPORT_ID], rationale: "reviewed" },
+    ], [REPORT_ID]);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => /not compatible with criterion "r1"/.test(e.message))).toBe(true);
+  });
+
+  it("registers no report evidence for negative observations", () => {
+    const pid = 9400 + (++seq);
+    const snapshot = reportSnapshot("unavailable");
+    const caseId = seedReport(pid, snapshot);
+    const decision = acceptDecision(pid, caseId, [
+      { criterion_id: "r1", verdict: "satisfied", evidence_ids: ["attempt:a_ok:check:v1"], rationale: "verified" },
+      { criterion_id: "q1", verdict: "satisfied", evidence_ids: [REPORT_ID], rationale: "reviewed" },
+    ], []);
+    const errors = validator.validateDecision(decision, { ...snapshot, project_card_id: pid });
+    expect(errors.some(e => /unknown evidence id/.test(e.message))).toBe(true);
   });
 });

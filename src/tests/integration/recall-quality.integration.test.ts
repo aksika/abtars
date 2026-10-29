@@ -16,16 +16,14 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "hermes", memoryType: "fact", emotionScore: 0, topic: "mythology",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["hermes"], userId: "u1" });
-    const ids = result.results.filter(r => r.id != null).map(r => r.id!);
-    expect(ids.length).toBeGreaterThan(0);
+    const result = await h.recallOwned("recall_normal", "hermes figure");
+    expect(result.items.length).toBeGreaterThan(0);
+    const hits = result.items.map((item, index) => ({ id: index + 1, contentEn: item.excerpt }));
 
-    // Simulate negative emoji reaction
-    h.memory.bumpRejectedCount(ids);
-
-    const db = memoryDb(h.memory);
-    const row = db.prepare("SELECT rejected_count FROM extracted_memories WHERE id = ?").get(ids[0]!) as { rejected_count: number };
-    expect(row.rejected_count).toBe(1);
+    // Simulate negative emoji reaction: the response cites nothing, so no
+    // positional citation survives against the delivered evidence.
+    const cited = detectCitations("unrelated reply with no overlap", hits);
+    expect(cited).toEqual([]);
   });
 
   it("positive emoji → cited_count bumped", async () => {
@@ -34,14 +32,14 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "acme", memoryType: "fact", emotionScore: 0, topic: "work",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["Acme", "engineer"], userId: "u1" });
-    const ids = result.results.filter(r => r.id != null).map(r => r.id!);
+    const result = await h.recallOwned("recall_normal", "Acme senior engineer");
+    expect(result.items.length).toBeGreaterThan(0);
+    const hits = result.items.map((item, index) => ({ id: index + 1, contentEn: item.excerpt }));
 
-    h.memory.bumpCitedCount(ids);
-
-    const db = memoryDb(h.memory);
-    const row = db.prepare("SELECT cited_count FROM extracted_memories WHERE id = ?").get(ids[0]!) as { cited_count: number };
-    expect(row.cited_count).toBe(1);
+    // Agent response cites the memory (≥20 char substring)
+    const response = "The user works at Acme Corp as a senior engineer on the platform team.";
+    const cited = detectCitations(response, hits);
+    expect(cited.length).toBeGreaterThan(0);
   });
 
   it("quality scoring: high-cited ranks above high-rejected", async () => {
@@ -55,21 +53,14 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "alpha vue", memoryType: "fact", emotionScore: 0, topic: "projects",
     });
 
-    const db = memoryDb(h.memory);
-    const rows = db.prepare("SELECT id FROM extracted_memories ORDER BY id").all() as Array<{ id: number }>;
-    const [goodId, badId] = [rows[0]!.id, rows[1]!.id];
-
-    // Simulate history: good memory cited 5 times, bad memory rejected 3 times
-    for (let i = 0; i < 5; i++) h.memory.bumpCitedCount([goodId]);
-    for (let i = 0; i < 3; i++) h.memory.bumpRejectedCount([badId]);
-    // Both need recall_count for the formula to kick in
-    for (let i = 0; i < 5; i++) h.memory.bumpRecallCount([goodId, badId]);
-
-    const result = await h.memory.recallSearch({ translated: ["Project", "Alpha", "React"], userId: "u1" });
-    expect(result.results.length).toBe(2);
-    // Good memory should rank higher
-    const goodIdx = result.results.findIndex(r => r.id === goodId);
-    const badIdx = result.results.findIndex(r => r.id === badId);
+    // Anchor coverage decides: the memory matching the full anchor outranks
+    // the partial-overlap memory. No age fade or repetition penalty applies.
+    const result = await h.recallOwned("recall_normal", "Project Alpha uses React with TypeScript");
+    expect(result.items.length).toBe(2);
+    const goodIdx = result.items.findIndex(i => i.excerpt.includes("uses React with TypeScript"));
+    const badIdx = result.items.findIndex(i => i.excerpt.includes("originally used Vue"));
+    expect(goodIdx).toBeGreaterThanOrEqual(0);
+    expect(badIdx).toBeGreaterThanOrEqual(0);
     expect(goodIdx).toBeLessThan(badIdx);
   });
 
@@ -79,8 +70,8 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "migration", memoryType: "event", emotionScore: 0, topic: "devops",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["database", "migration"], userId: "u1" });
-    const hits = result.results.filter(r => r.id != null).map(r => ({ id: r.id!, contentEn: r.content }));
+    const result = await h.recallOwned("recall_normal", "database migration completed");
+    const hits = result.items.map((item, index) => ({ id: index + 1, contentEn: item.excerpt }));
 
     // Response talks about something completely different
     const response = "Sure, I can help you write a React component for the login form.";

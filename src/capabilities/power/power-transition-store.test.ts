@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PowerTransitionStore } from "./power-transition-store.js";
+import type { PowerTransitionState } from "./types.js";
 import { currentTestSandbox } from "../../test-support/runtime-isolation.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -36,7 +37,7 @@ describe("PowerTransitionStore", () => {
 
   it("default constructor writes under sandboxed ABTARS_HOME", () => {
     const store = new PowerTransitionStore();
-    const state = {
+    const state: PowerTransitionState = {
       state: "suspending",
       taskId: "test",
       requestedAt: Date.now(),

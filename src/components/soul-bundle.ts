@@ -3,7 +3,6 @@
  * One function, one matrix. Replaces scattered injection logic.
  */
 import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logDebug, logWarn, logError } from "./logger.js";
@@ -11,7 +10,7 @@ import { abtarsHome, abtarsRoot, abmindHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import { describeSoulInputs } from "./soul-input-manifest.js";
 import type { SessionType } from "./spin-types.js";
-import type { SessionSoulBundle } from "./memory-runtime.js";
+import { asSessionSoulBundle, type SessionSoulBundle } from "./memory-runtime.js";
 
 const TAG = "soul-bundle";
 
@@ -30,17 +29,9 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   O: null, // Orchestrator — dedicated prompt loaded separately
   W: null, // Worker — dedicated prompt file (core/prompts/worker.md)
   D: null, // Dreamy — sleep prompt loaded separately
-  H: "I am the Healer. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
+  H: "I am the Healer. I stand at the edge of the abyss and look for cracks. I diagnose system failures from the symptoms, logs, and error messages given to me — trace them to the root, attempt a repair, and act now. Do not ask for symptoms or introduce yourself. If unfixable by available means, state plainly: Requires human intervention.",
   K: null, // Skill — skill instructions define behavior; never loads A's SOUL
 };
-
-function buildModelInstructions(): string {
-  const lines: string[] = [];
-  if (getEnv().primingModelTopics) {
-    lines.push("End each response with [TOPICS: kw1, kw2, kw3] — your top 3 topics from this exchange. Keep them English, lowercase, concise.");
-  }
-  return lines.length > 0 ? `# Model Instructions\n\n${lines.join("\n")}` : "";
-}
 
 function buildCurrentTime(): string {
   const now = new Date();
@@ -49,12 +40,28 @@ function buildCurrentTime(): string {
 }
 
 /**
+ * Where the mutable sleep-curated parts (profile, notes, core facts) live.
+ * New daemons serve the addressable parts map, so session-start owns them
+ * ("session-start"); older daemons serve only the legacy fields, so the
+ * system prompt keeps carrying them ("system-prompt") — exactly today's
+ * behavior, stale copy and duplication included, but no part dropped during
+ * rollout.
+ */
+export type MutablePartsOwner = "session-start" | "system-prompt";
+
+/**
  * Build the SOUL bundle for any session type.
  *
- * Main (A): full 9-part bundle (identity, tools, profile, notes, facts, skills, model-instructions, emotional, users, time)
- * Others: identity one-liner + core facts + skills + time
+ * Main (A): system-prompt authority keeps the immutable, human-managed parts
+ * (SOUL.md, memory-tools.md) plus skills, model instructions, users and time.
+ * The mutable sleep-curated parts (profile, notes, core facts) live here only
+ * for older daemons; with a parts-capable daemon session-start assembly owns
+ * them via the addressable map, read fresh every session (#1869 — kills the
+ * double injection and the stale boot copy).
+ * Others: identity one-liner + skills + time (non-Main types never carried
+ * core files; the old header comment claiming core facts here was stale).
  */
-export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | null): string | null {
+export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | null, mutableOwner: MutablePartsOwner = "session-start"): string | null {
   const parts: string[] = [];
 
   if (type === "A") {
@@ -72,20 +79,25 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
       const minimal = fallback ? readOr(fallback.path) : "";
       if (minimal) parts.push(minimal);
       else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
-    } else {
-      // Normal: full bundle
+    } else if (mutableOwner === "system-prompt") {
+      // Older daemon without the parts map: the full legacy bundle. The
+      // stale copy and the session-start duplication persist exactly as
+      // today — working, and no part dropped during rollout.
       if (bundle!.soul) parts.push(bundle!.soul);
       if (bundle!.profile) parts.push(bundle!.profile);
       if (bundle!.notes) parts.push(bundle!.notes);
       if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
       if (bundle!.coreFacts) parts.push(bundle!.coreFacts);
+    } else {
+      // Normal: system-prompt-owned parts only. Profile/notes/coreFacts
+      // arrive via session-start parts (#1869); pushing them here too would
+      // inject every mutable file twice per session (stale + fresh copies).
+      if (bundle!.soul) parts.push(bundle!.soul);
+      if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
     }
 
     const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
-
-    const modelInstructions = buildModelInstructions();
-    if (modelInstructions) parts.push(modelInstructions);
 
     try {
       const registry = loadUsers();
@@ -116,8 +128,12 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
     const identity = TYPE_IDENTITY[type];
     if (identity) parts.push(identity);
 
-    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
-    if (skillsCatalog) parts.push(skillsCatalog);
+    // #1786: P answers peer chat with zero tools — the private skills catalog
+    // is neither needed nor disclosed to the answering turn.
+    if (type !== "P") {
+      const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
+      if (skillsCatalog) parts.push(skillsCatalog);
+    }
   }
 
   parts.push(buildCurrentTime());
@@ -132,7 +148,32 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
   return resolveVariables(parts.join("\n\n---\n\n"));
 }
 
-/** #1009: Resolve template variables in prompts. */
+/** Runtime surface needed to fetch the Main SOUL bundle from abmind. */
+export interface MainSoulAssemblyRuntime {
+  assembleSessionContext(input: {
+    identity: { principalId: string; executionId: string };
+    includeHistory: false;
+  }): Promise<{ soulBundle?: unknown }>;
+}
+
+/**
+ * #1940 R3: fetch Main's SOUL bundle from abmind for a new Pi session. A
+ * failed or empty fetch throws — the caller fails session creation visibly
+ * instead of substituting another bundle.
+ */
+export async function fetchMainSoulBundle(
+  memoryRuntime: MainSoulAssemblyRuntime,
+  principalId: string,
+): Promise<SessionSoulBundle> {
+  const sessionContext = await memoryRuntime.assembleSessionContext({
+    identity: { principalId, executionId: "session-start" },
+    includeHistory: false,
+  });
+  const bundle = asSessionSoulBundle(sessionContext.soulBundle);
+  if (!bundle) throw new Error("abmind returned no SOUL bundle for the new session");
+  return bundle;
+}
+
 function resolveVariables(text: string): string {
   return text.replaceAll("{instance_name}", getInstanceName());
 }

@@ -16,6 +16,11 @@ const mockPiExecutor = vi.hoisted(() => vi.fn(function () {
   return {
     onTransition: vi.fn(),
     onProgress: vi.fn(),
+    onCapacityReleased: vi.fn(),
+    setSettlementRouter: vi.fn(),
+    setInputSuspendHook: vi.fn(),
+    setExternalSessionCloser: vi.fn(),
+    setInterruptRouter: vi.fn(),
     startWithClaim: vi.fn(),
   };
 }));
@@ -97,8 +102,8 @@ vi.mock("../components/commands/handlers-pi.js", () => ({
 }));
 
 vi.mock("../components/reconciler.js", () => ({
-  setPiService: vi.fn(),
   requestReconcile: vi.fn(),
+  requestWorkerDispatch: vi.fn(),
 }));
 
 describe("phasePiExecutor — #1440 disabled seed and enabled boot", () => {
@@ -135,7 +140,7 @@ describe("phasePiExecutor — #1440 disabled seed and enabled boot", () => {
     });
     mockResolvePiInstallation.mockReturnValue({
       state: "compatible",
-      installation: { version: "0.83.0", source: "path", pinStatus: "at-pin" },
+      installation: { version: "0.85.1", source: "path", pinStatus: "at-pin" },
     });
     const ctx = createBootCtx();
     const { phasePiExecutor } = await import("./phase-pi-executor.js");

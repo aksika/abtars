@@ -1,0 +1,170 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-yFmFe3",
+  "startedAt": 1786404787656,
+  "durationMs": 484136,
+  "passed": 25,
+  "failed": 7,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=86fed999-0d4 card=#1 session=1786404815_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786404815_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=320203 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file appeared in the workspace"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "run1-cancel-accepted",
+      "ok": false,
+      "detail": "run reached terminal status completed before cancel could be issued"
+    },
+    {
+      "step": "bridge-restart-1",
+      "ok": true,
+      "detail": "bridge respawned (pid 320707)"
+    },
+    {
+      "step": "restart-preserves-terminal",
+      "ok": false,
+      "detail": "status after restart=completed (expected cancelled)"
+    },
+    {
+      "step": "stale-steer-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run 86fed999-0d4 is not active (status: completed)"
+    },
+    {
+      "step": "stale-reply-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run 86fed999-0d4 is not active (status: completed)"
+    },
+    {
+      "step": "run2-start",
+      "ok": true,
+      "detail": "runId=3ba8f3c5-e41 gen=1"
+    },
+    {
+      "step": "run2-running",
+      "ok": true,
+      "detail": "run2 active before restart"
+    },
+    {
+      "step": "bridge-restart-2",
+      "ok": true,
+      "detail": "bridge respawned (pid 320931)"
+    },
+    {
+      "step": "run2-interrupt-on-restart",
+      "ok": true,
+      "detail": "run2 status after restart=interrupted (expected interrupted)"
+    },
+    {
+      "step": "run2-resume",
+      "ok": false,
+      "detail": "resume reply: ❌ Pi session file not found at /tmp/pi-journey-yFmFe3/home/.pi/agent/sessions/--tmp-pi-journey-yFmFe3-workspace--/2026-08-10T23-34-41-766Z_019fee07-4566-7231-bcc9-733bc2de5161.jsonl"
+    },
+    {
+      "step": "run4-start",
+      "ok": true,
+      "detail": "runId=bc2394cc-7b4 gen=1"
+    },
+    {
+      "step": "run5-queued",
+      "ok": true,
+      "detail": "runId=e7af57a7-7b1 (capacity 1 — expected queued)"
+    },
+    {
+      "step": "run5-stays-queued",
+      "ok": true,
+      "detail": "run5 status after create=queued (capacity held by run4)"
+    },
+    {
+      "step": "run4-terminal",
+      "ok": true,
+      "detail": "run4 terminal status=completed"
+    },
+    {
+      "step": "run5-auto-start-on-release",
+      "ok": false,
+      "detail": "run5 did NOT start within 75s after capacity release (contract violation candidate)"
+    },
+    {
+      "step": "bridge-restart-3",
+      "ok": true,
+      "detail": "bridge respawned (pid 321862)"
+    },
+    {
+      "step": "run5-preserved-queued",
+      "ok": true,
+      "detail": "run5 status after restart=queued (preserved queued)"
+    },
+    {
+      "step": "run5-woken-after-restart",
+      "ok": false,
+      "detail": "run5 never started after restart (boot wake did not start the preserved queued run)"
+    },
+    {
+      "step": "final-no-live-code-sessions",
+      "ok": true,
+      "detail": "no live Code sessions remain"
+    },
+    {
+      "step": "final-pi-children",
+      "ok": true,
+      "detail": "pi children in run root: 0"
+    },
+    {
+      "step": "shutdown-no-orphan-process",
+      "ok": true,
+      "detail": "pi --mode rpc children after shutdown: 0"
+    },
+    {
+      "step": "db-runs-terminal",
+      "ok": false,
+      "detail": "3ba8f3c5-e41:interrupted, 86fed999-0d4:completed, bc2394cc-7b4:completed, e7af57a7-7b1:queued"
+    },
+    {
+      "step": "db-cards-terminal",
+      "ok": false,
+      "detail": "#1:delivered, #2:running, #3:delivered, #4:failed"
+    }
+  ]
+}

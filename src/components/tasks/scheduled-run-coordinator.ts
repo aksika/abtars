@@ -224,10 +224,16 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         }
         if (card && (card.status === "delivered" || card.status === "failed")) {
           const delivered = card.status === "delivered";
+          // #1935: a failed project card carries the runner's terminal reason
+          // (for restart interruption, the exact interruption reason). Report
+          // that reason instead of a generic recovery phrase.
+          const failureDetail = card.error && card.error.length > 0
+            ? card.error
+            : `restart recovery: project terminal (${card.status})`;
           settleRunOnce({
             entry, run, outcome: delivered ? "success" : "failed",
             diagnostic: delivered ? undefined : makeTaskFailure("interruption", "restart_interrupted", "executing",
-              `restart recovery: project terminal (${card.status})`, "none"),
+              failureDetail, "none"),
             detail: delivered ? `restart_recovery: project delivered` : `restart_recovery: project terminal (${card.status})`,
             resultPath: card.result_path ?? undefined,
             cardId: run.cardId,

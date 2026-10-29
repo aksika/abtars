@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig, getModelsForProvider, computeCostDisplay } from "./transport-config.js";
-import type { TransportConfig, ModelCatalog } from "./transport-config.js";
+import type { TransportConfig, ModelCatalog, AgentAssignment } from "./transport-config.js";
 import { _setWarmedForTest, _resetForTest } from "./transport/pi-catalog.js";
 
 const MODELS: ModelCatalog = {
@@ -84,11 +84,45 @@ describe("resolveAgent", () => {
 });
 
 describe("getEnvFallback", () => {
-  it("returns openrouter defaults", () => {
-    const fb = getEnvFallback();
-    expect(fb.providerName).toBe("openrouter");
-    expect(fb.provider.transport).toBe("api");
-    expect(fb.model).toBe("minimax/minimax-m2.5");
+  it("returns configured provider/model from env", () => {
+    const origProvider = process.env["DEFAULT_PROVIDER"];
+    const origModel = process.env["DEFAULT_MODEL"];
+    process.env["DEFAULT_PROVIDER"] = "openrouter";
+    process.env["DEFAULT_MODEL"] = "minimax/minimax-m2.5";
+    try {
+      const fb = getEnvFallback();
+      expect(fb.providerName).toBe("openrouter");
+      expect(fb.provider.transport).toBe("api");
+      expect(fb.model).toBe("minimax/minimax-m2.5");
+    } finally {
+      if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider; else delete process.env["DEFAULT_PROVIDER"];
+      if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel; else delete process.env["DEFAULT_MODEL"];
+    }
+  });
+  it("resolves the opencode inference endpoint for the shipped default (#1827, Pi 1.3)", () => {
+    const origProvider = process.env["DEFAULT_PROVIDER"];
+    const origModel = process.env["DEFAULT_MODEL"];
+    process.env["DEFAULT_PROVIDER"] = "opencode";
+    process.env["DEFAULT_MODEL"] = "muse-spark-1.3-contributor-free";
+    try {
+      const fb = getEnvFallback();
+      expect(fb.providerName).toBe("opencode");
+      expect(fb.provider.endpoint).toBe("https://opencode.ai/inference/v1");
+    } finally {
+      if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider; else delete process.env["DEFAULT_PROVIDER"];
+      if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel; else delete process.env["DEFAULT_MODEL"];
+    }
+  });
+  it("throws when DEFAULT_PROVIDER or DEFAULT_MODEL missing", () => {    const origProvider = process.env["DEFAULT_PROVIDER"];
+    const origModel = process.env["DEFAULT_MODEL"];
+    delete process.env["DEFAULT_PROVIDER"];
+    delete process.env["DEFAULT_MODEL"];
+    try {
+      expect(() => getEnvFallback()).toThrow(/DEFAULT_PROVIDER and DEFAULT_MODEL must be set/);
+    } finally {
+      if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider;
+      if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel;
+    }
   });
 });
 
@@ -287,6 +321,37 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
     if (result.ok) return;
     expect(result.issues.some(i => i.code === "model_provider_incompatible" && i.path.startsWith("routes.pi-ai.fallbacks"))).toBe(true);
   });
+
+  it("#1748: accepts an explicit valid cacheRetention on a provider", () => {
+    const result = validateTransportConfig(mkPi({
+      providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: "long" } },
+    }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("#1748: accepts cacheRetention none/short/long and rejects anything else at validation", () => {
+    for (const value of ["none", "short", "long"]) {
+      const okResult = validateTransportConfig(mkPi({
+        providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: value } },
+      }));
+      expect(okResult.ok).toBe(true);
+    }
+    const bad = validateTransportConfig(mkPi({
+      providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: "medium" } },
+    }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.issues.some(i => i.code === "invalid_provider_field" && i.path === "providers.openrouter.cacheRetention")).toBe(true);
+    }
+  });
+
+  it("#1748: cacheRetention absent means short — the provider entry stays valid without it", () => {
+    const result = validateTransportConfig(mkPi());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.providers["openrouter"]!.cacheRetention).toBeUndefined();
+    }
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -437,117 +502,50 @@ describe("#1467 — target route provider readiness", () => {
   });
 });
 
-// ── Demotion tests (#567) ───────────────────────────────────────────────────
+// ── Demotion retirement (#1932) ─────────────────────────────────────────────
 
-import { cleanDemotedModels } from "./transport-config.js";
-
-describe("resolveAgent with demotion", () => {
-  it("marks demoted primary — runtime FallbackPolicy handles skipping", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      agents: {
-        ...TRANSPORT.agents,
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
-      },
-      fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama" }],
-    };
-    // resolveAgent no longer auto-promotes — FallbackPolicy handles demoted models at runtime
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6"); // still returns configured primary
-    expect(r.fallbacks).toHaveLength(1);
-    expect(r.fallbacks[0]!.model).toBe("minimax-m2.5:cloud");
-  });
-
-  it("filters demoted fallbacks from returned list", () => {
+describe("resolveAgent ignores legacy demotion metadata", () => {
+  it("returns the configured primary regardless of demoted flags", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       routes: {
-        acp: {
-          agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
-          fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
-          ],
-        },
-      },
-    };
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6");
-    expect(r.fallbacks).toEqual([]);
-  });
-
-  it("uses primary anyway when all models demoted", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      routes: {
+        ...TRANSPORT.routes,
         acp: {
           agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" } as any,
-            dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
-          },
-          fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
-          ],
-        },
-      },
-    };
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6"); // falls back to primary
-  });
-});
-
-describe("cleanDemotedModels", () => {
-  const ra = { agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } }, fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any] };
-
-  it("keeps demoted fallbacks but does not remove them", () => {
-    const tc: TransportConfig = { ...TRANSPORT, routes: { acp: { ...ra } } };
-    cleanDemotedModels(tc);
-    const tcRa = tc.routes["acp"]!;
-    expect(tcRa.fallbacks).toHaveLength(1);
-    expect(tcRa.fallbacks![0]!.model).toBe("minimax-m2.5:cloud");
-  });
-
-  it("resurrects chosen model (clears demotion)", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      routes: {
-        acp: {
-          agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as AgentAssignment,
             dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
           },
           fallbacks: [],
         },
       },
     };
-    cleanDemotedModels(tc, "claude-sonnet-4.6");
-    const tcRa = tc.routes["acp"]!;
-    expect((tcRa.agents["main"] as any).demoted).toBeUndefined();
-    expect((tcRa.agents["main"] as any).demotedReason).toBeUndefined();
+    // Legacy demotion keys are inert: no filtering, no promotion.
+    const r = resolveAgent("main", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6");
   });
 
-  it("keeps all fallbacks — demoted and non-demoted", () => {
+  it("keeps demoted fallbacks in the returned list", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       routes: {
         acp: {
           agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
           fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama" },
-            { model: "dead-model", provider: "ollama", demoted: "2026-05-22" } as any,
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as AgentAssignment,
           ],
         },
       },
     };
-    cleanDemotedModels(tc);
-    const tcRa = tc.routes["acp"]!;
-    expect(tcRa.fallbacks).toHaveLength(2);
+    const r = resolveAgent("main", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6");
+    expect(r.fallbacks).toEqual([{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" }]);
   });
 });
 
-describe("computeCostDisplay (#1614)", () => {
-  it("renders $/1M with 2 decimals, zero-padded (per-token input)", () => {
-    expect(computeCostDisplay({ input: 0.14 / 1_000_000, output: 0.28 / 1_000_000 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
-    expect(computeCostDisplay({ input: 0.4 / 1_000_000, output: 1.2 / 1_000_000 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
+describe("computeCostDisplay (#1614, $/1M contract #1830)", () => {
+  it("renders $/1M with 2 decimals, zero-padded", () => {
+    expect(computeCostDisplay({ input: 0.14, output: 0.28 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
+    expect(computeCostDisplay({ input: 0.4, output: 1.2 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
     expect(computeCostDisplay({ input: 0, output: 0 })).toEqual({ inputPer1M: "0.00", outputPer1M: "0.00" });
   });
 });
@@ -565,7 +563,7 @@ describe("getModelsForProvider — pi-catalog fallback (#1613)", () => {
 
   afterEach(() => _resetForTest());
 
-  it("returns pi models with $/token costs for a pi-mapped provider with no curated entries", () => {
+  it("returns pi models with $/1M costs for a pi-mapped provider with no curated entries", () => {
     _setWarmedForTest(fakePiModels() as never);
     const out = getModelsForProvider("opencode-go", {});
     expect(out.map(m => m.id)).toEqual(["deepseek-v4-flash", "kimi-k3"]); // sorted by input cost
@@ -577,16 +575,16 @@ describe("getModelsForProvider — pi-catalog fallback (#1613)", () => {
       transports: ["opencode-go"],
       status: "alive",
     });
-    // #1614: pi rates are $/1M — synthetic entries normalize to the $/token ModelCost contract.
-    expect(flash.entry.cost.input).toBe(0.14 / 1_000_000);
-    expect(flash.entry.cost.output).toBe(0.28 / 1_000_000);
+    // #1830: pi rates are $/1M and pass through untouched.
+    expect(flash.entry.cost!.input).toBe(0.14);
+    expect(flash.entry.cost!.output).toBe(0.28);
   });
 
   it("leaves curated providers untouched even when pi is warmed", () => {
     _setWarmedForTest(fakePiModels([...piList(), { id: "claude-sonnet-4.6", contextWindow: 1000000, maxTokens: 16384, cost: { input: 3, output: 15 } }]) as never);
     const out = getModelsForProvider("kiro-free", MODELS);
     expect(out.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
-    expect(out[0]!.entry.cost.input).toBe(3.0); // models.json values untouched
+    expect(out[0]!.entry.cost!.input).toBe(3.0); // models.json values untouched
   });
 
   it("returns empty for an uncurated pi provider whose catalog exceeds the picker cap", () => {

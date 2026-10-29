@@ -5,6 +5,7 @@ import { RequesterContributionService } from "../peer-help/requester-contributio
 import { getPeerTransport } from "../peer-transport/index.js";
 import { kanbanUpdate, kanbanFail, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { randomUUID } from "node:crypto";
 
 const TAG = "peer-help";
@@ -31,7 +32,7 @@ async function resolveEnrolledPeers(names: string[]): Promise<string[]> {
 
 export const peerAskHelpTool: ToolDefinition = {
   name: "peer_ask_help",
-  description: "Ask a remote peer for help with a task. If peer is omitted, auto-selects an enrolled peer whose inventory matches required capabilities. The receiving peer independently decides whether to accept, decline, or defer.",
+  description: "Delegate durable work to a remote peer (lane 2: delegation, NOT chat). Always creates supervised work with acceptance, review, and terminal result delivery on the receiver. For quick discussion/Q&A with no work products, use peer_session instead. The receiving peer independently decides whether to accept, decline, or defer.",
   parameters: {
     type: "object",
     properties: {
@@ -52,6 +53,11 @@ export const peerAskHelpTool: ToolDefinition = {
   async execute(args: Record<string, string>, toolContext): Promise<string> {
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(toolContext)) {
+      // #1856: record the correlated denial — relay tools stay offered to
+      // peer-origin workers so the attempt reaches this boundary, which is
+      // the only layer that still refuses relay. The live gate observes it.
+      const { auditDeny } = await import("../tool-sandbox.js");
+      auditDeny("peer_ask_help", undefined, toolContext?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", toolContext?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
 
@@ -133,18 +139,6 @@ export const peerAskHelpTool: ToolDefinition = {
     const resolvedPeer = resolvePeerName(peer);
     if (!resolvedPeer.ok) return JSON.stringify({ error: resolvedPeer.message, code: resolvedPeer.code });
     peer = resolvedPeer.peer;
-
-    // #1433/#1357: An explicit peer with no inventory may still be asked over a
-    // live route; receiver admission is authoritative. Contradictory inventory
-    // is an early rejection, never a fallback to another peer. Automatic
-    // selection does not re-check at dispatch time — capability changes are
-    // resolved by receiver admission, which is authoritative.
-    if (args.peer && deduped.length > 0) {
-      const { getPeerInventory, hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
-      if (getPeerInventory(peer) && !hasAllCapabilities(peer, deduped)) {
-        return JSON.stringify({ error: `Peer ${peer} does not have the required capabilities: [${deduped.join(", ")}]` });
-      }
-    }
 
     if (!peer) {
       return JSON.stringify({ error: "No peer specified and none auto-selected" });
@@ -305,7 +299,7 @@ export const peerAskHelpTool: ToolDefinition = {
           const notes = (card?.notes ? JSON.parse(card.notes) : {}) as Record<string, unknown>;
           const priorAttempts = Array.isArray(notes.attempts) ? notes.attempts : [];
           kanbanUpdate(localCardId, { notes: JSON.stringify({ ...notes, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, attempts: priorAttempts }) });
-        } catch {}
+        } catch (bookErr) { logAndSwallow(TAG, "record failure state for card", bookErr); }
       }
       logWarn(TAG, `peer_ask_help failed: ${message}`);
       return JSON.stringify({ error: `peer_ask_help failed: ${message}`, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, local_card_id: localCardId });
@@ -408,8 +402,11 @@ function getContributionStore(): ContributionStore {
   return _contributionDb;
 }
 
-async function getActiveOrcProjectId(toolContext?: { orcContext?: { projectCardId: number } }): Promise<number | null> {
-  return toolContext?.orcContext?.projectCardId ?? null;
+/** #1850: exported for the relay-containment regression test. */
+export async function getActiveOrcProjectId(toolContext?: { orcContext?: { projectCardId: number }; workOrigin?: { rootCardId: number } }): Promise<number | null> {
+  // #1850: worker-originated contributions link through the dispatch-resolved
+  // root when no Orc turn context exists (supervised W workers never bind one).
+  return toolContext?.orcContext?.projectCardId ?? toolContext?.workOrigin?.rootCardId ?? null;
 }
 
 export function getPeerHelpTools(): ToolDefinition[] {

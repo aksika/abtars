@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 let db: import("better-sqlite3").Database;
 let dbPath: string;
 let TEST_HOME: string;
+let savedAbtarsHome: string | undefined;
 
 function createKanbanTable(db: import("better-sqlite3").Database): void {
   db.exec(`
@@ -54,6 +55,10 @@ beforeEach(async () => {
   const Database = resolveNativeDep("better-sqlite3");
   TEST_HOME = join(tmpdir(), `help-store-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
+  // #1844: admission binds a deterministic project workspace under
+  // abtarsHome() — isolate it so tests never mkdir into the real home.
+  savedAbtarsHome = process.env["ABTARS_HOME"];
+  process.env["ABTARS_HOME"] = TEST_HOME;
   dbPath = join(TEST_HOME, "test.db");
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -62,18 +67,19 @@ beforeEach(async () => {
 
 afterEach(() => {
   db.close();
+  if (savedAbtarsHome === undefined) delete process.env["ABTARS_HOME"];
+  else process.env["ABTARS_HOME"] = savedAbtarsHome;
   try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch {}
 });
 
 async function makeStore(admission?: unknown) {
   const { PeerHelpStore } = await import("./store.js");
-  const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
   const nerve = makeNerve();
   const kanban = makeKanban();
   // Production wires PeerHelpStore with requireTaskDatabase() — a wrapper whose
-  // transaction(fn) executes immediately and returns the value — and with a real
-  // ProjectReviewStore on the same database. Mirror that composition here so
-  // tests exercise the same semantics as the deployed bridge (#1616, #1618).
+  // transaction(fn) executes immediately and returns the value — and with a
+  // runner-backed admission port on the same database. Mirror that composition
+  // here so tests exercise the same semantics as the deployed bridge (#1792).
   const wrapped = {
     prepare: (sql: string) => {
       const stmt = db.prepare(sql);
@@ -86,8 +92,15 @@ async function makeStore(admission?: unknown) {
     exec: (sql: string) => db.exec(sql),
     transaction: <T>(fn: () => T): T => db.transaction(fn)(),
   };
-  const reviewStore = new ProjectReviewStore(wrapped as any);
-  const realAdmission = { ensureAwaitingContract: (id: number) => reviewStore.ensureAwaitingContract(id) };
+  const { WorkflowRunner } = await import("../orc-project/orc-workflow-runner.js");
+  const { WorkflowStore } = await import("../orc-project/orc-workflow-store.js");
+  const peerRunner = new WorkflowRunner(new WorkflowStore(wrapped as any));
+  const realAdmission = {
+    admitReceiverProject: (cardId: number, sourcePeer: string, sourceId: string) => {
+      const admitted = peerRunner.admitSupervised({ rootCardId: cardId, source: "peer", sourcePeer, sourceId });
+      if (admitted.kind === "conflict") throw new Error(`receiver admission failed: ${admitted.reason}`);
+    },
+  };
   const configuredAdmission = admission === null ? undefined : admission ?? realAdmission;
   const store = new PeerHelpStore(wrapped as any, kanban as any, nerve as any, configuredAdmission as any);
   return { store, nerve };
@@ -167,7 +180,7 @@ describe("PeerHelpStore", () => {
       expect(nerve.fired.filter(e => e === "card:queued")).toHaveLength(1);
     });
 
-    it("#1618 creates exactly one peer root, one awaiting_contract supervision row, and one accepted request", async () => {
+    it("#1792 admits exactly one peer root with one supervised run and one accepted request", async () => {
       const { store, nerve } = await makeStore();
       store.reserve("kp", "req1", "hash1");
       const result = store.acceptGeneric(
@@ -182,10 +195,12 @@ describe("PeerHelpStore", () => {
       expect(card.type).toBe("O");
       expect(card.status).toBe("queued");
 
-      const sup = db.prepare("SELECT state, contract_id FROM project_supervision WHERE project_card_id = ?").get(result.local_card_id) as any;
-      expect(sup).toBeDefined();
-      expect(sup.state).toBe("awaiting_contract");
-      expect(sup.contract_id).toBe(`awaiting:${result.local_card_id}`);
+      const run = db.prepare("SELECT run_id, root_kind, state FROM workflow_runs WHERE root_card_id = ?").get(result.local_card_id) as any;
+      expect(run).toBeDefined();
+      expect(run.root_kind).toBe("peer");
+      expect(run.state).toBe("admitted");
+      const cmds = db.prepare("SELECT COUNT(*) as cnt FROM workflow_commands WHERE run_id = ? AND action = 'plan'").get(run.run_id) as any;
+      expect(cmds.cnt).toBe(1);
 
       const req = db.prepare("SELECT state, contribution_ref FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?").get("kp", "req1") as any;
       expect(req.state).toBe("accepted");
@@ -193,7 +208,7 @@ describe("PeerHelpStore", () => {
       expect(nerve.fired.filter(e => e === "card:queued")).toHaveLength(1);
     });
 
-    it("#1618 concurrent admissions each get their own supervision row", async () => {
+    it("#1792 concurrent admissions each get their own supervised run", async () => {
       const { store } = await makeStore();
       store.reserve("kp", "req1", "hash1");
       store.reserve("kp", "req2", "hash2");
@@ -207,11 +222,11 @@ describe("PeerHelpStore", () => {
         { goal: "do y", title: "[help:kp] do y", sourcePeer: "kp", sourceId: "req2", deliveryMode: "silent" },
         { version: 1, request_id: "req2", decision: "accepted", contribution_ref: "help_def" },
       );
-      const sups = db.prepare("SELECT COUNT(*) as cnt FROM project_supervision WHERE state = 'awaiting_contract'").get() as any;
+      const sups = db.prepare("SELECT COUNT(*) as cnt FROM workflow_runs WHERE root_kind = 'peer' AND state = 'admitted'").get() as any;
       expect(sups.cnt).toBe(2);
     });
 
-    it("#1618 replay/conflict creates no second root, supervision row, or wake", async () => {
+    it("#1792 replay/conflict creates no second root, run, or wake", async () => {
       const { store, nerve } = await makeStore();
       store.reserve("kp", "req1", "hash1");
       store.acceptGeneric(
@@ -227,16 +242,16 @@ describe("PeerHelpStore", () => {
 
       const cards = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE source = 'peer'").get() as any;
       expect(cards.cnt).toBe(1);
-      const sups = db.prepare("SELECT COUNT(*) as cnt FROM project_supervision").get() as any;
-      expect(sups.cnt).toBe(1);
+      const runs = db.prepare("SELECT COUNT(*) as cnt FROM workflow_runs").get() as any;
+      expect(runs.cnt).toBe(1);
       const acc = db.prepare("SELECT COUNT(*) as cnt FROM peer_help_requests WHERE state = 'accepted'").get() as any;
       expect(acc.cnt).toBe(1);
       expect(nerve.fired.filter(e => e === "card:queued")).toHaveLength(1);
     });
 
-    it("#1618 rollback on admission failure leaves no card, no supervision, no accepted request, no wake", async () => {
+    it("#1792 rollback on admission failure leaves no card, no run, no accepted request, no wake", async () => {
       const { store, nerve } = await makeStore({
-        ensureAwaitingContract: () => { throw new Error("injected admission failure"); },
+        admitReceiverProject: () => { throw new Error("injected admission failure"); },
       });
       store.reserve("kp", "req1", "hash1");
       expect(() => store.acceptGeneric(
@@ -247,8 +262,8 @@ describe("PeerHelpStore", () => {
 
       const cards = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE source = 'peer'").get() as any;
       expect(cards.cnt).toBe(0);
-      const sups = db.prepare("SELECT COUNT(*) as cnt FROM project_supervision").get() as any;
-      expect(sups.cnt).toBe(0);
+      const runs = db.prepare("SELECT COUNT(*) as cnt FROM workflow_runs").get() as any;
+      expect(runs.cnt).toBe(0);
       const req = db.prepare("SELECT state FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?").get("kp", "req1") as any;
       expect(req.state).toBe("pending");
       expect(nerve.fired).toHaveLength(0);
@@ -405,6 +420,41 @@ describe("PeerHelpStore", () => {
       const { store } = await makeStore();
       store.reserve("kp", "req1", "hash1");
       expect(store.getPublicStatus("kp", "req1", "wrong_ref")).toBeNull();
+    });
+
+    it("#1680 emits an ISO-8601 updated_at that passes the strict requester parser", async () => {
+      const { store } = await makeStore();
+      store.reserve("kp", "req1", "hash1");
+      const { local_card_id } = store.acceptGeneric(
+        { originPeer: "kp", requestId: "req1", requestHash: "hash1" },
+        { goal: "do x", title: "[help:kp] do x", sourcePeer: "kp", sourceId: "req1", deliveryMode: "silent" },
+        { version: 1, request_id: "req1", decision: "accepted", contribution_ref: "help_abc" },
+      );
+      db.prepare("UPDATE kanban_board SET status = 'done', result_summary = 'done' WHERE id = ?").run(local_card_id);
+
+      const s = store.getPublicStatus("kp", "req1", "help_abc");
+      expect(s).not.toBeNull();
+      // SQLite's datetime('now') storage representation is 'YYYY-MM-DD HH:MM:SS'.
+      const stored = db.prepare("SELECT updated_at FROM peer_help_requests WHERE origin_peer = 'kp' AND request_id = 'req1'").get() as { updated_at: string };
+      expect(stored.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      // The public boundary emits ISO-8601 with timezone.
+      expect(s!.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      const { parseHelpStatus } = await import("./contract.js");
+      const parsed = parseHelpStatus(s);
+      expect(parsed.ok).toBe(true);
+    });
+
+    it("#1680 rejects a malformed persisted timestamp rather than emitting a contract-violating response", async () => {
+      const { store } = await makeStore();
+      store.reserve("kp", "req1", "hash1");
+      store.acceptGeneric(
+        { originPeer: "kp", requestId: "req1", requestHash: "hash1" },
+        { goal: "do x", title: "[help:kp] do x", sourcePeer: "kp", sourceId: "req1", deliveryMode: "silent" },
+        { version: 1, request_id: "req1", decision: "accepted", contribution_ref: "help_abc" },
+      );
+      db.prepare("UPDATE peer_help_requests SET updated_at = 'not-a-timestamp' WHERE origin_peer = 'kp' AND request_id = 'req1'").run();
+      expect(() => store.getPublicStatus("kp", "req1", "help_abc")).toThrow(/invalid persisted help timestamp/);
     });
   });
 

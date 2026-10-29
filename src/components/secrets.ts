@@ -7,7 +7,7 @@
  *   - directory ensure, per-process value cache
  *   - plaintext vs ENC: routing
  *   - cached derived key (loadKey + deriveKey, both from utils/crypto.ts)
- *   - public API: readSecret / writeSecret / initSecretsKey / clearSecretCache
+ *   - public API: readSecret / readSecretResult / writeSecret / initSecretsKey / clearSecretCache
  *
  * #1354: credential-store policy invariants. The store is the authoritative
  * persistent location for API keys and equivalent provider credentials:
@@ -173,46 +173,71 @@ function getSecretsKey(): Buffer | null {
   return cachedKey;
 }
 
-function readSecretValue(name: string, autoEncrypt: boolean): string | undefined {
+/**
+ * Policy-owned read outcome: distinguishes an absent/empty entry (`missing`)
+ * from an entry that exists but cannot be used (`unreadable` — unsafe file,
+ * inaccessible store, missing key, or undecryptable payload). The `value` is
+ * never exposed through the `unreadable` variant and no error text carrying
+ * file or payload data escapes this result (#1258).
+ */
+export type SecretReadResult =
+  | { status: "available"; value: string }
+  | { status: "missing" }
+  | { status: "unreadable" };
+
+function readSecretValueResult(name: string, autoEncrypt: boolean): SecretReadResult {
   syncSecretRoot();
-  if (!ensureSecretDir().safe) return undefined;
+  if (!ensureSecretDir().safe) return { status: "unreadable" };
   let path: string;
-  try { path = secretFilePath(name); } catch { return undefined; }
-  if (!inspectSecretFile(path).safe) return undefined;
+  try { path = secretFilePath(name); } catch { return { status: "unreadable" }; }
+  const inspected = inspectSecretFile(path);
+  if (!inspected.safe) {
+    return inspected.reason === "missing" ? { status: "missing" } : { status: "unreadable" };
+  }
   // #1354: safe automatic narrowing — an owned regular file is narrowed to
   // 0600; anything unsafe was already rejected above.
-  if (!narrowSecretFileMode(path)) return undefined;
+  if (!narrowSecretFileMode(path)) return { status: "unreadable" };
   // A normal read may have cached a legacy plaintext value during migration
   // conflict comparison. Boot must re-read the payload so it can still
   // upgrade that file to ENC: in this same process.
-  if (!autoEncrypt && cache.has(name)) return cache.get(name);
+  if (!autoEncrypt && cache.has(name)) return { status: "available", value: cache.get(name)! };
   try {
     const raw = readFileSync(path, "utf-8").trim();
-    if (!raw) return undefined;
+    if (!raw) return { status: "missing" };
     if (raw.startsWith("ENC:")) {
       const key = getSecretsKey();
-      if (!key) return undefined;
+      if (!key) return { status: "unreadable" };
       // crypto.decrypt expects the full "ENC:..." string and strips the prefix itself.
       const value = decrypt(raw, key);
-      if (value === null) return undefined;
+      if (value === null) return { status: "unreadable" };
       cache.set(name, value);
-      return value;
+      return { status: "available", value };
     }
     if (autoEncrypt) {
       const key = getSecretsKey();
       if (key) {
         try { atomicWriteSync(path, encrypt(raw, key), 0o600); }
-        catch { return undefined; }
+        catch { return { status: "unreadable" }; }
       }
     }
     cache.set(name, raw);
-    return raw;
-  } catch { return undefined; }
+    return { status: "available", value: raw };
+  } catch { return { status: "unreadable" }; }
 }
 
 /** Read a secret from ~/.abtars/secret/<name>. Cached per process. */
 export function readSecret(name: string): string | undefined {
-  return readSecretValue(name, false);
+  const result = readSecretValueResult(name, false);
+  return result.status === "available" ? result.value : undefined;
+}
+
+/**
+ * Policy-owned three-state read of a secret. Use this when the caller must
+ * tell an absent/empty entry apart from an existing but unsafe, unreadable,
+ * or undecryptable one (doctor probes, boot diagnostics).
+ */
+export function readSecretResult(name: string): SecretReadResult {
+  return readSecretValueResult(name, false);
 }
 
 /**
@@ -222,7 +247,8 @@ export function readSecret(name: string): string | undefined {
  * exception, but callers may also use this for other compatible legacy files.
  */
 export function loadSecretForBoot(name: string, opts?: { skipEncrypt?: boolean }): string | undefined {
-  return readSecretValue(name, !opts?.skipEncrypt);
+  const result = readSecretValueResult(name, !opts?.skipEncrypt);
+  return result.status === "available" ? result.value : undefined;
 }
 
 /** List safe regular files in the store without following symlinks. */

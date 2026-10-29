@@ -69,7 +69,7 @@ describe("shared-native-deps", () => {
       m.packages["better-sqlite3"] = dummyRecord("abtars");
       const m2 = addConsumer(m, "better-sqlite3", "abtars");
       const m3 = addConsumer(m2, "better-sqlite3", "abtars");
-      expect(m3.packages["better-sqlite3"].consumers).toEqual(["abtars"]);
+      expect(m3.packages["better-sqlite3"]?.consumers).toEqual(["abtars"]);
     });
 
     it("rejects incompatible ABI", () => {
@@ -95,7 +95,7 @@ describe("shared-native-deps", () => {
       m.packages["better-sqlite3"] = dummyRecord("abtars", { consumers: ["abtars", "abmind"] });
       const { manifest: m1, canDelete } = removeConsumer(m, "better-sqlite3", "abtars");
       expect(canDelete).toBe(false);
-      expect(m1.packages["better-sqlite3"].consumers).toEqual(["abmind"]);
+      expect(m1.packages["better-sqlite3"]?.consumers).toEqual(["abmind"]);
       const { manifest: m2, canDelete: canDelete2 } = removeConsumer(m1, "better-sqlite3", "abmind");
       expect(canDelete2).toBe(true);
       expect(m2.packages["better-sqlite3"]).toBeUndefined();

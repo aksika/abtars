@@ -19,13 +19,13 @@ All commands work on Telegram and Discord unless noted otherwise.
 | Command | Description |
 |---------|-------------|
 | `/models` | Show current model, transport, agent status |
-| `/models change` | Interactive 3-step picker (Telegram only) |
+| `/models change` | Interactive 4-stage picker (Telegram only) |
 | `/models quick <model>` | Instant switch on same provider |
 | `/models list [provider]` | List providers or models on a provider |
 | `/models restore` | Undo last model/provider switch |
 | `/models default` | Factory reset (transport.default.json) |
-| `/models health reset` | Reset model health buckets |
-| `/models emergency` | 🚨 Activate paid hailMary model |
+| `/models health reset` | Clear provider availability cooldowns |
+| `/models emergency` | Activate the emergency ACP fast path (hailMary) |
 | `/emergency` | Shortcut for `/models emergency` |
 
 ## Status & Diagnostics
@@ -39,6 +39,23 @@ All commands work on Telegram and Discord unless noted otherwise.
 | `/heartbeat` | Heartbeat diagnostics (tasks, last tick) |
 | `/mcp` | MCP server status |
 | `/hooks` | List configured hooks |
+
+## Orc Circuit Breakers
+
+Owner-only control surface for the supervised-project circuit breakers:
+
+| Command | Description |
+|---------|-------------|
+| `/orc` | Fuse state, limits, live window counts |
+| `/orc limits` | Configured breaker policy values |
+| `/orc reset project <id>` | Clear one card's fuse and counters |
+| `/orc reset bridge` | Clear the bridge-wide emergency fuse |
+| `/orc alerts status\|test\|mute <min>` | Alert delivery controls |
+
+A tripped fuse blocks new automatic Orc work for its scope until explicitly
+reset. Resets never reopen a failed card or reuse a terminal run — the next
+attempt gets a new identity. See [Kanban Board](kanban#recovery) for when
+this is needed.
 
 ## Memory
 
@@ -57,6 +74,7 @@ All commands work on Telegram and Discord unless noted otherwise.
 | `/tasks log <id>` | Last 5 runs for a task |
 | `/tasks pause <id>` | Pause a scheduled task |
 | `/tasks resume <id>` | Resume a paused task |
+| `/kanban nuke` | Reset the Kanban database on next bridge start (owner-only) |
 
 ## Skills & Mode
 
@@ -101,7 +119,7 @@ Types: **A**=Main, **B**=Browse, **C**=Code, **T**=Task.
 |---------|-------------|
 | `/full` | Raw output, TTS disabled |
 | `/short` | Clean responses (default) |
-| `/healing` | Toggle self-healer on/off |
+| `/healing` | Show SHA mode, policy, and active incidents (read-only) |
 
 ## Platform-specific
 

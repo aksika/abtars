@@ -371,19 +371,6 @@ export function parseContributionEvent(raw: unknown): { ok: true; value: PeerCon
   return { ok: true, value: r as unknown as PeerContributionEventV1 };
 }
 
-export function canonicalContributionHash(
-  request: PeerHelpRequestV1,
-  projectCardId: number | null,
-  rootCriteria: readonly string[],
-): string {
-  const { createHash } = require("node:crypto");
-  return createHash("sha256").update(JSON.stringify({
-    request_hash: canonicalRequestHash(request),
-    project_card_id: projectCardId,
-    root_criteria: [...rootCriteria].sort(),
-  })).digest("hex");
-}
-
 export function contributionEventDigest(event: PeerContributionEventV1): string {
   const { createHash } = require("node:crypto");
   return createHash("sha256").update(JSON.stringify({
@@ -407,7 +394,10 @@ export function canonicalRequestHash(request: PeerHelpRequestV1): string {
     version: request.version,
     request_id: request.request_id,
     goal: request.goal,
-    required_capabilities: [...request.required_capabilities].sort(),
+    // #1853: the receiver canonicalizes capabilities in parseHelpRequest before
+    // hashing; canonicalize identically here or the two nodes disagree about
+    // the identity of the same wire request.
+    required_capabilities: normalizeCapabilities(request.required_capabilities).sort(),
   };
   if (request.context) normal.context = request.context;
   if (request.priority) normal.priority = request.priority;

@@ -2,6 +2,7 @@ import { execAsync } from "./exec-async.js";
 import { logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { formatTaskLabel } from "../tasks/task-types.js";
+import type { TaskValidationFinding, TaskValidationResult } from "../tasks/task-validator.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_tasks";
@@ -12,67 +13,73 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   const now = new Date().toLocaleString("en-GB", { timeZone: tz, dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const { readEntries } = await import("../tasks/task-store.js");
-    const { readState } = await import("../tasks/task-state-store.js");
-    const entries = readEntries();
-    const active = entries.filter((e: any) => !e.fired);
-    active.sort((a: any, b: any) => {
-      const timeOf = (e: any): number => {
-        const s = e.schedule;
-        if (!s) return e.fireAt ?? 0;
-        const parts = s.split(" ");
-        return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
-      };
-      return timeOf(a) - timeOf(b);
-    });
-    const today = new Date();
-    const dow = today.getDay();
-    const lines = active.map((e: any) => {
-      const sched = e.schedule ?? "one-shot";
-      let runsToday = true;
-      if (sched !== "one-shot") {
-        const parts = sched.split(" ");
-        const dowField = parts[4] ?? "*";
-        if (dowField !== "*") {
-          const allowed = new Set<number>();
-          for (const seg of dowField.split(",")) {
-            if (seg.includes("-")) {
-              const [a, b] = seg.split("-").map(Number);
-              for (let i = a; i <= b; i++) allowed.add(i);
-            } else allowed.add(Number(seg));
+    const { readTaskCatalog } = await import("../tasks/task-store.js");
+    const { initializeState, readState } = await import("../tasks/task-state-store.js");
+    const catalog = readTaskCatalog();
+    if (catalog.kind === "unavailable") {
+      listing = `[warn] task catalog unavailable — cannot read tasks.json (${catalog.reason})`;
+    } else {
+      const entries = catalog.entries;
+      initializeState(entries);
+      const active = entries.filter((e: any) => !e.fired);
+      active.sort((a: any, b: any) => {
+        const timeOf = (e: any): number => {
+          const s = e.schedule;
+          if (!s) return e.fireAt ?? 0;
+          const parts = s.split(" ");
+          return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
+        };
+        return timeOf(a) - timeOf(b);
+      });
+      const today = new Date();
+      const dow = today.getDay();
+      const lines = active.map((e: any) => {
+        const sched = e.schedule ?? "one-shot";
+        let runsToday = true;
+        if (sched !== "one-shot") {
+          const parts = sched.split(" ");
+          const dowField = parts[4] ?? "*";
+          if (dowField !== "*") {
+            const allowed = new Set<number>();
+            for (const seg of dowField.split(",")) {
+              if (seg.includes("-")) {
+                const [a, b] = seg.split("-").map(Number);
+                for (let i = a; i <= b; i++) allowed.add(i);
+              } else allowed.add(Number(seg));
+            }
+            runsToday = allowed.has(dow);
           }
-          runsToday = allowed.has(dow);
         }
-      }
-      const state = readState(e.id);
-      const autoPaused = state?.autoPaused ?? false;
-      const defPaused = e.paused ?? false;
-      const isPaused = autoPaused || defPaused;
-      const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
-      const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
-      const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
-      const running = ctx.cronCurrentJob?.entryId === e.id;
-      const activeRun = state?.activeRun;
-      const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
-      const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
-      // #1520: show category/code plus failure count, latest occurrence, and
-      // the exact resume command.
-      let pauseMarker = "";
-      if (autoPaused) {
-        const inc = state?.lastIncident;
-        const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
-        const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
-        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
-      } else if (isActive) {
-        pauseMarker = ` [${activeRun.phase}]`;
-      } else if (state?.retrying) {
-        pauseMarker = " [retrying]";
-      } else if (state?.deferredAdmission) {
-        pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
-      }
-      return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
-    });
-    listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
+        const state = readState(e.id);
+        const autoPaused = state?.autoPaused ?? false;
+        const defPaused = e.paused ?? false;
+        const isPaused = autoPaused || defPaused;
+        const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
+        const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
+        const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
+        const running = ctx.cronCurrentJob?.entryId === e.id;
+        const activeRun = state?.activeRun;
+        const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
+        const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
+        // #1520: show category/code plus failure count, latest occurrence, and
+        // the exact resume command.
+        let pauseMarker = "";
+        if (autoPaused) {
+          const inc = state?.lastIncident;
+          const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
+          const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
+          pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
+        } else if (isActive) {
+          pauseMarker = ` [${activeRun.phase}]`;
+        } else if (state?.retrying) {
+          pauseMarker = " [retrying]";
+        } else if (state?.deferredAdmission) {
+          pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
+        }
+        return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
+      });
+      listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
+    }
   } catch (err) {
     logError("tasks", `Failed to read cron: ${err instanceof Error ? err.message : String(err)}`);
     listing = "(no active entries)";
@@ -212,6 +219,87 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   return true;
 }
 
+/**
+ * #1685: dry-run validation of the live task registry. Imports the shipped
+ * read-only validateTaskFile() engine in-process — never spawns the CLI and
+ * never enqueues work. The reply is deterministic plain text with bounded
+ * findings.
+ */
+export async function handleTasksValidate(text: string, ctx: CommandContext): Promise<boolean> {
+  const rest = text.replace(/^\/(tasks?|cron) validate\s*/i, "").trim();
+  if (rest) {
+    await ctx.reply("Usage: /task validate");
+    return true;
+  }
+  try {
+    const { validateTaskFile } = await import("../tasks/task-validator.js");
+    const result = validateTaskFile();
+    await ctx.reply(renderTaskValidation(result));
+  } catch (err) {
+    logAndSwallow(TAG, "validate task registry", err, "error");
+    await ctx.reply(`Task validation failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}
+
+const MAX_VALIDATION_FINDINGS = 40;
+const MAX_VALIDATION_CHARS = 3800;
+
+function renderTaskValidation(result: TaskValidationResult): string {
+  const header = [
+    `Task validation: ${result.ok ? "OK" : "FAILED"}`,
+    `Path: ${result.path}`,
+    `Entries: ${result.summary.entryCount}`,
+    `Valid entries: ${result.summary.validEntryCount}`,
+    `Findings: ${result.summary.findingCount}`,
+  ].join("\n");
+  if (result.ok) return header;
+  const lines: string[] = [];
+  for (const finding of result.findings) {
+    if (lines.length >= MAX_VALIDATION_FINDINGS) break;
+    const line = validationFindingLine(finding);
+    const total = header.length + lines.join("\n").length + line.length + 1;
+    if (total > MAX_VALIDATION_CHARS) break;
+    lines.push(line);
+  }
+  const omitted = result.summary.findingCount - lines.length;
+  if (omitted > 0) lines.push(`${omitted} more findings omitted`);
+  return [header, ...lines].join("\n");
+}
+
+function validationFindingLine(f: TaskValidationFinding): string {
+  const id = f.entryId ?? (f.entryIndex !== undefined ? `index ${f.entryIndex}` : "");
+  const path = f.configuredPath ?? f.path ?? "";
+  return [f.code, id, path, f.message].filter(Boolean).join(" | ");
+}
+
+/**
+ * #1664: operator clear of a reconcile quarantine. Release the durable row,
+ * then re-wake the card so it reconciles without waiting for an external event.
+ */
+export async function handleProjectUnquarantine(text: string, ctx: CommandContext): Promise<boolean> {
+  const raw = text.replace(/^\/project unquarantine\s*/i, "").trim();
+  const cardId = parseInt(raw, 10);
+  if (!raw || !Number.isInteger(cardId) || cardId <= 0) {
+    await ctx.reply("Usage: /project unquarantine <id>");
+    return true;
+  }
+  try {
+    const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+    const released = new ReconcileQuarantineStore().releaseQuarantine(cardId);
+    if (!released) {
+      await ctx.reply(`card ${cardId} is not quarantined`);
+      return true;
+    }
+    const { requestReconcile } = await import("../reconciler.js");
+    requestReconcile(cardId);
+    await ctx.reply(`+ Quarantine cleared for card ${cardId} — reconciliation resumed.`);
+  } catch (err) {
+    await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}
+
 export async function handleKanban(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     const { kanbanList, kanbanGetCard, kanbanSearch } = await import("../tasks/kanban-board.js");
@@ -254,8 +342,25 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
       return true;
     }
 
+    // /kanban nuke — schedule a Kanban database reset on next bridge start.
+    // Owner-only regardless of the /kanban root's access level: this is
+    // destructive. It writes a timestamp marker and returns immediately; it
+    // does not pause or wait for the bridge.
+    if (arg === "nuke") {
+      const isMaster = !ctx.userId || ctx.userId === "master"
+        || (await import("../user-registry.js")).loadUsers().byUserId.get(ctx.userId)?.role === "master";
+      if (!isMaster) {
+        await ctx.reply("⛔ Owner-only command.");
+        return true;
+      }
+      const { requestKanbanNuke } = await import("../tasks/kanban-nuke.js");
+      requestKanbanNuke();
+      await ctx.reply("+ Nuke requested. The Kanban database will be reset on the NEXT bridge start (within 5 minutes). Nothing is paused now.");
+      return true;
+    }
+
     // Anything else — usage hint
-    await ctx.reply(`Usage:\n  /kanban          — active cards\n  /kanban all      — all cards\n  /kanban <id>     — ticket detail\n  /kanban "<term>" — search`);
+    await ctx.reply(`Usage:\n  /kanban          — active cards\n  /kanban all      — all cards\n  /kanban <id>     — ticket detail\n  /kanban "<term>" — search\n  /kanban nuke     — reset board DB on next start (owner)`);
   } catch (err) {
     await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -304,7 +409,7 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
         const reviewSummary = summarizeReviewCase(store.getLatestReviewCase(c.id));
         if (reviewSummary) lines.push(` Review: ${reviewSummary.trim()}`);
       }
-    } catch {}
+    } catch { /* project supervision is an optional display enrichment; a store-read failure simply omits it */ }
   }
   if (c.labels) lines.push(`Labels:   ${c.labels}`);
   if (c.assignee && c.assignee !== "professor") lines.push(`Assignee: ${c.assignee}`);

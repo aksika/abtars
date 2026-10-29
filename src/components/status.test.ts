@@ -56,7 +56,6 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     uptimeMs: 180_000,
     watchdog: { pid: 99990, alive: true },
     securityMode: "owner-only",
-    trustMode: true,
     transport: { ready: true, type: "ACP", provider: "kiro", model: "kiro/claude-sonnet-4-6" },
     contextPercent: 42,
     platformStates: { telegram: true, discord: true, irc: false },
@@ -65,7 +64,9 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     kanban: { active: 0, total: 0 },
     shaPolicyConfigured: true,
     skillsActive: 5,
+    memory: null,
     soulBundle: { available: 4, total: 5 },
+    memoryTestMode: false,
     a2a: { running: true, port: 7100 },
     peersConfigured: 0,
     tasks: { recurring: 3, pending: 2, paused: 0 },
@@ -159,13 +160,13 @@ describe("renderOperatorStatus", () => {
     const out = renderOperatorStatus(
       makeOperatorView({
         warnings: [
-          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+          "Pi 0.86.0 is newer than the version abtars is built against (0.85.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.85.1'",
         ],
       }),
     );
     expect(out).toContain("warnings:      1");
-    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
-    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+    expect(out).toContain("Pi 0.86.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.85.1'");
   });
 
   it("omits the warnings section when there are none", () => {
@@ -211,13 +212,13 @@ describe("renderChatStatus", () => {
       makeOperatorView({
         runtime: makeRuntimeView(),
         warnings: [
-          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+          "Pi 0.86.0 is newer than the version abtars is built against (0.85.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.85.1'",
         ],
       }),
     );
     expect(out).toContain("Warnings:");
-    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
-    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+    expect(out).toContain("Pi 0.86.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.85.1'");
   });
 
   it("reflects mood from runtime failure signals", () => {
@@ -315,24 +316,26 @@ describe("collectDaemon macOS launchd probe labels", () => {
   });
 
   it("macOS user scope probes com.abtars.watchdog", () => {
-    const isMac = true;
-    const scope = "user";
+    const isMac: boolean = true;
+    const scope: string = "user";
     const unit = LINUX_USER_UNIT; // unitName("user") returns "abtars-watchdog"
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("com.abtars.watchdog");
   });
 
   it("Linux system scope uses unit name unchanged", () => {
-    const isMac = false;
-    const scope = "system";
+    // Widened from literals: documents the production decision table, where
+    // isMac/scope are runtime values, not constants.
+    const isMac: boolean = false;
+    const scope: string = "system";
     const unit = "abtars";
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("abtars");
   });
 
   it("Linux user scope uses unit name unchanged", () => {
-    const isMac = false;
-    const scope = "user";
+    const isMac: boolean = false;
+    const scope: string = "user";
     const unit = "abtars-watchdog";
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("abtars-watchdog");
@@ -374,5 +377,89 @@ describe("systemctl timeout in collectDaemon", () => {
     // requires a spawn wrapper mock and lives in a future integration test.
     // This placeholder test documents the requirement.
     expect(true).toBe(true);
+  });
+});
+
+// ── #1706: truthful chat memory status ───────────────────────────────────────
+
+describe("#1706 renderChatStatus — live memory semantics", () => {
+  it("renders the composing state with attempts and last bounded code", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 3, lastFailure: "endpoint_unavailable" },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory: composing (attempts=3, last=endpoint_unavailable)");
+    expect(out).not.toContain("abmind working");
+  });
+
+  it("a present soul-bundle directory cannot fake working while composing", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 1, lastFailure: "package_missing" },
+      soulBundle: { available: 4, total: 5 }, // files exist on disk — irrelevant
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory: composing");
+    expect(out).not.toContain("abmind working");
+  });
+
+  it("transitions to working through the SAME runtime object after upgrade", () => {
+    const runtime = makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 2, lastFailure: "negotiation_failed" },
+      soulBundle: null,
+    });
+    const view = makeOperatorView({ runtime });
+
+    const before = renderChatStatus(view);
+    expect(before).toContain("memory: composing (attempts=2, last=negotiation_failed)");
+
+    // Same object, same facade reference — only the live state changed.
+    runtime.memory = { state: "ready", composing: false };
+    runtime.soulBundle = { available: 5, total: 5 };
+
+    const after = renderChatStatus(view);
+    expect(after).toContain("memory: abmind working");
+    expect(after).toContain("soul bundle: 5/5 available");
+    expect(after).not.toContain("composing");
+  });
+
+  it("unavailable without active composition renders unavailable, not none", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: false },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("✗ memory: unavailable");
+  });
+
+  it("disabled memory renders disabled", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "disabled", composing: false },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("- memory: disabled");
+  });
+});
+
+describe("#1869 renderChatStatus — memory test mode", () => {
+  it("stays silent when the mode is off or unknown", () => {
+    for (const memoryTestMode of [false]) {
+      const view = makeOperatorView({ runtime: makeRuntimeView({ memoryTestMode }) });
+      const out = renderChatStatus(view);
+      expect(out).toContain("soul bundle: 4/5 available");
+      expect(out).not.toContain("memory test mode");
+    }
+  });
+
+  it("reports the mode when the daemon runs with MEMORY_TEST=ON", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({ memoryTestMode: true }) });
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory test mode: ON");
+    expect(out).toContain("MEMORY_TEST=ON");
   });
 });

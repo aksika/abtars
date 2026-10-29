@@ -21,7 +21,7 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
   return {
     executable: "/usr/bin/pi",
     packageRoot: "/usr/lib/pi-coding-agent",
-    version: "0.83.0",
+    version: "0.85.1",
     source: "path",
     pinStatus: "at-pin",
     moduleRoots: { ai: aiRoot, tui: tuiRoot, agentCore: agentCoreRoot },
@@ -31,7 +31,7 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
 function makeAiPackage(root: string, exports: unknown): void {
   mkdirSync(join(root, "dist", "api"), { recursive: true });
   mkdirSync(join(root, "dist", "providers"), { recursive: true });
-  writeFileSync(join(root, "dist", "index.js"), "export const createProvider = () => {};\nexport const isRetryableAssistantError = () => false;\n");
+  writeFileSync(join(root, "dist", "index.js"), "export const createProvider = () => {};\nexport const isContextOverflow = () => false;\n");
   writeFileSync(join(root, "dist", "api", "openai-completions.js"), "export const stream = async function*(){};\nexport const streamSimple = async function*(){};\n");
   writeFileSync(join(root, "dist", "providers", "all.js"), "export const builtinModels = () => ({});\n");
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", exports }));
@@ -62,11 +62,11 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result.ai.status).toBe("loadable");
-    expect(result["ai-api"].status).toBe("loadable");
-    expect(result["ai-providers"].status).toBe("loadable");
-    expect(result.tui.status).toBe("loadable");
-    expect(result["agent-core"].status).toBe("loadable");
+    expect(result.ai?.status).toBe("loadable");
+    expect(result["ai-api"]?.status).toBe("loadable");
+    expect(result["ai-providers"]?.status).toBe("loadable");
+    expect(result.tui?.status).toBe("loadable");
+    expect(result["agent-core"]?.status).toBe("loadable");
   });
 
   it("reports unloadable when exports field is missing", () => {
@@ -83,10 +83,10 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result["agent-core"].status).toBe("unloadable");
+    expect(result["agent-core"]?.status).toBe("unloadable");
     expect(typeof (result["agent-core"] as { status: "unloadable"; reason: string }).reason).toBe("string");
-    expect(result.ai.status).toBe("loadable");
-    expect(result.tui.status).toBe("loadable");
+    expect(result.ai?.status).toBe("loadable");
+    expect(result.tui?.status).toBe("loadable");
   });
 
   it("reports unloadable when subpath export is missing", () => {
@@ -102,9 +102,9 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result["ai-api"].status).toBe("unloadable");
-    expect(result["ai-providers"].status).toBe("unloadable");
-    expect(result.ai.status).toBe("loadable");
+    expect(result["ai-api"]?.status).toBe("unloadable");
+    expect(result["ai-providers"]?.status).toBe("unloadable");
+    expect(result.ai?.status).toBe("loadable");
   });
 
   it("reports unloadable when package.json is malformed JSON", () => {
@@ -120,9 +120,9 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result.ai.status).toBe("unloadable");
-    expect(result["ai-api"].status).toBe("unloadable");
-    expect(result["ai-providers"].status).toBe("unloadable");
+    expect(result.ai?.status).toBe("unloadable");
+    expect(result["ai-api"]?.status).toBe("unloadable");
+    expect(result["ai-providers"]?.status).toBe("unloadable");
   });
 
   it("reports unloadable when export target file is missing", () => {
@@ -141,7 +141,7 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result.ai.status).toBe("unloadable");
+    expect(result.ai?.status).toBe("unloadable");
     const unloadable = result.ai as { status: "unloadable"; reason: string };
     expect(unloadable.reason).toMatch(/missing\.js/);
   });
@@ -165,7 +165,7 @@ describe("inspectPiRuntimeSurfaces", () => {
 
     const result = inspectPiRuntimeSurfaces(installation);
 
-    expect(result.ai.status).toBe("unloadable");
+    expect(result.ai?.status).toBe("unloadable");
     expect((result.ai as { status: "unloadable"; reason: string }).reason).toMatch(/escapes package root/);
   });
 });

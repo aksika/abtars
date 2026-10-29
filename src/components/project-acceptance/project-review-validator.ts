@@ -159,6 +159,23 @@ export class ProjectReviewValidator {
       }
     }
 
+    // #1791: a captured final report is case evidence. Register its stable id
+    // globally, and criterion-locally wherever the assembler listed it
+    // (Orc-owned criteria only — the assembler never attaches it to delegated
+    // criteria, so citing it as delegated-worker proof fails the compatibility
+    // check below). Negative observations register nothing.
+    const reportEvidence = caseSnapshot.report_evidence;
+    if (reportEvidence?.state === "captured") {
+      validEvidenceIds.add(reportEvidence.evidence_id);
+      for (const ci of caseSnapshot.criterion_inputs) {
+        if (ci.artifact_observation_ids.includes(reportEvidence.evidence_id)) {
+          const criterionEvidence = evidenceIdsByCriterion.get(ci.criterion_id) ?? new Set<string>();
+          criterionEvidence.add(reportEvidence.evidence_id);
+          evidenceIdsByCriterion.set(ci.criterion_id, criterionEvidence);
+        }
+      }
+    }
+
     // Evidence references in decisions must be known
     for (const c of decision.criteria) {
       const compatibleEvidenceIds = evidenceIdsByCriterion.get(c.criterion_id);
@@ -174,6 +191,17 @@ export class ProjectReviewValidator {
       for (const eid of cc.evidence_ids) {
         if (!validEvidenceIds.has(eid)) {
           errors.push(error("bad_reference", `$.contradictions[${cc.id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        }
+      }
+    }
+    // #1791: output references are checked against the case's known ids, like
+    // criterion and contradiction references. A captured report id cited for an
+    // output resolves here; unknown or foreign ids fail instead of riding
+    // along silently.
+    for (const o of decision.outputs) {
+      for (const eid of o.evidence_ids) {
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.outputs[${o.output_id}].evidence_ids`, `unknown evidence id "${eid}"`));
         }
       }
     }
@@ -224,6 +252,18 @@ export class ProjectReviewValidator {
     // execution ownership, not a set that implies everything is required.
     const policyByCriterionId = new Map(caseSnapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
 
+    // #1656: positive evidence is ONLY what the assembler projected from
+    // successful mapped children — observed checks and existing artifacts.
+    // Negative evidence, worker claims, failed-child artifact ids, retry
+    // markers, and contradiction-only ids can never satisfy a criterion.
+    const positiveEvidenceByCriterion = new Map<string, Set<string>>();
+    for (const ci of caseSnapshot.criterion_inputs) {
+      const positive = new Set<string>();
+      for (const eid of ci.observed_evidence_ids) positive.add(eid);
+      for (const eid of ci.artifact_observation_ids) positive.add(eid);
+      positiveEvidenceByCriterion.set(ci.criterion_id, positive);
+    }
+
     for (const c of decision.criteria) {
       const policy = policyByCriterionId.get(c.criterion_id);
       const required = policy?.required ?? true;
@@ -240,9 +280,28 @@ export class ProjectReviewValidator {
         continue;
       }
       if (c.verdict === "satisfied") {
-        // Delegated satisfaction requires durable evidence from the case
-        if (owner === "delegated" && c.evidence_ids.length === 0) {
-          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+        if (owner === "delegated") {
+          // #1656: delegated satisfaction requires proven provenance — at
+          // least one successful mapped child, a supported/conflicting hint,
+          // and cited evidence drawn ONLY from that criterion's positive set.
+          const input = policyByCriterionId.get(c.criterion_id);
+          const successContracts = input?.successful_mapped_child_contract_ids ?? [];
+          const hint = input?.coverage_hint;
+          if (successContracts.length === 0) {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `satisfied delegated criterion "${c.criterion_id}" has no successful mapped child — failed, missing, or inconclusive lanes cannot satisfy it`));
+          }
+          if (hint !== "supported" && hint !== "conflicting") {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `satisfied delegated criterion "${c.criterion_id}" is not supported by mapped children (hint: ${hint ?? "gap"})`));
+          }
+          if (c.evidence_ids.length === 0) {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+          }
+          const positive = positiveEvidenceByCriterion.get(c.criterion_id) ?? new Set<string>();
+          for (const eid of c.evidence_ids) {
+            if (!positive.has(eid)) {
+              errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `evidence id "${eid}" is not positive evidence from a successful mapped child for criterion "${c.criterion_id}"`));
+            }
+          }
         }
         // #1605: Orc-owned criteria are satisfied by the Orc's own evaluation —
         // a non-empty rationale plus the immutable case is their evidence; no
@@ -318,16 +377,78 @@ export class ProjectReviewValidator {
       return errors;
     }
 
-    for (const item of _decision.repair.items) {
+    // #1686: legal source contracts are the case's mapped child contracts;
+    // the durable contract re-read (and its provenance) is the service's job.
+    const legalSourceIds = new Set<string>();
+    const contractsByCriterion = new Map<string, Set<string>>();
+    for (const ci of _caseSnapshot.criterion_inputs) {
+      const covering = contractsByCriterion.get(ci.criterion_id) ?? new Set<string>();
+      for (const cid of ci.mapped_child_contract_ids) {
+        legalSourceIds.add(cid);
+        covering.add(cid);
+      }
+      contractsByCriterion.set(ci.criterion_id, covering);
+    }
+    // #1686: only delegated root criteria can be repaired — Orc-owned,
+    // unknown, duplicate, or empty affected mappings are rejected.
+    const delegatedRootIds = new Set(
+      _caseSnapshot.root_contract.criteria
+        .filter(c => c.execution_owner === "delegated")
+        .map(c => c.id),
+    );
+    const seenItems = new Set<string>();
+    for (const [itemIndex, item] of _decision.repair.items.entries()) {
+      const itemPath = `$.repair.items[${itemIndex}]`;
+      if (seenItems.has(item.id)) {
+        errors.push(error("duplicate_id", `${itemPath}.id`, `duplicate repair item id "${item.id}"`));
+      }
+      seenItems.add(item.id);
+      if (!item.source_contract_id || item.source_contract_id.trim().length === 0) {
+        errors.push(error("missing_field", `${itemPath}.source_contract_id`, "source_contract_id is required — reference the mapped Worker contract whose evidence this repair must preserve"));
+      } else if (!legalSourceIds.has(item.source_contract_id)) {
+        errors.push(error("bad_reference", `${itemPath}.source_contract_id`, `unknown source contract "${item.source_contract_id}" — it must be a mapped child contract of this review case`));
+      }
       if (item.affected_criterion_ids.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].affected_criterion_ids`, "at least one affected criterion is required"));
+        errors.push(error("missing_field", `${itemPath}.affected_criterion_ids`, "at least one affected criterion is required"));
       }
       if (!item.strategy || item.strategy.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].strategy`, "strategy is required"));
+        errors.push(error("missing_field", `${itemPath}.strategy`, "strategy is required"));
       }
       if (!item.required_evidence || item.required_evidence.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].required_evidence`, "required evidence is required"));
+        errors.push(error("missing_field", `${itemPath}.required_evidence`, "required evidence is required"));
       }
+      const affected = new Set<string>();
+      for (const acid of item.affected_criterion_ids) {
+        if (affected.has(acid)) {
+          errors.push(error("duplicate_id", `${itemPath}.affected_criterion_ids`, `duplicate affected criterion "${acid}"`));
+          continue;
+        }
+        affected.add(acid);
+        if (!delegatedRootIds.has(acid)) {
+          errors.push(error("bad_reference", `${itemPath}.affected_criterion_ids`, `affected criterion "${acid}" is not a delegated root criterion — Orc-owned or unknown criteria cannot be repaired`));
+          continue;
+        }
+        if (item.source_contract_id && !(contractsByCriterion.get(acid)?.has(item.source_contract_id))) {
+          errors.push(error("bad_reference", `${itemPath}.source_contract_id`, `source contract "${item.source_contract_id}" does not cover affected criterion "${acid}" — one repair item may only affect root criteria that its source contract maps`));
+        }
+      }
+    }
+
+    // #1686: the same source contract must not be referenced by conflicting
+    // repair items — overlapping affected criteria across items make the
+    // repair ownership ambiguous.
+    const criteriaBySource = new Map<string, Map<string, string>>();
+    for (const [itemIndex, item] of _decision.repair.items.entries()) {
+      if (!item.source_contract_id) continue;
+      const byItem = criteriaBySource.get(item.source_contract_id) ?? new Map<string, string>();
+      for (const acid of item.affected_criterion_ids) {
+        const priorItem = byItem.get(acid);
+        if (priorItem !== undefined && priorItem !== item.id) {
+          errors.push(error("bad_reference", `$.repair.items[${itemIndex}].affected_criterion_ids`, `affected criterion "${acid}" is already claimed by repair item "${priorItem}" on the same source contract "${item.source_contract_id}" — split conflicting repairs into separate source contracts`));
+        }
+        byItem.set(acid, item.id);
+      }
+      criteriaBySource.set(item.source_contract_id, byItem);
     }
 
     return errors;

@@ -83,7 +83,7 @@ describe("Spin — #1611 Dreamy quarantine and late-result fencing", () => {
     // Quarantine mid-execution — exactly like the sleep pump on a provider timeout.
     expect(spin.finalizeExactSession(session.id, "aksika", "provider_timeout")).toBe(true);
     expect(session.status).toBe("ended");
-    expect(runtime.session).toHaveBeenCalledWith("dreamy", undefined, { candidatePolicy: "configured-only" });
+    expect(runtime.session).toHaveBeenCalledWith("dreamy", undefined, { candidatePolicy: "configured-only", sessionType: "D" });
     expect(session.candidatePolicy).toBe("configured-only");
 
     // The transport settles late, ignoring cancellation.

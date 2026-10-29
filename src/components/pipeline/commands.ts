@@ -83,7 +83,11 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const cmdCtx: CommandContext = {
     sessionKey: effectiveId, chatId: ctx.chatId, userId: ctx.userId ?? "unknown", platform: msg.platform, reply: ctx.reply,
     editReply,
-    transport, config, startedAt,
+    // #1800: read the live pipeline transport at use so a command that
+    // awaited a rebuild sees the rewired value. The local `transport` const
+    // above stays the pre-handler capture for interrupt routing.
+    get transport() { return deps.transport; },
+    config, startedAt,
     memoryRuntime, memoryConfig, nlmConfig,
     idleSave,
     sessionManager: deps.sessionManager,
@@ -98,6 +102,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     loadedCapabilities: deps.loadedCapabilities,
     selfHealerTask: deps.selfHealerTask,
     hailMary: deps.hailMary,
+    emergencyExecution: deps.emergencyExecution,
     rebuildTransport: deps.rebuildTransport,
     phaseHealth: deps.phaseHealth,
     registry: deps.registry,

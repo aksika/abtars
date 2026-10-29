@@ -4,12 +4,15 @@ import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps }
 import type { PipelineDeps } from "../../components/message-pipeline.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { InboundMessage } from "../../types/platform.js";
+import { BOOT_GREETING_TOKEN, type InternalBootMetadata } from "../../types/platform.js";
 import type { ManagedSession } from "../../components/spin-types.js";
 
 // Mock TelegramApi
+let capturedApi: Record<string, ReturnType<typeof vi.fn>> | null = null;
+
 vi.mock("./telegram-api.js", () => ({
   TelegramApi: vi.fn(function () {
-    return {
+    const api = {
       getMe: vi.fn().mockResolvedValue({ username: "testbot" }),
       setMyCommands: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(1),
@@ -21,6 +24,8 @@ vi.mock("./telegram-api.js", () => ({
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       getUpdates: vi.fn().mockResolvedValue([]),
     };
+    capturedApi = api;
+    return api;
   }),
 }));
 
@@ -35,13 +40,31 @@ vi.mock("../../components/user-registry.js", () => ({
 vi.mock("./telegram-poller.js", () => ({
   TelegramPoller: vi.fn(function (this: unknown, _api: unknown, _timeout: number, handler: Function) {
     (TelegramPollerMock as any)._handler = handler;
+    (TelegramPollerMock as any).injectUpdate = vi.fn((update: unknown) => handler(update));
     return {
       start: vi.fn(),
       stop: vi.fn(),
-      injectUpdate: vi.fn((update: unknown) => handler(update)),
+      injectUpdate: (TelegramPollerMock as any).injectUpdate,
     };
   }),
 }));
+
+// #1800: partial mock so the real model picker resolves deterministically.
+// Everything not listed is the real module, so other adapter flows are
+// unaffected. Journey tests set explicit return values per case.
+const tcMocks = vi.hoisted(() => ({
+  loadTransport: vi.fn(),
+  writeTransportConfig: vi.fn(),
+  getModelsForProvider: vi.fn(),
+  validateProviderReady: vi.fn(),
+  formatValidationError: vi.fn(),
+  resolveAgent: vi.fn(),
+}));
+
+vi.mock("../../components/transport-config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/transport-config.js")>();
+  return { ...actual, ...tcMocks };
+});
 
 const TelegramPollerMock: any = {};
 
@@ -62,6 +85,11 @@ function mockTransport(): IKiroTransport {
     destroy: vi.fn(),
     transportCommands: [],
     get isReady() { return true; },
+    // Documented "unavailable" values: -1 unknown percent, zero/empty rest.
+    get contextPercent() { return -1; },
+    get answerOnly() { return ""; },
+    get toolCallsSucceeded() { return 0; },
+    get intermediateDeliveredText() { return ""; },
   };
 }
 
@@ -119,6 +147,7 @@ describe("TelegramAdapter", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    TelegramPollerMock.injectUpdate = undefined;
     transport = mockTransport();
     deps = makeDeps(transport);
     adapter = new TelegramAdapter(makeConfig(), deps);
@@ -131,17 +160,19 @@ describe("TelegramAdapter", () => {
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     } as ManagedSession);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue({
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     } as ManagedSession);
   });
 
@@ -157,7 +188,7 @@ describe("TelegramAdapter", () => {
 
   it("authorize checks user ID", () => {
     const allowed: InboundMessage = {
-      platform: "telegram", channelId: "100", sessionKey: "telegram:100",
+      platform: "telegram", channelId: "100", userId: "master",
       senderId: "42", senderName: "Test", text: "hi", timestamp: Date.now(),
       isGroup: false, isVoice: false,
     };
@@ -175,6 +206,21 @@ describe("TelegramAdapter", () => {
     // If no error, start succeeded (getMe + setMyCommands + poller.start called)
   });
 
+  it("setMyCommands payload equals the registry Telegram projection", async () => {
+    const { getPlatformCommands } = await import("../../components/command-registry.js");
+    await adapter.start();
+    const expected = getPlatformCommands("telegram").map(c => ({ command: c.name, description: c.description }));
+    const setMyCommands = capturedApi?.setMyCommands;
+    expect(setMyCommands).toHaveBeenCalledWith(expected);
+    if (!setMyCommands) throw new Error("expected setMyCommands mock");
+    const payload = (setMyCommands.mock.calls[0]![0] as Array<{ command: string }>);
+    const names = payload.map(c => c.command);
+    expect(new Set(names).size).toBe(names.length);
+    expect(payload).toContainEqual({ command: "full", description: "Raw output, TTS disabled" });
+    expect(payload).toContainEqual({ command: "healing", description: "Self-healing status (read-only)" });
+    expect(payload.find(c => c.command === "pi")).toBeUndefined();
+  });
+
   it("stop is safe to call without start", () => {
     expect(() => adapter.stop()).not.toThrow();
   });
@@ -182,10 +228,23 @@ describe("TelegramAdapter", () => {
   it("injectMessage creates synthetic update after start", async () => {
     await adapter.start();
     adapter.injectMessage({
-      platform: "telegram", channelId: "100", sessionKey: "telegram:100",
+      platform: "telegram", channelId: "100", userId: "master",
       senderId: "42", senderName: "Test", text: "queued msg",
       timestamp: Date.now(), isGroup: false, isVoice: false,
     });
+  });
+
+  it("routes boot metadata directly so Telegram does not discard the question", async () => {
+    await adapter.start();
+    const internal = { kind: "boot_greeting", dreamQuestion: { id: "q-1", text: "Which city do you prefer?" } } as InternalBootMetadata;
+    Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+    adapter.injectMessage({
+      platform: "telegram", channelId: "42", senderId: "42", senderName: "Test",
+      userId: "master", text: "[SESSION START] You just came online. Greet the user.",
+      timestamp: Date.now(), isGroup: false, isVoice: false, internal,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect((TelegramPollerMock as any).injectUpdate).not.toHaveBeenCalled();
   });
 
   describe("handleUpdate — text messages", () => {
@@ -263,6 +322,112 @@ describe("TelegramAdapter", () => {
     });
   });
 
+  describe("handleUpdate — reactions target answer records (#1913)", () => {
+    function reactionUpdate(messageId: number, emoji = "👍") {
+      return {
+        update_id: 100,
+        message_reaction: {
+          chat: { id: 42, type: "private" },
+          user: { id: 42, first_name: "Test" },
+          message_id: messageId,
+          new_reaction: [{ type: "emoji", emoji }],
+          old_reaction: [],
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    async function readyAdapter() {
+      const readyDeps = makeDeps(transport);
+      (readyDeps as any).memoryRuntime = { state: "ready" };
+      const ready = new TelegramAdapter(makeConfig(), readyDeps);
+      await ready.start();
+      return ready;
+    }
+
+    function groupReaction(messageId: number) {
+      return {
+        update_id: 102,
+        message_reaction: {
+          chat: { id: 42, type: "supergroup" },
+          user: { id: 42, first_name: "Test" },
+          message_id: messageId,
+          new_reaction: [{ type: "emoji", emoji: "👍" }],
+          old_reaction: [],
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    it("tracks the delivered answer and says so without claiming a learning write", async () => {
+      const ready = await readyAdapter();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      publishAnswerRecord(
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e216", support: ["db:durable:7:master:1"], messageIds: ["216"] },
+        Date.now(),
+      );
+      await (TelegramPollerMock as any)._handler(groupReaction(216));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: answer tracked)"));
+      expect(buffer.mock.calls[0]![2]).not.toContain("applied");
+    });
+
+    it("marks a missing answer record instead of reporting feedback", async () => {
+      const ready = await readyAdapter();
+      await (TelegramPollerMock as any)._handler(groupReaction(211));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: no answer record)"));
+    });
+
+    it("marks an actor mismatch instead of reporting feedback", async () => {
+      const ready = await readyAdapter();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      publishAnswerRecord(
+        { platform: "telegram", channelId: "42", principal: "someone-else", sessionId: "s", executionId: "e212", support: ["db:durable:7:master:1"], messageIds: ["212"] },
+        Date.now(),
+      );
+      await (TelegramPollerMock as any)._handler(groupReaction(212));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: actor mismatch)"));
+    });
+
+    it("ignores reaction removals", async () => {
+      await readyAdapter();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      publishAnswerRecord(
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e213", support: ["db:durable:7:master:1"], messageIds: ["213"] },
+        Date.now(),
+      );
+      await (TelegramPollerMock as any)._handler({
+        update_id: 101,
+        message_reaction: {
+          chat: { id: 42, type: "private" },
+          user: { id: 42, first_name: "Test" },
+          message_id: 213,
+          new_reaction: [],
+          old_reaction: [{ type: "emoji", emoji: "👍" }],
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+      // No throw and no queued signal for a removal.
+      expect(true).toBe(true);
+    });
+
+    it("queues the signal when the session is busy", async () => {
+      await readyAdapter();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      publishAnswerRecord(
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e214", support: ["db:durable:7:master:1"], messageIds: ["214"] },
+        Date.now(),
+      );
+      const spinMod = await import("../../components/spin.js");
+      const queued: unknown[] = [];
+      vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue({ busy: true, queue: queued } as any);
+      await (TelegramPollerMock as any)._handler(reactionUpdate(214));
+      expect(queued).toHaveLength(1);
+    });
+  });
+
   describe("handleUpdate — callback queries", () => {
     it("answers callback query from authorized user", async () => {
       await adapter.start();
@@ -296,6 +461,304 @@ describe("TelegramAdapter", () => {
       };
 
       await (TelegramPollerMock as any)._handler(update);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("transport freshness after rebuild (#1800)", () => {
+    const MODEL = "tencent/hy3-preview";
+
+    function mockSwitchableTransport() {
+      return {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        sendPrompt: vi.fn().mockResolvedValue("response"),
+        resetSession: vi.fn().mockResolvedValue(undefined),
+        sendInterrupt: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn(),
+        setModel: vi.fn().mockResolvedValue(undefined),
+        transportCommands: [],
+        get isReady() { return true; },
+      };
+    }
+
+    function routeConfig(mainProvider: string, mainModel: string, providers: Record<string, unknown>) {
+      return {
+        activeRoute: "pi-ai",
+        routes: { "pi-ai": { agents: { main: { model: mainModel, provider: mainProvider } }, fallbacks: [] } },
+        providers,
+      };
+    }
+
+    function resolvedAgent(transport: string) {
+      return {
+        model: MODEL,
+        provider: { transport, endpoint: "https://api.test/v1", apiKeyEnv: "TEST_API_KEY" },
+        providerName: "test-provider",
+        contextWindow: 128000,
+      };
+    }
+
+    const apiProviders = {
+      openrouter: { transport: "api", endpoint: "https://api.test/v1" },
+      codex: { transport: "api", endpoint: "https://api.test/v1" },
+      localacp: { transport: "acp", cli: "kiro-cli" },
+    };
+
+    let pipelineDeps: any;
+    let oldTransport: ReturnType<typeof mockSwitchableTransport>;
+    let newTransport: ReturnType<typeof mockSwitchableTransport>;
+
+    async function wireWithLiveGetter() {
+      const { createBootCtx } = await import("../../boot/context.js");
+      const { wireTelegram } = await import("../../boot/wire-platform.js");
+      pipelineDeps = (deps.pipeline as unknown) as any;
+      pipelineDeps.transport = oldTransport;
+      pipelineDeps.rebuildTransport = vi.fn(async () => {
+        pipelineDeps.transport = newTransport;
+      });
+      const bootCtx = createBootCtx() as any;
+      bootCtx.pipelineDeps = pipelineDeps;
+      bootCtx.transport = oldTransport;
+      bootCtx.telegramAdapter = adapter;
+      bootCtx.config = { mainChatId: null };
+      bootCtx.conversationBuffer = deps.conversationBuffer;
+      bootCtx.memoryRuntime = deps.memoryRuntime;
+      bootCtx.sessionManager = deps.sessionManager;
+      await wireTelegram(bootCtx);
+      await adapter.start();
+    }
+
+    function injectModelCallback(data: string) {
+      return (TelegramPollerMock as any)._handler({
+        update_id: 100,
+        callback_query: {
+          id: "cb-1800",
+          from: { id: 42, first_name: "Test" },
+          message: { message_id: 301, chat: { id: 42, type: "private" } },
+          data,
+        },
+      });
+    }
+
+    function sentTexts(): string[] {
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      return api.sendMessage.mock.calls.map((c) => String(c[1]));
+    }
+
+    beforeEach(() => {
+      oldTransport = mockSwitchableTransport();
+      newTransport = mockSwitchableTransport();
+      tcMocks.loadTransport.mockReset();
+      tcMocks.resolveAgent.mockReset();
+      tcMocks.writeTransportConfig.mockReset();
+      tcMocks.getModelsForProvider.mockReset();
+      tcMocks.validateProviderReady.mockReset();
+      tcMocks.formatValidationError.mockReset();
+      tcMocks.writeTransportConfig.mockReturnValue({ ok: true });
+      tcMocks.getModelsForProvider.mockReturnValue([{ id: MODEL }]);
+      tcMocks.validateProviderReady.mockReturnValue({ ok: true });
+      tcMocks.formatValidationError.mockReturnValue("");
+    });
+
+    it("calls setModel on the live transport after a completed rebuild", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("openrouter", "codex-old-model", { openrouter: apiProviders.openrouter }),
+      );
+      // Model a previously completed rebuild on the same holder; the adapter
+      // stays wired. A value capture would keep using oldTransport here.
+      pipelineDeps.transport = newTransport;
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      expect(newTransport.setModel).toHaveBeenCalledTimes(1);
+      expect(newTransport.setModel).toHaveBeenCalledWith(MODEL);
+      expect(oldTransport.setModel).not.toHaveBeenCalled();
+      expect(pipelineDeps.rebuildTransport).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes(`✓ Switched to ${MODEL}`))).toBe(true);
+    });
+
+    it("rebuilds and resets the live transport for a same-type provider change (#1932: no hot swap)", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("codex", "codex-model", { openrouter: apiProviders.openrouter, codex: apiProviders.codex }),
+      );
+      tcMocks.resolveAgent.mockImplementation((slot: string) =>
+        slot === "_old" ? resolvedAgent("api") : resolvedAgent("api"),
+      );
+      pipelineDeps.transport = newTransport;
+
+      const envMod = await import("../../components/env-schema.js");
+      const realEnv = envMod.getEnv();
+      vi.spyOn(envMod, "getEnv").mockReturnValue({ ...realEnv, getApiKey: () => "test-key" } as never);
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      // Hot swap is retired: every provider change rebuilds the transport.
+      expect(pipelineDeps.rebuildTransport).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
+      expect(newTransport.setModel).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
+    });
+
+    it("rebuilds and resets the live transport for a cross-transport change", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("localacp", "local-model", { openrouter: apiProviders.openrouter, localacp: apiProviders.localacp }),
+      );
+      tcMocks.resolveAgent.mockImplementation((slot: string) =>
+        slot === "_old" ? resolvedAgent("acp") : resolvedAgent("api"),
+      );
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      expect(pipelineDeps.rebuildTransport).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledWith("telegram:42");
+      expect(oldTransport.resetSession).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
+    });
+  });
+
+  describe("unwired pipeline degraded route (#1831)", () => {
+    let recovery: {
+      handle: (msg: InboundMessage, adapter: any) => Promise<void>;
+      messageQueue: Array<{ msg: InboundMessage; adapter: any }>;
+      noticedChannels: Set<string>;
+    };
+    let unwired: TelegramAdapter;
+
+    function dmUpdate(text: string, messageId: number) {
+      return {
+        update_id: messageId,
+        message: {
+          message_id: messageId,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, first_name: "Test" },
+          text,
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    function unwiredSentTexts(): string[] {
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      return api.sendMessage.mock.calls.map((c) => String(c[1]));
+    }
+
+    beforeEach(async () => {
+      const { createBootCtx } = await import("../../boot/context.js");
+      const { createRecoveryHandler } = await import("../../boot/phase-platforms-connect.js");
+      const ctx = createBootCtx();
+      ctx.phaseHealth.set("transport", { status: "failed", error: "test fixture" });
+      ctx.phaseHealth.set("pipelineDeps", { status: "skipped", error: "no transport" });
+      recovery = createRecoveryHandler(ctx);
+      unwired = new TelegramAdapter(makeConfig(), {
+        ...deps,
+        pipeline: {} as PipelineDeps,
+        degraded: { handle: (msg, adapter) => recovery.handle(msg, adapter) },
+      });
+      await unwired.start();
+    });
+
+    it("routes a normal DM to the degraded route with notice + queue, never the pipeline", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello bot", 901));
+
+      expect(unwiredSentTexts().some((t) => t.includes("/status"))).toBe(true);
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(recovery.messageQueue[0]!.msg.text).toBe("hello bot");
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("throttles the notice to one per chat per episode", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("first", 902));
+      await (TelegramPollerMock as any)._handler(dmUpdate("second", 903));
+
+      expect(recovery.messageQueue).toHaveLength(2);
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("answers /status on the command fast path", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("/status", 904));
+
+      expect(unwiredSentTexts().some((t) => t.includes("Boot status"))).toBe(true);
+      expect(recovery.messageQueue).toHaveLength(0);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("treats an addressed group message like a DM non-command", async () => {
+      await (TelegramPollerMock as any)._handler({
+        update_id: 907,
+        message: {
+          message_id: 907,
+          chat: { id: -100, type: "supergroup" },
+          from: { id: 42, first_name: "Test" },
+          text: "@testbot hello group",
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("routes an internal synthetic message to the degraded route while unwired", async () => {
+      const internal = { kind: "boot_greeting" } as InternalBootMetadata;
+      Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+      unwired.injectMessage({
+        platform: "telegram", channelId: "42", senderId: "42", senderName: "Test",
+        userId: "master", text: "[SESSION START] hello",
+        timestamp: Date.now(), isGroup: false, isVoice: false, internal,
+      });
+
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("emits one content-free error log per unwired inbound", async () => {
+      const logMod = await import("../../components/logger.js");
+      const errorSpy = vi.spyOn(logMod, "logError").mockImplementation(() => {});
+
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello bot", 905));
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = errorSpy.mock.calls.map((c) => String(c[1])).join("\n");
+      expect(logged).toContain("telegram");
+      expect(logged).not.toContain("hello bot");
+      errorSpy.mockRestore();
+    });
+
+    it("wiring drops the degraded route and restores the pipeline", async () => {
+      unwired.setMessageHandler(deps);
+
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello again", 906));
+
+      expect(transport.sendPrompt).toHaveBeenCalled();
+      expect(recovery.messageQueue).toHaveLength(0);
+    });
+
+    it("a failed notice send neither rejects the inbound nor silences the episode", async () => {
+      // The message is already queued when the notice goes out, so a platform
+      // send failure must not surface as an inbound rejection, and the chat
+      // must still get a notice on its next message in the same episode.
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      api.sendMessage.mockRejectedValueOnce(new Error("telegram 502"));
+
+      await expect((TelegramPollerMock as any)._handler(dmUpdate("first", 908))).resolves.not.toThrow();
+      expect(recovery.noticedChannels.has("telegram:42")).toBe(false);
+
+      // Retry: the notice is attempted again and this time succeeds.
+      await (TelegramPollerMock as any)._handler(dmUpdate("second", 909));
+      expect(recovery.noticedChannels.has("telegram:42")).toBe(true);
+      const attemptsAfterSuccess = unwiredSentTexts().filter((t) => t.includes("/status")).length;
+      expect(attemptsAfterSuccess).toBe(2);
+
+      // Throttled from here on, and nothing was lost.
+      await (TelegramPollerMock as any)._handler(dmUpdate("third", 910));
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(2);
+      expect(recovery.messageQueue).toHaveLength(3);
       expect(transport.sendPrompt).not.toHaveBeenCalled();
     });
   });

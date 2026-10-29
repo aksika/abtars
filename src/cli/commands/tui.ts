@@ -18,6 +18,7 @@
  */
 
 import { existsSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
 import * as net from "node:net";
 import { join } from "node:path";
 
@@ -33,8 +34,22 @@ import {
   type TuiAttachMode,
   type TuiClientFrame,
   type TuiServerFrame,
+  type NativeCodingHandoffInfo,
 } from "../../platforms/tui/tui-protocol.js";
 import { TuiApp, nativeEditorTheme, type TuiPresentationModules } from "./tui-ui.js";
+import {
+  REQUIRED_PI_CODING_AGENT_EXPORTS,
+  REQUIRED_PI_TUI_EXPORTS,
+  missingRuntimeExports,
+} from "./tui-runtime-contract.js";
+import {
+  isNativeHandoffCommand,
+  readClientPiConfig,
+  buildNativeHandoffArgs,
+  buildNativeHandoffEnv,
+  spawnNativeHandoff,
+  waitForNativeExit,
+} from "./tui-coding-handoff.js";
 
 /** Pretty stderr writer (no colorful emoji per abtars.md). */
 function stderr(line: string): void {
@@ -169,17 +184,12 @@ export async function tui(args: string[]): Promise<number> {
       loadPiModule<Record<string, unknown>>(piResult.installation, codingAgentSpec),
     ]);
 
-    const requiredTui = ["ProcessTerminal", "TUI", "Container", "Editor", "Text", "Markdown", "Loader", "matchesKey"] as const;
-    const missingTui = requiredTui.filter(name => typeof rawPit[name] !== "function");
+    const missingTui = missingRuntimeExports(rawPit, REQUIRED_PI_TUI_EXPORTS);
     if (missingTui.length > 0) {
       throw new Error(`pi-tui: missing required export(s): ${missingTui.join(", ")}`);
     }
 
-    const requiredCodingAgent = [
-      "initTheme", "getMarkdownTheme",
-      "UserMessageComponent", "AssistantMessageComponent", "DynamicBorder",
-    ] as const;
-    const missingCodingAgent = requiredCodingAgent.filter(name => typeof rawCodingAgent[name] !== "function");
+    const missingCodingAgent = missingRuntimeExports(rawCodingAgent, REQUIRED_PI_CODING_AGENT_EXPORTS);
     if (missingCodingAgent.length > 0) {
       throw new Error(`pi-coding-agent: missing required export(s): ${missingCodingAgent.join(", ")}`);
     }
@@ -212,7 +222,10 @@ export async function tui(args: string[]): Promise<number> {
   // during teardown — swallow it, the terminal is already gone.
   process.stdout.on("error", () => { /* swallowed: terminal is gone */ });
   const terminal = new modules.tui.ProcessTerminal();
-  const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
+  // Pi 0.84: the runtime `TUI` class is gone; `TuiMainScreen` is the concrete
+  // main-screen renderer (showHardwareCursor=true preserved). The object is
+  // consumed through the structural `TUI` interface.
+  const ui = new modules.tui.TuiMainScreen(terminal, true);
   const editor = new modules.tui.Editor(ui, nativeEditorTheme(modules.codingAgent));
 
   // Connect.
@@ -225,8 +238,23 @@ export async function tui(args: string[]): Promise<number> {
   // #1570: the bridge emits a fresh `ready` per attachment change (commitAttachment,
   // #1533 rebind). pi-tui's TUI.start() is NOT idempotent — it registers a new stdin
   // data listener per call, so repeated start() doubles every keystroke. Start the
-  // UI exactly once per client lifetime; later `ready` frames only update state.
-  let uiStarted = false;
+  // UI exactly once per running period; `uiRunning` tracks start/stop pairs (a
+  // native handoff stops the UI and a later `ready` starts it again — safe because
+  // pi-tui's stop() removes the listener its start() created).
+  let uiRunning = false;
+
+  // #1635 Phase 2 — native TUI handoff state.
+  let handoffActive = false;
+  let handoffPending = false;
+  let handoffSessionId: string | null = null;
+  let handoffBridgeGone = false;
+  let handoffReleaseSeen = false;
+  let handoffStartedAcknowledged = false;
+  let handoffChild: ChildProcess | null = null;
+  let terminateAfterHandoff = false;
+  let handoffAcceptWaiter: ((outcome: HandoffAcceptOutcome) => void) | null = null;
+  let handoffStartedAckWaiter: ((accepted: boolean) => void) | null = null;
+  let handoffReleaseWaiter: ((outcome: HandoffReleaseOutcome) => void) | null = null;
 
   // pi-tui's TUI.start() is NON-BLOCKING (event-driven: it sets up stdin/stdout
   // and returns). We need a promise to await so the process stays alive until
@@ -253,8 +281,18 @@ export async function tui(args: string[]): Promise<number> {
   // Restore terminal on any abnormal exit path. The library cleans up
   // raw mode via ui.stop(); the extra handlers guard against a process
   // exit between stop and the eventual process.exit.
+  // #1635 Phase 2: while a native handoff runs, signals belong to Pi (the
+  // foreground child shares the terminal). The client defers its own exit
+  // until after Pi exits; terminateAfterHandoff then stops the client.
+  const onSignal = (): void => {
+    if (handoffActive) {
+      terminateAfterHandoff = true;
+      return;
+    }
+    stop(0);
+  };
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.once(sig, () => stop(0));
+    process.on(sig, onSignal);
   }
   process.once("exit", () => {
     try { ui.stop(); } catch { /* best effort */ }
@@ -307,6 +345,21 @@ export async function tui(args: string[]): Promise<number> {
   });
 
   conn.on("error", (err) => {
+    if (handoffActive || handoffPending) {
+      // Bridge died mid-handoff — Pi keeps the terminal until it exits.
+      handoffBridgeGone = true;
+      if (!handoffStartedAcknowledged && handoffChild) {
+        try { handoffChild.kill(); } catch { /* best effort */ }
+      }
+      handoffAcceptWaiter?.({ kind: "timeout" });
+      handoffAcceptWaiter = null;
+      handoffStartedAckWaiter?.(false);
+      handoffStartedAckWaiter = null;
+      handoffReleaseWaiter?.({ confirmed: false, reattached: false });
+      handoffReleaseWaiter = null;
+      if (!handoffActive) stop(0);
+      return;
+    }
     if (!ready) {
       stderr(`Connection error: ${err.message}`);
       stop(1);
@@ -317,6 +370,21 @@ export async function tui(args: string[]): Promise<number> {
   });
 
   conn.on("close", () => {
+    if (handoffActive || handoffPending) {
+      // Bridge died mid-handoff — let Pi finish; degrade after exit.
+      handoffBridgeGone = true;
+      if (!handoffStartedAcknowledged && handoffChild) {
+        try { handoffChild.kill(); } catch { /* best effort */ }
+      }
+      handoffAcceptWaiter?.({ kind: "timeout" });
+      handoffAcceptWaiter = null;
+      handoffStartedAckWaiter?.(false);
+      handoffStartedAckWaiter = null;
+      handoffReleaseWaiter?.({ confirmed: false, reattached: false });
+      handoffReleaseWaiter = null;
+      if (!handoffActive) stop(0);
+      return;
+    }
     // Bridge died mid-session or detached normally. Restore terminal, exit 0.
     stop(0);
   });
@@ -324,6 +392,7 @@ export async function tui(args: string[]): Promise<number> {
   // Input handling — Ctrl-C / Ctrl-D → detach+exit. Editor onSubmit → input frame.
   ui.addInputListener((data: string) => {
     if (modules.tui.matchesKey(data, "ctrl+c") || modules.tui.matchesKey(data, "ctrl+d")) {
+      if (handoffActive) return { consume: true };
       conn!.end();
       stop(0);
       return { consume: true };
@@ -332,12 +401,19 @@ export async function tui(args: string[]): Promise<number> {
   });
 
   editor.onSubmit = (text: string) => {
+    if (handoffActive) return;   // the terminal belongs to Pi
     if (!ready) return;        // can't send before attach accepted
     if (text.length === 0) return;
     // #1369: /exit is a local command — exit the client, don't touch the wire.
     if (isTuiExitCommand(text)) {
       conn!.end();
       stop(0);
+      return;
+    }
+    // #1635 Phase 2: /coding (and new/resume) triggers the native handoff
+    // instead of an RPC turn — the client spawns the pinned Pi interactively.
+    if (isNativeHandoffCommand(text)) {
+      void runCodingHandoff(text);
       return;
     }
     app!.submitUserText(text);
@@ -355,10 +431,35 @@ export async function tui(args: string[]): Promise<number> {
 
   function handleServerFrame(frame: TuiServerFrame): void {
     switch (frame.t) {
+      case "coding-handoff-accepted":
+        handoffAcceptWaiter?.({ kind: "accepted", handoff: frame.handoff });
+        handoffAcceptWaiter = null;
+        return;
+      case "coding-handoff-rejected":
+        handoffAcceptWaiter?.({ kind: "rejected", message: frame.message });
+        handoffAcceptWaiter = null;
+        return;
+      case "coding-handoff-started-accepted":
+        if (frame.sessionId === handoffSessionId && handoffChild?.pid === frame.pid) {
+          handoffStartedAcknowledged = true;
+          handoffStartedAckWaiter?.(true);
+          handoffStartedAckWaiter = null;
+        }
+        return;
+      case "coding-handoff-released":
+        handoffReleaseSeen = true;
+        if (handoffReleaseWaiter) {
+          handoffReleaseWaiter({ confirmed: true, reattached: frame.reattached !== false });
+          handoffReleaseWaiter = null;
+        }
+        return;
+    }
+    if (handoffActive && !handoffReleaseSeen) return;   // gate: no render frames while Pi owns the terminal
+    switch (frame.t) {
       case "ready":
         ready = true;
-        if (!uiStarted) {
-          uiStarted = true;
+        if (!uiRunning) {
+          uiRunning = true;
           ui.start();
         }
         app!.handleFrame(frame);
@@ -377,6 +478,200 @@ export async function tui(args: string[]): Promise<number> {
     }
   }
 
+  // #1635 Phase 2 — native TUI handoff orchestration. The client keeps the
+  // bridge connection open the whole time; the bridge holds the lease, the
+  // workspace claim and a shared Pi slot until the exit frame releases them.
+  function waitForHandoffAccept(timeoutMs = 15_000): Promise<HandoffAcceptOutcome> {
+    return new Promise<HandoffAcceptOutcome>((resolve) => {
+      handoffAcceptWaiter = resolve;
+      const timer = setTimeout(() => {
+        if (handoffAcceptWaiter === resolve) {
+          handoffAcceptWaiter = null;
+          resolve({ kind: "timeout" });
+        }
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+  }
+
+  function waitForHandoffStartedAck(timeoutMs = 5_000): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      if (handoffBridgeGone) { resolve(false); return; }
+      handoffStartedAckWaiter = resolve;
+      const timer = setTimeout(() => {
+        if (handoffStartedAckWaiter === resolve) {
+          handoffStartedAckWaiter = null;
+          resolve(false);
+        }
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+  }
+
+  function waitForHandoffRelease(timeoutMs = 30_000): Promise<HandoffReleaseOutcome> {
+    return new Promise<HandoffReleaseOutcome>((resolve) => {
+      if (handoffBridgeGone) { resolve({ confirmed: false, reattached: false }); return; }
+      handoffReleaseWaiter = (outcome) => resolve(outcome);
+      const timer = setTimeout(() => {
+        if (handoffReleaseWaiter) { handoffReleaseWaiter = null; resolve({ confirmed: false, reattached: false }); }
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+  }
+
+  /** Ask the bridge to release the reserved handoff resources. */
+  function sendHandoffExit(code: number | null): void {
+    const sid = handoffSessionId;
+    if (!sid || !conn) return;
+    try {
+      conn.write(encodeFrame({ t: "coding-handoff-exit", sessionId: sid, code }));
+    } catch { /* bridge is gone */ }
+  }
+
+  /** Show a bounded system message on the running shell (reject/error path). */
+  function showSystemMessage(markdown: string): void {
+    try {
+      app?.handleFrame({ t: "message", role: "system", markdown: markdown.slice(0, 2000) });
+    } catch { /* best effort */ }
+  }
+
+  /**
+   * The full handoff: request -> accept -> suspend TUI -> spawn pinned Pi
+   * interactively -> on exit send the release frame -> re-attach -> resume.
+   */
+  async function runCodingHandoff(text: string): Promise<void> {
+    if (!ready || !conn || handoffActive || handoffPending) return;
+
+    handoffPending = true;
+    handoffReleaseSeen = false;
+    handoffStartedAcknowledged = false;
+
+    // 1. Ask the bridge to resolve the session and reserve the resources.
+    const acceptedPromise = waitForHandoffAccept();
+    try {
+      conn.write(encodeFrame({ t: "coding-handoff", text: text.slice(0, 4096) }));
+    } catch {
+      handoffAcceptWaiter?.({ kind: "timeout" });
+      handoffAcceptWaiter = null;
+    }
+    const accepted = await acceptedPromise;
+    if (accepted.kind !== "accepted") {
+      handoffPending = false;
+      if (accepted.kind === "rejected") {
+        showSystemMessage(`Coding handoff rejected: ${accepted.message}`);
+      } else {
+        showSystemMessage("Coding handoff did not reach the bridge in time — try again.");
+      }
+      return;
+    }
+    const info = accepted.handoff;
+    handoffActive = true;
+    handoffSessionId = info.sessionId;
+
+    // 2. Client-side resolution BEFORE touching the terminal (local-host
+    //    rule: the executable and every argument come from this host).
+    let executable: string;
+    let args: string[];
+    let env: Record<string, string>;
+    try {
+      const piResult = resolvePiInstallation();
+      if (piResult.state !== "compatible") {
+        throw new Error(`Pi is ${piResult.state} — install it with: abtars deps install pi`);
+      }
+      const piConfig = readClientPiConfig(abtarsHome());
+      if (!piConfig) {
+        throw new Error("pi-executor.json is missing or unreadable — the handoff cannot build Pi arguments");
+      }
+      executable = piResult.installation.executable;
+      args = buildNativeHandoffArgs(info, piConfig);
+      env = buildNativeHandoffEnv(process.env);
+    } catch (err) {
+      // Fail closed: nothing was spawned — release the reservation and stay.
+      const releasedPromise = waitForHandoffRelease();
+      sendHandoffExit(null);
+      const released = await releasedPromise;
+      handoffActive = false;
+      handoffPending = false;
+      handoffSessionId = null;
+      if (handoffBridgeGone) { stop(0); return; }
+      if (!released.reattached) {
+        try { conn!.write(encodeFrame({ t: "attach", mode: { kind: "resume" }, cols: terminal.columns, rows: terminal.rows })); } catch { /* best effort */ }
+      }
+      showSystemMessage(`Coding handoff aborted: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    // The bridge may disappear while local Pi discovery/config parsing is in
+    // progress. Do not spawn after its abort path has released the claim and
+    // slot; a late child would otherwise race a new worker on the workspace.
+    if (handoffBridgeGone) {
+      handoffActive = false;
+      handoffPending = false;
+      handoffSessionId = null;
+      stop(0);
+      return;
+    }
+
+    // 3. Suspend the abTARS render shell — pi-tui restores the terminal.
+    //    (The app is NOT disposed: the post-handoff `ready` resets it via
+    //    resetForReady, which clears the pre-handoff attachment state.)
+    try { ui.stop(); } catch { /* best effort */ }
+    uiRunning = false;
+
+    // 4. Spawn the pinned Pi executable interactively; Pi owns the terminal.
+    let code: number | null;
+    try {
+      const child = spawnNativeHandoff(executable, args, info.canonicalPath, env);
+      handoffChild = child;
+      if (child.pid) {
+        // record the writer fence immediately — the accept-time prior-writer
+        // check uses it if this client dies mid-handoff
+        const startedAckPromise = waitForHandoffStartedAck();
+        try {
+          conn!.write(encodeFrame({ t: "coding-handoff-started", sessionId: info.sessionId, pid: child.pid }));
+        } catch { /* bridge gone — recorded at next accept via writer fence */ }
+        const started = await startedAckPromise;
+        if (!started) {
+          try { child.kill(); } catch { /* best effort */ }
+        }
+      }
+      code = await waitForNativeExit(child);
+    } catch (err) {
+      code = null;
+      stderr(`Pi handoff launch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    handoffChild = null;
+
+    // 5. Release the generation-owned resources the bridge held for us.
+    const releasedPromise = waitForHandoffRelease();
+    sendHandoffExit(code);
+    const released = await releasedPromise;
+    handoffActive = false;
+    handoffPending = false;
+    handoffSessionId = null;
+
+    if (handoffBridgeGone) {
+      stderr("Bridge disconnected during the Pi handoff — the bridge will reconcile the session at next start.");
+      stop(0);
+      return;
+    }
+    if (!released.confirmed) {
+      showSystemMessage("The bridge did not confirm the Pi handoff release — resources will be released when this TUI exits.");
+    }
+
+    // 6. Reconnect the prior abTARS session; the fresh `ready` restarts the
+    //    render shell (resetForReady clears the pre-handoff state).
+    if (!released.reattached) {
+      try {
+        conn!.write(encodeFrame({ t: "attach", mode: { kind: "resume" }, cols: terminal.columns, rows: terminal.rows }));
+      } catch { /* best effort */ }
+    }
+
+    if (terminateAfterHandoff) {
+      stop(0);
+    }
+  }
+
   // ui.start() is called inside the `ready` frame handler, not here.
   // If the attach fails (no Orc session etc.), we never enter raw mode
   // and avoid terminal escape-sequence leakage on exit.
@@ -384,3 +679,10 @@ export async function tui(args: string[]): Promise<number> {
   await stopped;
   return shouldExitCode ?? 0;
 }
+
+type HandoffAcceptOutcome =
+  | { kind: "accepted"; handoff: NativeCodingHandoffInfo }
+  | { kind: "rejected"; message: string }
+  | { kind: "timeout" };
+
+type HandoffReleaseOutcome = { confirmed: boolean; reattached: boolean };

@@ -1,4 +1,5 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { addColumnIfMissing } from "../utils/sqlite-migrate.js";
 import type {
   ExecutorProgressFactV1,
   AttemptLeaseSnapshotV1,
@@ -83,16 +84,14 @@ export class ExecutorLeaseStore {
       );
     `);
 
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN card_id INTEGER`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN state_version INTEGER DEFAULT 1`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN next_evaluation_at TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN closed_at TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_progress_events ADD COLUMN fact_id TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_progress_events ADD COLUMN lease_effect TEXT DEFAULT 'none'`); } catch {}
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "card_id INTEGER");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "state_version INTEGER DEFAULT 1");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "next_evaluation_at TEXT");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "closed_at TEXT");
+    addColumnIfMissing(this.db, "attempt_progress_events", "fact_id TEXT");
+    addColumnIfMissing(this.db, "attempt_progress_events", "lease_effect TEXT DEFAULT 'none'");
 
-    try {
-      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_progress_fact_id ON attempt_progress_events(attempt_id, claim_generation, fact_id)`);
-    } catch {}
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_progress_fact_id ON attempt_progress_events(attempt_id, claim_generation, fact_id)`);
   }
 
   appendFact(
@@ -314,8 +313,18 @@ export class ExecutorLeaseStore {
     if (!row) return false;
     if (expectedStateVersion !== undefined && row.state_version !== expectedStateVersion) return false;
     const snapshot = JSON.parse(row.snapshot_json) as AttemptLeaseSnapshotV1;
+    // #1793: cancellation is a terminal intent set by recordCancelIntent. A
+    // late evaluation outcome (e.g. an in-flight inspection resolving after
+    // the cancel) must never overwrite it back to a actionable phase.
+    if (snapshot.evaluation.phase === "cancel_requested" && phase !== "cancel_requested") return false;
     snapshot.evaluation.phase = phase as AttemptLeaseSnapshotV1["evaluation"]["phase"];
     snapshot.evaluation.version++;
+    // #1793: keep the JSON stateVersion in lockstep with the column CAS.
+    // Without this bump every later updateEvaluation CAS fails: the column
+    // moves to N+1 while readers keep seeing N, so a silent attempt can never
+    // advance past its first evaluation phase change (no inspect, no grace,
+    // no cancel) and only ever meets the occurrence idle budget.
+    snapshot.stateVersion = row.state_version + 1;
     if (nextEvaluationAt !== undefined) snapshot.nextEvaluationAt = nextEvaluationAt;
     snapshot.updatedAt = new Date().toISOString();
     const result = this.db.prepare(`
@@ -402,6 +411,9 @@ export class ExecutorLeaseStore {
       snapshot.evaluation.version++;
       snapshot.nextEvaluationAt = undefined;
       snapshot.updatedAt = new Date().toISOString();
+      // #1793: keep the JSON stateVersion in lockstep with the column bump
+      // below so later CAS reads see the same authority.
+      snapshot.stateVersion = row.state_version + 1;
 
       const snapshotUpdated = this.db.prepare(`
         UPDATE attempt_lease_snapshots
@@ -414,11 +426,34 @@ export class ExecutorLeaseStore {
     }) as boolean;
   }
 
+  /**
+   * #1793: persist the next evaluation instant on BOTH the scheduling column
+   * and the snapshot JSON. The column is what the due source lists; the JSON
+   * is the next writer's input — leaving them divergent means a later fact
+   * rewrites the column from a stale snapshot and the evaluator wakes on
+   * every fact instead of on policy instants. CAS on the current version so a
+   * concurrent fact/evaluation write is never clobbered; a closed or
+   * cancel-requested lease is never re-armed.
+   */
   setUpcomingEvaluation(attemptId: string, nextAt: string): void {
-    this.db.prepare(`
-      UPDATE attempt_lease_snapshots SET next_evaluation_at = ?, updated_at = ?
-      WHERE attempt_id = ?
-    `).run(nextAt, new Date().toISOString(), attemptId);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT state_version, snapshot_json
+        FROM attempt_lease_snapshots WHERE attempt_id = ?
+      `).get(attemptId) as { state_version: number; snapshot_json: string } | undefined;
+      if (!row) return;
+      const snapshot = JSON.parse(row.snapshot_json) as AttemptLeaseSnapshotV1;
+      if (snapshot.closedAt) return;
+      if (snapshot.evaluation.phase === "cancel_requested") return;
+      snapshot.nextEvaluationAt = nextAt;
+      snapshot.updatedAt = now;
+      this.db.prepare(`
+        UPDATE attempt_lease_snapshots
+        SET snapshot_json = ?, next_evaluation_at = ?, updated_at = ?
+        WHERE attempt_id = ? AND state_version = ?
+      `).run(JSON.stringify(snapshot), nextAt, now, attemptId, row.state_version);
+    });
   }
 
   getView(attemptId: string): LeaseView | undefined {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import {
   resolvePiModuleUrl,
 } from "./pi-installation.js";
 import type { PiInstallation, PiModuleSpecifier } from "./pi-installation.js";
+import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
 
 const loadPiConfigMock = vi.hoisted(() => vi.fn(() => null));
 
@@ -27,7 +28,7 @@ afterEach(() => {
 });
 
 function fixture(): string {
-  const root = mkdtempSync(join(tmpdir(), "pi-installation-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-installation-")));
   roots.push(root);
   return root;
 }
@@ -47,7 +48,7 @@ function piInstallationFixture(version: string): { bin: string; packageRoot: str
     ["@earendil-works", "pi-ai"],
     ["@earendil-works", "pi-tui"],
     ["@earendil-works", "pi-agent-core"],
-  ]) {
+  ] as const) {
     const nestedRoot = join(packageRoot, "node_modules", scope, name);
     mkdirSync(nestedRoot, { recursive: true });
     writeFileSync(join(nestedRoot, "package.json"), JSON.stringify({ name: `${scope}/${name}` }));
@@ -84,7 +85,9 @@ describe("resolveNestedPackageRoot", () => {
 
 describe("resolvePiInstallation", () => {
   it("uses package metadata without launching the Pi executable", () => {
-    const { bin, packageRoot } = piInstallationFixture("0.83.0");
+    // Fixture tracks the compatibility pin: anything below it is
+    // below-minimum by design, not compatible.
+    const { bin, packageRoot } = piInstallationFixture(PI_COMPATIBILITY.pinnedVersion);
     const originalPath = process.env.PATH;
     process.env.PATH = bin;
     try {
@@ -93,7 +96,7 @@ describe("resolvePiInstallation", () => {
         state: "compatible",
         installation: {
           packageRoot,
-          version: "0.83.0",
+          version: PI_COMPATIBILITY.pinnedVersion,
         },
       });
     } finally {
@@ -182,7 +185,7 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
   return {
     executable: "/usr/bin/pi",
     packageRoot,
-    version: "0.83.0",
+    version: "0.85.1",
     source: "path",
     pinStatus: "at-pin",
     moduleRoots: { ai: aiRoot, tui: tuiRoot, agentCore: agentCoreRoot },

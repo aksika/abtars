@@ -13,7 +13,15 @@ import { sessionType } from "./spin-types.js";
 /** A prompt decorator wraps/prepends context onto the outgoing prompt. */
 export type PromptDecorator = (
   prompt: string,
-  ctx: { session: ManagedSession; cardId?: number; parentCardId?: number },
+  ctx: {
+    session: ManagedSession;
+    cardId?: number;
+    parentCardId?: number;
+    /** #1940: the execution is on the Pi AgentSession route. Spin resolves
+     *  this before one-shot transports exist; decorators that duplicate the
+     *  role system prompt must skip. */
+    piRoute?: boolean;
+  },
 ) => Promise<string> | string;
 
 export interface SessionProfile {
@@ -38,7 +46,15 @@ export interface SessionProfile {
 
 // ── Reusable decorators ────────────────────────────────────────────────
 
-const soulBundle: PromptDecorator = async (prompt, { session }) => {
+const soulBundle: PromptDecorator = async (prompt, { session, piRoute }) => {
+  // #1940: on the Pi AgentSession route the role SOUL bundle is the session
+  // system prompt (captured once at session creation, surviving Pi
+  // compaction). Re-injecting it per turn would duplicate it into history
+  // and compaction input. `piRoute` is resolved by Spin before one-shot
+  // transports exist; the attached-transport marker covers persistent
+  // sessions and direct callers. Other routes (ACP) keep the decorator.
+  const transport = (session as { transport?: { piAgentSessionRoute?: boolean } }).transport;
+  if (piRoute === true || transport?.piAgentSessionRoute === true) return prompt;
   const { buildSoulBundle } = await import("./soul-bundle.js");
   const bundle = buildSoulBundle(sessionType(session));
   return bundle ? `${bundle}\n\n---\n\n${prompt}` : prompt;
@@ -100,6 +116,13 @@ export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
     beforePrompt: async () => {},
   },
 };
+
+/** #1940: whether this type's role SOUL bundle is installed as the Pi
+ *  session system prompt. Derived from the decorator list so the two cannot
+ *  drift: the same bundle must not also be prepended on the Pi route. */
+export function profileCarriesSoulBundle(type: SessionType): boolean {
+  return SESSION_PROFILES[type]?.decorators.includes(soulBundle) === true;
+}
 
 /** #1327: defensive — the only valid SessionTypes are the keys of SESSION_PROFILES.
  *  Used by drainQueued, the kanban_manage tool, and anywhere a runtime value

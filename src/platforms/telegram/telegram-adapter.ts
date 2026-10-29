@@ -1,4 +1,4 @@
-import { BOT_COMMANDS } from "../../components/command-registry.js";
+import { getPlatformCommands } from "../../components/command-registry.js";
 import { abtarsHome } from "../../paths.js";
 /**
  * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
@@ -15,17 +15,17 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
-import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
+import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts, DegradedInboundRoute } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import { loadUsers } from "../../components/user-registry.js";
 import { isModelPickerCallback, handleModelPickerCallback } from "./telegram-model-picker.js";
+import { isCodingCallback, handleCodingCallback } from "./telegram-coding-projection.js";
 
 const TAG = "telegram";
 
@@ -42,6 +42,12 @@ export interface TelegramAdapterDeps {
   memoryRuntime: AbtarsMemoryRuntime;
   sessionManager: { getActiveSessionId(userId: string, platform: string): string };
   actionGate?: { handleCallback(data: string): boolean } | null;
+  /**
+   * #1831: degraded-mode route, present only while the full pipeline is
+   * unwired. Its presence means "unwired" — route inbound to it, never to
+   * the placeholder pipeline and never a silent return. Removed by wiring.
+   */
+  degraded?: DegradedInboundRoute;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -96,8 +102,13 @@ export class TelegramAdapter implements PlatformAdapter {
     this.botUsername = botInfo.username?.toLowerCase() ?? "";
     logInfo(TAG, `🤖 Bot: @${botInfo.username}`);
 
-    await this.api.setMyCommands(BOT_COMMANDS.map(c => ({ command: c.name, description: c.description })))
+    await this.api.setMyCommands(getPlatformCommands("telegram").map(c => ({ command: c.name, description: c.description })))
       .catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
+
+    // #1635 — register the adapter for interactive coding projection + inline
+    // control callbacks.
+    const { setTelegramCodingDelivery } = await import("./telegram-coding-projection.js");
+    setTelegramCodingDelivery(this, this.api);
 
     const home = abtarsHome();
     const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);
@@ -166,6 +177,29 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   injectMessage(msg: InboundMessage): void {
+    // Telegram's synthetic-update path intentionally rebuilds a platform
+    // message and would drop trusted internal metadata. Automatic boot
+    // greetings therefore take the same direct in-process route as Discord;
+    // external Telegram updates never populate `internal`.
+    if (msg.internal) {
+      if (!this.securityGate.authorizeById(msg.senderId)) {
+        logWarn(TAG, `Unauthorized synthetic message from ${msg.senderId}`);
+        return;
+      }
+      // #1831: a synthetic message while unwired takes the degraded route,
+      // never the full pipeline with placeholder deps.
+      const degraded = this.deps.degraded;
+      if (degraded) {
+        void degraded.handle(msg, this).catch((err) => {
+          logError(TAG, `Degraded synthetic dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
+      handleInboundMessage(msg, this, this.deps.pipeline).catch(err => {
+        logError(TAG, `Synthetic message handling failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return;
+    }
     if (!this.poller) return;
     this.poller.injectUpdate({
       update_id: 0,
@@ -192,7 +226,9 @@ export class TelegramAdapter implements PlatformAdapter {
       if (!chatId) return;
 
       try {
-      if (isModelPickerCallback(data)) {
+      if (isCodingCallback(data)) {
+        await handleCodingCallback(data, chatId);
+      } else if (isModelPickerCallback(data)) {
         await handleModelPickerCallback(data, chatId, this.api, this, {
           transport: this.deps.transport as any,
           pipeline: this.deps.pipeline as any,
@@ -405,14 +441,26 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
     if (text.startsWith("/") && !text.startsWith("//")) {
-      if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
+      // #1831: while unwired, route to the degraded handler — never drop silently.
+      const degraded = this.deps.degraded;
+      if (degraded) {
+        degraded.handle(inbound, this).catch((err) => {
+          logError(TAG, `Degraded command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
       handleInboundMessage(inbound, this, this.deps.pipeline).catch((err) => {
         logError(TAG, `Command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
       });
       return;
     }
 
-    if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
+    // #1831: while unwired, route to the degraded handler — never drop silently.
+    const degraded = this.deps.degraded;
+    if (degraded) {
+      await degraded.handle(inbound, this);
+      return;
+    }
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 
@@ -431,34 +479,30 @@ export class TelegramAdapter implements PlatformAdapter {
     logInfo(TAG, `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
 
     const isAuthorized = this.securityGate.authorizeById(String(user.id));
-    const signal = formatReactionSignal(senderName, emojis);
     const chatId = reaction.chat.id;
     const route = routeReaction(isAuthorized, reaction.chat.type);
 
+    // #1928 A13: reactions track which delivered answer they target. The
+    // cite/reject feedback write was retired, so the suffix reports tracking
+    // only — never a learning outcome.
+    let feedbackSuffix = "";
     if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
-      const score = emojiToScore(emojis[0]!);
-      const resolvedUserId = loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master";
-
-      // #824: Emoji reaction as recall quality feedback
-      const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
-      const recalledIds = getRecalledIdsForMessage(String(reaction.message_id));
-      if (recalledIds && recalledIds.length > 0 && score !== 0) {
-        const feedbackType = score < 0 ? "reject" : "cite";
-        for (const memoryId of recalledIds) {
-          const { feedbackKey } = await import("../../components/memory-operation-key.js");
-          const { attemptMemoryMutation } = await import("../../components/memory-runtime.js");
-          const opKey = feedbackKey("telegram", String(chatId), resolvedUserId, String(reaction.message_id), memoryId, feedbackType);
-          await attemptMemoryMutation({
-            phase: "feedback",
-            family: "feedback",
-            operationKey: opKey,
-            run: () => this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType }, opKey),
-          });
-        }
-        const label = score < 0 ? "penalized" : "boosted";
-        logDebug(TAG, `Recall ${label}: ${recalledIds.length} memories (emoji ${emojis[0]})`);
+      const { resolveReactionAnswer } = await import("../../components/answer-evidence.js");
+      const record = await resolveReactionAnswer("telegram", String(chatId), String(reaction.message_id));
+      const actorUserId = loadUsers().byPlatformId.get(`telegram:${user.id}`)?.userId;
+      if (!record) {
+        logDebug(TAG, `Reaction on msg ${reaction.message_id} — no delivered answer record (no-op)`);
+        feedbackSuffix = " (memory: no answer record)";
+      } else if (!actorUserId || actorUserId !== record.principal) {
+        logDebug(TAG, `Reaction actor mismatch on msg ${reaction.message_id} — tracking denied`);
+        feedbackSuffix = " (memory: actor mismatch)";
+      } else {
+        logDebug(TAG, `Reaction on msg ${reaction.message_id} — answer tracked (${record.support.length} ref(s))`);
+        feedbackSuffix = " (memory: answer tracked)";
       }
     }
+
+    const signal = formatReactionSignal(senderName, emojis) + feedbackSuffix;
 
     if (route === "discard") {
       logDebug(TAG, `Unauthorized reaction from user ${user.id}, discarding`);
@@ -478,6 +522,7 @@ export class TelegramAdapter implements PlatformAdapter {
         entry.queue.push({ msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
+        const queuedMessage = { msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this };
         try {
           // #1271: reaction signal goes through spin() (model-call chokepoint)
           const { result: response } = await spin.spin({
@@ -496,7 +541,17 @@ export class TelegramAdapter implements PlatformAdapter {
             }
           }
         } catch (err) {
-          logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+          // #1913: a post-admission overlap means another execution owns the
+          // transport — queue behind it instead of starting concurrent work
+          // or silently losing the signal.
+          const { isExecutionOverlapError } = await import("../../components/answer-evidence.js");
+          const live = spin.getSessionById(activeId);
+          if (isExecutionOverlapError(err) && live) {
+            live.queue.push(queuedMessage);
+            logDebug(TAG, `Reaction signal queued after overlap on ${activeId} (${live.queue.length} pending)`);
+          } else {
+            logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+          }
         }
       }
     }

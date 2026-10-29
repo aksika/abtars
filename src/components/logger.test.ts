@@ -52,6 +52,19 @@ describe("logger buffered writes", () => {
     const lines = content.trim().split("\n");
     expect(lines.length).toBeGreaterThanOrEqual(3);
   });
+
+  it("persists a redacted full error stack", () => {
+    const secret = "sk-" + "a".repeat(24);
+    const err = new Error(`failure ${secret}`);
+    err.stack = `CustomError: failure ${secret}\n    at stack-sentinel (reconciler.ts:1:1)`;
+
+    logError("test", "reconcile failed", err);
+    flushLogs();
+
+    const content = readFileSync(getLogFile(), "utf-8");
+    expect(content).toContain("stack-sentinel");
+    expect(content).not.toContain(secret);
+  });
 });
 
 describe("logger console/TTY redaction (#1354)", () => {
@@ -68,14 +81,20 @@ describe("logger console/TTY redaction (#1354)", () => {
   });
 
   /** Patch console.log/warn/error directly (vitest spyOn misses module-scope calls). */
+  interface PatchableConsole {
+    log(...args: unknown[]): void;
+    warn(...args: unknown[]): void;
+    error(...args: unknown[]): void;
+  }
   function patchConsole(
     target: "log" | "warn" | "error",
   ): () => { calls: Array<Array<unknown>> } {
     const calls: Array<Array<unknown>> = [];
-    const orig = (console as Record<string, unknown>)[target] as (...args: unknown[]) => void;
-    (console as Record<string, unknown>)[target] = (...args: unknown[]) => { calls.push(args); };
+    const c: PatchableConsole = console;
+    const orig = c[target];
+    c[target] = (...args: unknown[]) => { calls.push(args); };
     return () => {
-      (console as Record<string, unknown>)[target] = orig;
+      c[target] = orig;
       return { calls };
     };
   }

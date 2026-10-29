@@ -1,8 +1,18 @@
 import { requireTaskDatabase, type TaskDatabase } from "../tasks/kanban-board.js";
+import { kanbanTransition } from "../tasks/kanban-board.js";
+import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 import type { FailureClassificationV1 } from "./failure-classifier.js";
 import type { RetryPolicyDecision } from "./retry-policy.js";
 import type { RetryDirectiveV1 } from "./retry-directive.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import type { ExecutorKind } from "../worker-executor-identity.js";
+import {
+  cardIsSupervisedProjectChild,
+  emitProjectAuthorityRejection,
+  authorizeActiveProjectWork,
+  type ProjectAuthorityRejection,
+  type ProjectMutationAuthority,
+} from "../project-acceptance/project-review-store.js";
 
 export interface ClassificationRow {
   id: string;
@@ -94,8 +104,8 @@ export class RetryStore {
         created_at TEXT NOT NULL
       );
     `);
-    try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN proposal_digest TEXT NOT NULL DEFAULT ''`); } catch {}
-    try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN review_deadline_at TEXT`); } catch {}
+    addColumnIfMissing(this.db, "retry_policy_decisions", "proposal_digest TEXT NOT NULL DEFAULT ''");
+    addColumnIfMissing(this.db, "retry_policy_decisions", "review_deadline_at TEXT");
   }
 
   // ── Classifications ────────────────────────────────────────────────────
@@ -167,6 +177,72 @@ export class RetryStore {
     return result.changes > 0;
   }
 
+  /** #1644: Orc worker-failure decisions are project mutations too. The
+   * authority check and decision CAS share one transaction so a stale review
+   * cannot stop/requeue work after the root has terminalized. */
+  compareAndSetProjectDecisionStatus(
+    sourceAttemptId: string,
+    cardId: number,
+    fromStatus: DecisionStatus,
+    toStatus: DecisionStatus,
+    authority?: ProjectMutationAuthority,
+  ): boolean {
+    if (!isValidTransition(fromStatus, toStatus)) return false;
+    return this.db.transaction(() => {
+      const attempt = this.db.prepare(`
+        SELECT card_id, root_project_card_id, root_project_generation, scheduled_run_id
+        FROM worker_attempts WHERE id = ?
+      `).get(sourceAttemptId) as {
+        card_id: number;
+        root_project_card_id: number | null;
+        root_project_generation: number | null;
+        scheduled_run_id: string | null;
+      } | undefined;
+      if (!attempt || attempt.card_id !== cardId) return false;
+
+      if (authority) {
+        const attemptRunId = attempt.scheduled_run_id ?? undefined;
+        if (attempt.root_project_card_id == null || attempt.root_project_generation == null) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attempt.root_project_card_id !== authority.projectCardId) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attempt.root_project_generation !== authority.projectGeneration) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "generation_mismatch", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attemptRunId !== authority.scheduledRunId) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "run_mismatch", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        const rejection = authorizeActiveProjectWork(this.db, authority);
+        if (rejection) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, rejection, { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+      } else if (attempt.root_project_card_id != null) {
+        if (this.authorizeAttemptForProjectWork({
+          card_id: attempt.card_id,
+          root_project_card_id: attempt.root_project_card_id,
+          root_project_generation: attempt.root_project_generation,
+          scheduled_run_id: attempt.scheduled_run_id,
+        }, "worker_failure_review") !== null) return false;
+      } else if (cardIsSupervisedProjectChild(this.db, cardId)) {
+        emitProjectAuthorityRejection("worker_failure_review", undefined, "missing_authority", { cardId, attemptId: sourceAttemptId });
+        return false;
+      }
+
+      const result = this.db.prepare(`
+        UPDATE retry_policy_decisions SET status = ?, updated_at = ?
+        WHERE source_attempt_id = ? AND status = ?
+      `).run(toStatus, new Date().toISOString(), sourceAttemptId, fromStatus);
+      return result.changes === 1;
+    });
+  }
+
   // ── Directives ─────────────────────────────────────────────────────────
 
   insertDirective(directive: RetryDirectiveV1, targetAttemptId?: string): "created" | "idempotent" | "conflict" {
@@ -208,18 +284,67 @@ export class RetryStore {
     directive: RetryDirectiveV1,
     revisedContract: WorkerAcceptanceContractV1,
     targetAttemptId: string,
-    _executorKind: string,
+    _executorKind: ExecutorKind,
     _executorId: string,
     _earliestClaimAt: string,
     budgetReservation: { tokens: number; cost: number; switches: number },
-    attemptInsert: { id: string; card_id: number; contract_id: string; ordinal: number; executor_kind: string; executor_id: string; status: string; started_at: string; source_attempt_id: string; earliest_claim_at: string },
+    attemptInsert: { id: string; card_id: number; contract_id: string; ordinal: number; executor_kind: ExecutorKind; executor_id: string; status: string; started_at: string; source_attempt_id: string; earliest_claim_at: string },
+    authority?: ProjectMutationAuthority,
   ): AcceptRetryOutcome {
     try {
       return this.db.transaction((): AcceptRetryOutcome => {
         // 1. Reload source attempt — must be terminal
-        const source = this.db.prepare(`SELECT lifecycle, status FROM worker_attempts WHERE id = ?`).get(sourceAttemptId) as { lifecycle: string; status: string } | undefined;
+        const source = this.db.prepare(`SELECT card_id, lifecycle, status, root_project_card_id, root_project_generation, scheduled_run_id FROM worker_attempts WHERE id = ?`).get(sourceAttemptId) as { card_id: number; lifecycle: string; status: string; root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null } | undefined;
         if (!source) return { kind: "stale_source" };
         if (!["completed", "failed", "cancelled", "timed_out"].includes(source.lifecycle)) return { kind: "stale_source" };
+        // The source attempt, retry request, target contract, and successor
+        // card all belong to one durable card lineage. Without these checks a
+        // malformed directive could copy a valid authority tuple from card A
+        // while re-queuing and creating work on card B.
+        if (source.card_id !== cardId || attemptInsert.card_id !== cardId ||
+            attemptInsert.id !== targetAttemptId || attemptInsert.contract_id !== revisedContract.id ||
+            attemptInsert.source_attempt_id !== sourceAttemptId) {
+          return { kind: "conflict" };
+        }
+
+        // #1644: a supervised project attempt cannot allocate a successor once
+        // its root is terminal or its immutable generation/run no longer
+        // authorizes active work. Retries inherit the source lineage verbatim.
+        if (authority) {
+          const sourceRunId = source.scheduled_run_id ?? undefined;
+          if (source.root_project_card_id == null || source.root_project_generation == null) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (source.root_project_card_id !== authority.projectCardId) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (source.root_project_generation !== authority.projectGeneration) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "generation_mismatch", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (sourceRunId !== authority.scheduledRunId) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "run_mismatch", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          const rejection = authorizeActiveProjectWork(this.db, authority);
+          if (rejection) {
+            emitProjectAuthorityRejection("retry_allocation", authority, rejection, { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+        } else if (source.root_project_card_id != null) {
+          const rejection = this.authorizeAttemptForProjectWork({
+            card_id: cardId,
+            root_project_card_id: source.root_project_card_id,
+            root_project_generation: source.root_project_generation,
+            scheduled_run_id: source.scheduled_run_id,
+          }, "retry_allocation");
+          if (rejection) return { kind: "stale_source" };
+        } else if (cardIsSupervisedProjectChild(this.db, cardId)) {
+          emitProjectAuthorityRejection("retry_allocation", undefined, "missing_authority", { cardId });
+          return { kind: "stale_source" };
+        }
 
         // 2. Verify no existing directive/target/reservation for this source
         const existingDirective = this.db.prepare(`SELECT target_attempt_id, directive_digest FROM retry_directives WHERE source_attempt_id = ?`).get(sourceAttemptId) as { target_attempt_id: string | null; directive_digest: string } | undefined;
@@ -271,11 +396,13 @@ export class RetryStore {
           new Date().toISOString(),
         );
 
-        // 6. Insert pending successor attempt
+        // 6. Insert pending successor attempt — lineage copied verbatim from
+        // the source so a retry can never bind to a new project generation or
+        // scheduled run (#1644).
         this.db.prepare(`
-          INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at, source_attempt_id, earliest_claim_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-        `).run(attemptInsert.id, attemptInsert.card_id, attemptInsert.contract_id, attemptInsert.ordinal, attemptInsert.executor_kind, attemptInsert.executor_id, attemptInsert.status, attemptInsert.started_at, attemptInsert.source_attempt_id, attemptInsert.earliest_claim_at);
+          INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at, source_attempt_id, earliest_claim_at, root_project_card_id, root_project_generation, scheduled_run_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+        `).run(attemptInsert.id, attemptInsert.card_id, attemptInsert.contract_id, attemptInsert.ordinal, attemptInsert.executor_kind, attemptInsert.executor_id, attemptInsert.status, attemptInsert.started_at, attemptInsert.source_attempt_id, attemptInsert.earliest_claim_at, source.root_project_card_id, source.root_project_generation, source.scheduled_run_id);
 
         // 7. Insert directive
         this.db.prepare(`
@@ -296,8 +423,20 @@ export class RetryStore {
           WHERE source_attempt_id = ? AND status = ?
         `).run(now, sourceAttemptId, currentDecision.status);
 
-        // 10. Project card to queued
-        this.db.prepare(`UPDATE cards SET status = 'queued' WHERE id = ?`).run(cardId);
+        // 10. Project card to queued — through the single permitted status
+        // writer; the card was failed by the terminal settlement that made the
+        // attempt reviewable, and the retry re-queues it for dispatch.
+        const requeue = kanbanTransition({
+          cardId,
+          from: ["failed", "done"],
+          to: "queued",
+          actor: "retry_requeue",
+          reason: "retry attempt allocated",
+          fields: { error: null, next_retry_at: null },
+        }, this.db);
+        if (requeue.kind !== "applied" && requeue.kind !== "reasserted") {
+          return { kind: "stale_source" } as AcceptRetryOutcome;
+        }
 
         return { kind: "created" };
       });
@@ -307,6 +446,25 @@ export class RetryStore {
   }
 
   // ── Lineage and review ─────────────────────────────────────────────────
+
+  /** #1644: active-work authorization for a source attempt's lineage, run on
+   * the caller's connection inside the caller's transaction. Emits exactly one
+   * bounded rejection trace when the allocation is stale for its project root. */
+  private authorizeAttemptForProjectWork(
+    attempt: { card_id: number; root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null },
+    operation: string,
+  ): ProjectAuthorityRejection | null {
+    const authority: ProjectMutationAuthority = {
+      projectCardId: attempt.root_project_card_id!,
+      projectGeneration: attempt.root_project_generation!,
+      scheduledRunId: attempt.scheduled_run_id ?? undefined,
+    };
+    const rejection = authorizeActiveProjectWork(this.db, authority);
+    if (rejection) {
+      emitProjectAuthorityRejection(operation, authority, rejection, { cardId: attempt.card_id });
+    }
+    return rejection;
+  }
 
   getLineage(attemptId: string): { classification?: FailureClassificationV1; decision?: { decision: RetryPolicyDecision; status: string }; directive?: RetryDirectiveV1 } {
     const classification = this.getClassification(attemptId);

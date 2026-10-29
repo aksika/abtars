@@ -31,9 +31,11 @@ vi.mock("../components/null-memory.js", () => ({
   nullMemory: {},
 }));
 
-import { phaseMemory, createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError } from "./phase-memory.js";
+import { phaseMemory, createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError, MemoryCompositionPendingError, classifyCompositionFailure } from "./phase-memory.js";
 import { createDisabledRuntime, createClientRuntime } from "../components/memory-runtime.js";
 import { AbtarsSignedWssClient } from "../components/abmind-signed-wss-client.js";
+import { AbmindEndpointConfigError } from "../components/abmind-endpoint-config.js";
+import { readFileSync } from "node:fs";
 import type { BootCtx } from "./context.js";
 
 let testHome = "";
@@ -49,7 +51,7 @@ function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
     capabilities: {
       version: 1,
-      methods: ["private.recall", "private.recordMessage", "private.instantStore", "private.edit", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus", "private.rebuildFts"],
+      methods: ["private.recall", "private.recordMessage", "private.instantStore", "private.edit", "private.getCoreKnowledge", "private.getRuntimeStatus", "private.rebuildFts"],
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
     },
     privateMemory: {},
@@ -102,26 +104,48 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
     expect(ctx.memoryRuntime.state).toBe("ready");
   });
 
-  it("absent-config default local mode without abmind stays disabled (compat)", async () => {
+  it("absent-config default local mode without abmind composes late instead of staying disabled", async () => {
     mockLoadAbmind.mockResolvedValue(null);
     const ctx = ctxWithMemory(true);
 
-    await phaseMemory(ctx);
+    await expect(phaseMemory(ctx)).rejects.toBeInstanceOf(MemoryCompositionPendingError);
 
-    expect(ctx.memoryRuntime.state).toBe("disabled");
+    // Stable facade stays installed and unavailable; supervisor is idle.
+    expect(ctx.memoryRuntime.state).toBe("unavailable");
     expect(ctx.abmindModule).toBeNull();
+    expect(ctx.client).toBeNull();
+    expect(ctx.memoryRecomposition).not.toBeNull();
+    expect(ctx.memoryRuntime.compositionDiagnostics?.attempts).toBe(1);
+    expect(ctx.memoryRuntime.compositionDiagnostics?.lastFailure).toBe("package_missing");
   });
 
-  it("an explicit local endpoint without abmind degrades instead of falling back", async () => {
+  it("an explicit local endpoint without abmind composes late instead of falling back", async () => {
     mockLoadAbmind.mockResolvedValue(null);
     const resolveEndpoint = vi.fn().mockReturnValue({ mode: "local", source: "explicit" });
     const ctx = ctxWithMemory(true);
 
-    await phaseMemory(ctx, { resolveEndpoint });
+    await expect(phaseMemory(ctx, { resolveEndpoint })).rejects.toBeInstanceOf(MemoryCompositionPendingError);
 
     expect(ctx.memoryRuntime.state).toBe("unavailable");
     expect(ctx.client).toBeNull();
-    expect(ctx.phaseHealth.get("phaseMemory")?.status).toBe("failed");
+    expect(ctx.memoryRecomposition).not.toBeNull();
+    expect(ctx.memoryRuntime.compositionDiagnostics?.lastFailure).toBe("package_missing");
+  });
+
+  it("immediate success publishes through the shared path and leaves no supervisor", async () => {
+    const fakeModule = { getMemoryClient: vi.fn().mockResolvedValue(fakeClient()) };
+    mockLoadAbmind.mockResolvedValue(fakeModule);
+    const ctx = ctxWithMemory(true);
+
+    const result = await phaseMemory(ctx);
+
+    expect(result).toBe("ran");
+    expect(ctx.abmindModule).toBe(fakeModule);
+    expect(ctx.client).not.toBeNull();
+    expect(ctx.memoryRuntime.state).toBe("ready");
+    expect(ctx.memoryRuntime.compositionDiagnostics).toMatchObject({ state: "upgraded", attempts: 1 });
+    expect(ctx.memoryRecomposition).toBeNull();
+    expect(ctx.phaseHealth.get("memory")?.status).toBe("ok");
   });
 
   it("a wss endpoint builds the abtars client and leaves abmindModule null", async () => {
@@ -169,26 +193,97 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
     });
     const ctx = ctxWithMemory(true);
 
-    await phaseMemory(ctx, { resolveEndpoint });
+    await expect(phaseMemory(ctx, { resolveEndpoint })).rejects.toBeInstanceOf(MemoryCompositionPendingError);
 
     expect(ctx.memoryRuntime.state).toBe("unavailable");
     expect(ctx.client).toBeNull();
-    expect(ctx.phaseHealth.get("phaseMemory")?.status).toBe("failed");
-    expect(ctx.phaseHealth.get("phaseMemory")?.error).toMatch(/endpoint_unavailable/);
+    expect(ctx.memoryRecomposition).not.toBeNull();
+    expect(ctx.memoryRuntime.compositionDiagnostics?.lastFailure).toBe("endpoint_unavailable");
     expect(closeSpy).toHaveBeenCalled();
     closeSpy.mockRestore();
   });
 
-  it("invalid endpoint config degrades with the bounded reason code", async () => {
+  it("invalid endpoint config defers composition with the bounded reason code", async () => {
     const resolveEndpoint = vi.fn().mockImplementation(() => {
-      throw new Error("config_invalid: unknown field");
+      throw new AbmindEndpointConfigError("config_invalid", "config rejected: unknown field");
     });
     const ctx = ctxWithMemory(true);
 
-    await phaseMemory(ctx, { resolveEndpoint });
+    await expect(phaseMemory(ctx, { resolveEndpoint })).rejects.toBeInstanceOf(MemoryCompositionPendingError);
 
     expect(ctx.memoryRuntime.state).toBe("unavailable");
-    expect(ctx.phaseHealth.get("phaseMemory")?.status).toBe("failed");
+    expect(ctx.memoryRecomposition).not.toBeNull();
+    expect(ctx.memoryRuntime.compositionDiagnostics?.lastFailure).toBe("config_invalid");
+  });
+
+  it("generation reset at entry cancels a stale supervisor before rebuilding", async () => {
+    const staleCancel = vi.fn().mockResolvedValue(undefined);
+    const ctx = ctxWithMemory(true, {
+      memoryRecomposition: { cancel: staleCancel } as never,
+    });
+    mockLoadAbmind.mockResolvedValue({ getMemoryClient: vi.fn().mockResolvedValue(fakeClient()) });
+
+    await phaseMemory(ctx);
+
+    expect(staleCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("a retry through the real supervisor re-resolves config and re-runs local checks before composing", async () => {
+    let resolveCalls = 0;
+    const resolveEndpoint = vi.fn(() => {
+      resolveCalls++;
+      if (resolveCalls === 1) throw new AbmindEndpointConfigError("config_invalid", "endpoint config not written yet");
+      return { mode: "local" as const, source: "default" as const };
+    });
+    const fakeModule = { getMemoryClient: vi.fn().mockResolvedValue(fakeClient()) };
+    mockLoadAbmind.mockResolvedValue(fakeModule);
+
+    // Deterministic manual scheduler: ticks are explicit.
+    const queue: Array<() => void> = [];
+    const schedule = (fn: () => void): (() => void) => {
+      queue.push(fn);
+      return () => {};
+    };
+
+    const ctx = ctxWithMemory(true);
+    await expect(phaseMemory(ctx, { resolveEndpoint, schedule })).rejects.toBeInstanceOf(MemoryCompositionPendingError);
+
+    expect(resolveCalls).toBe(1);
+    // Attempt 1 failed at endpoint-config resolution — before any package check.
+    expect(mockLoadAbmind).toHaveBeenCalledTimes(0);
+    expect(ctx.memoryRuntime.state).toBe("unavailable");
+
+    ctx.memoryRecomposition!.start();
+    expect(queue.length).toBeGreaterThanOrEqual(1);
+    queue[0]!(); // first retry tick
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(resolveCalls).toBe(2);                       // endpoint config re-resolved
+    // Retry attempt: closure-level package check + factory discovery (cached loader).
+    expect(mockLoadAbmind).toHaveBeenCalledTimes(2);
+    expect(ctx.memoryRuntime.state).toBe("ready");      // same facade upgraded in place
+    expect(ctx.abmindModule).toBe(fakeModule);
+    expect(ctx.client).not.toBeNull();
+    expect(ctx.phaseHealth.get("memory")?.status).toBe("ok");
+    expect(ctx.memoryRuntime.compositionDiagnostics?.state).toBe("upgraded");
+    expect(ctx.memoryRecomposition!.diagnostics.attempts).toBe(2);
+  });
+});
+
+describe("classifyCompositionFailure (#1706)", () => {
+  it("maps typed and fallback failures to the closed code union", () => {
+    expect(classifyCompositionFailure(new AbmindEndpointConfigError("config_invalid", "bad url"))).toBe("config_invalid");
+    expect(classifyCompositionFailure(new AbmindModuleMissingError())).toBe("package_missing");
+    expect(classifyCompositionFailure(new Error("explicit local memory endpoint selected but the abmind package is not installed"))).toBe("package_missing");
+    expect(classifyCompositionFailure(new MemoryEndpointUnavailableError("pin_mismatch", "pin"))).toBe("pin_mismatch");
+    expect(classifyCompositionFailure(new Error("connection failed: ECONNREFUSED"))).toBe("endpoint_unavailable");
+  });
+
+  it("the recomposition component never imports a boot module (architecture invariant)", () => {
+    const source = readFileSync(new URL("../components/memory-recomposition.ts", import.meta.url), "utf-8");
+    expect(source).not.toMatch(/from\s+"\.\.\/boot\//);
+    expect(source).not.toMatch(/from\s+"\.\/phase-/);
   });
 });
 
@@ -223,13 +318,15 @@ describe("createMemoryRuntimeFromEndpoint", () => {
   });
 
   it("negotiation without core capabilities is rejected", async () => {
+    const client = fakeClient({
+      capabilities: { version: 1, methods: [], features: {} },
+    });
     mockLoadAbmind.mockResolvedValue({
-      getMemoryClient: vi.fn().mockResolvedValue(fakeClient({
-        capabilities: { version: 1, methods: [], features: {} },
-      })),
+      getMemoryClient: vi.fn().mockResolvedValue(client),
     });
     await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, factoryHome))
       .rejects.toThrow(/capabilities/i);
+    expect(client.close).toHaveBeenCalledTimes(1);
   });
 
   it("a wss endpoint that cannot connect fails with a bounded endpoint_unavailable code and closes the client", async () => {
@@ -255,5 +352,28 @@ describe("createMemoryRuntimeFromEndpoint", () => {
     expect((err as MemoryEndpointUnavailableError).code).toBe("endpoint_unavailable");
     expect(closeSpy).toHaveBeenCalled();
     closeSpy.mockRestore();
+  });
+
+  it("an explicit-local negotiation failure closes the partial client exactly once", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const client = {
+      negotiate: vi.fn().mockRejectedValue(new Error("socket connect failed")),
+      close,
+    };
+    class FakeTransport {}
+    class FakeAbmindClient {
+      constructor() { return client; }
+    }
+    const fakeModule = {
+      AbmindClient: FakeAbmindClient,
+      LocalTransport: FakeTransport,
+    };
+    mockLoadAbmind.mockResolvedValue(fakeModule);
+
+    const endpoint = { mode: "local" as const, source: "explicit" as const, socketPath: join(factoryHome, "memory.sock") };
+    await expect(createMemoryRuntimeFromEndpoint(endpoint, factoryHome)).rejects.toThrow("socket connect failed");
+
+    expect(client.negotiate).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

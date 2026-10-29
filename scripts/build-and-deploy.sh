@@ -46,9 +46,9 @@ if ! npm update; then
   rm -rf node_modules
   exit 1
 fi
-PHASE="esbuild"
-echo "=== abtars: esbuild ==="
-node esbuild.config.js || { echo "FAILED: esbuild"; exit 1; }
+PHASE="bundle"
+echo "=== abtars: bundle ==="
+npm run bundle || { echo "FAILED: bundle"; exit 1; }
 
 # Deploy (health-verified, auto-rollback)
 PHASE="deploy"

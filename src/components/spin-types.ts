@@ -4,6 +4,7 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
+import type { ContentOutcome } from "./clean-response.js";
 import type { Delivery, DeliveryMode } from "./tasks/task-types.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
@@ -20,21 +21,6 @@ export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | 
  * session; reusing a session with a conflicting policy fails closed.
  */
 export type CandidatePolicy = "fallback-chain" | "configured-only";
-
-/**
- * #1529: explicit durable-context intent carried from prompt construction
- * through Spin to the transport. Replaces the ambiguous optional cursor:
- * `not_required` means durable memory is not required (ephemeral execution is
- * valid); `required_unavailable` means durable memory IS required but cannot
- * be satisfied — the transport must fail closed before any provider request.
- */
-export type DurableContextIntent =
-  | { mode: "not_required" }
-  | { mode: "durable"; beforeMessageId: number }
-  | {
-      mode: "required_unavailable";
-      reason: "runtime_unavailable" | "record_failed" | "cursor_missing";
-    };
 
 /**
  * #1520: typed scheduled-dispatch admission rejection. Thrown by dispatchAwait
@@ -110,19 +96,6 @@ export interface SteerEvent {
   description: string;
 }
 
-// ── #1248: Bounded /wait FIFO ─────────────────────────────────────────────────
-
-export const MAX_WAIT_ITEMS = 20;
-export const MAX_WAIT_ITEM_BYTES = 4 * 1024;
-export const MAX_WAIT_TOTAL_BYTES = 32 * 1024;
-
-export interface PendingWaitInstruction {
-  readonly id: string;
-  readonly text: string;
-  readonly createdAt: number;
-  readonly bytes: number;
-}
-
 export interface ManagedSession {
   id: string;                    // "1749563282_A_01"
   userId: string;
@@ -170,6 +143,9 @@ export interface ManagedSession {
 
   // Display
   shortIndex: number;
+  /** #1654: master-chat reasoning display. Default false; /thinking show|hide
+   *  flips it. Gates only the 💭 progress feed, never reasoning effort. */
+  showThinking: boolean;
 
   // Pipeline state (#1040 — merged from SessionRegistry)
   busy: boolean;
@@ -177,12 +153,8 @@ export interface ManagedSession {
   fullMode: boolean;
   pendingStart: boolean;
   seen: boolean;
-  compacting: boolean;
-  ctxWarned: boolean;
-  compactFailures: number;
   primingTerms: string[];
-  /** #1248: Bounded FIFO for /wait instructions (replaced unbounded string). */
-  pendingWait: PendingWaitInstruction[];
+
 
   // Completion buffer (#1040 — merged from completion-buffer.ts)
   completions: Array<{ sessionId: string; goal: string; status: string; result: string; elapsedMs: number; inputTokens: number; outputTokens: number }>;
@@ -209,7 +181,13 @@ export interface ManagedSession {
   activeCardId?: number;
   activeRootCardId?: number;
   // #1480: Orc invocation context for durable project ownership fencing.
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. Set once
+   *  at turn start from the coordinator's typed turn spec; intent completion
+   *  terminates the active turn and Spin's release reads the terminal. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
 }
 
 export interface SpinRequest {
@@ -227,6 +205,11 @@ export interface SpinRequest {
    *  shared settler wins successful validation and releases delivery. */
   deliveryReady?: boolean;
   priority?: string;
+  /**
+   * #1786: per-execution sandbox override. When present it replaces the
+   * transport default for schema presentation AND tool dispatch for this
+   * turn only. Peer chat passes the deny-all peer policy here.
+   */
   tools?: SandboxPolicy;
   timeoutMs?: number;
   /** #1506: absolute deadline owned by the scheduled caller. */
@@ -244,7 +227,17 @@ export interface SpinRequest {
   /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./transport/tool-registry.js").WorkOrigin;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
+  /** #1644: immutable project authority for supervised child creation — bound
+   *  from the Orc invocation context, never from tool arguments. */
+  authority?: { projectCardId: number; projectGeneration: number; scheduledRunId?: string };
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -288,6 +281,12 @@ export interface SpinSessionSpec {
    *  Defaults to `fallback-chain`; sleep sets `configured-only`. */
   candidatePolicy?: CandidatePolicy;
   maxToolRounds?: number; // #1283: per-task circuit breaker override
+  /**
+   * #1786: per-execution sandbox override. When present it replaces the
+   * transport default for schema presentation AND tool dispatch for this
+   * turn only. Peer chat passes the deny-all peer policy here.
+   */
+  tools?: SandboxPolicy;
 
   // Delivery (continuation / pipeline)
   deliveryMode?: DeliveryMode;
@@ -297,11 +296,6 @@ export interface SpinSessionSpec {
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
-  // #1529: explicit durable-context intent for the inbound turn. An omitted
-  // field means the caller is outside the inbound durable pipeline and
-  // defaults to not-required at the transport boundary; inbound pipeline
-  // calls always provide the explicit intent.
-  durableContextIntent?: DurableContextIntent;
   /** #1335: structured current turn components for Direct API cache-stable assembly. */
   directContextTurn?: {
     rawUserText: string;
@@ -327,33 +321,79 @@ export interface SpinSessionSpec {
                                         // (not merged on sessionId-reuse — see design §2)
 
   // #1480: Orc invocation context for durable project ownership fencing.
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./transport/tool-registry.js").WorkOrigin;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
 
   // Result
   await?: boolean;
 
   // Progress hook (partial-result reporting — sleep, workers)
   onStepComplete?: (event: StepEvent) => void | Promise<void>;
+
+  // #1752: host-owned sleep execution origin — only the sleep capability may set it; never from model/prompt
+  executionOrigin?: "sleep";
 }
 
-export interface StepEvent {
+/** #1651 v2: truthful step event — success carries the settled result and its
+ *  outcome; failure carries the error. Never both. */
+export type StepEvent =
+  | {
+      sessionId: string;
+      cardId?: number;
+      stepIndex: number;
+      result: string;
+      outcome: ContentOutcome;
+      error?: undefined;
+      durationMs: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    }
+  | {
+      sessionId: string;
+      cardId?: number;
+      stepIndex: number;
+      result?: undefined;
+      outcome?: undefined;
+      error: Error;
+      durationMs: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+/** #1651 v2: dispatch identity for a non-awaited `spin()` call. */
+export interface SpinDispatchResult {
   sessionId: string;
   cardId?: number;
-  stepIndex: number;        // 1-based call count within this session
-  result?: string;          // undefined on failure
-  error?: Error;
-  durationMs: number;
-  inputTokens?: number;     // per-call absolute (usage.input), not a delta
-  outputTokens?: number;    // per-call absolute (usage.output)
 }
 
-export interface SpinResult {
-  sessionId: string;
-  cardId?: number;
-  result?: string;          // present when await: true
+/**
+ * #1651 v2: the settled result of a successfully awaited `spin()` call.
+ * `result` is the provider's own string — never fabricated, so it MAY be
+ * empty. `outcome` is Spin's single classification of the turn. Both are
+ * required: no consumer may reconstruct the outcome from result truthiness.
+ */
+export interface AwaitedSpinResult extends SpinDispatchResult {
+  /** Settled execution identity; the session may already have released it. */
+  executionId?: string;
+  result: string;
+  outcome: ContentOutcome;
 }
 
-/** #1361: Per-execution continuation-capable driver for Spin's execution loop.
+/** #1651 v2: `dispatchAwait()` preserves the awaited contract. */
+export interface DispatchAwaitedResult {
+  cardId: number;
+  result: string;
+  outcome: ContentOutcome;
+}
+
+/**
+ * #1361: Per-execution continuation-capable driver for Spin's execution loop.
  *  #1531: `steer` is a per-lease acknowledgement operation (`Promise<void>`).
  *  It acknowledges only the supplied lease; it never produces the execution's
  *  final response — the initial `send` promise remains the sole source of the

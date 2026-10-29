@@ -2,12 +2,12 @@
  * config.test.ts — #1394 Pi workspace path containment and alias validation.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
-import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { buildSessionDirArgs, buildTrustArgs, isPathWithinRoot, resolveAndValidateWorkspace, validateFixedArgs, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 
 let mockConfigDir = "/nonexistent";
 
@@ -144,10 +144,23 @@ describe("validatePiWorkspaceAliases", () => {
   });
 });
 
+describe("buildTrustArgs", () => {
+  it("uses an alias-specific trust policy when configured", () => {
+    const config = {
+      enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
+      maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
+      projectTrust: "never", sessionStorageRoot: "",
+      workspaceAliases: { trusted: { path: "/tmp", projectTrust: "always" } },
+    } as PiExecutorConfig;
+    expect(buildTrustArgs(config, "trusted")).toEqual(["--approve"]);
+    expect(buildTrustArgs(config, "missing")).toEqual(["--no-approve"]);
+  });
+});
+
 // ── Real filesystem containment tests ─────────────────────────────────
 
 describe("resolveAndValidateWorkspace (real filesystem)", () => {
-  const { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { mkdtempSync, mkdirSync, realpathSync, symlinkSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
   const { join } = require("node:path") as typeof import("node:path");
   const { tmpdir } = require("node:os") as typeof import("node:os");
 
@@ -162,7 +175,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   }
 
   it("accepts valid child directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const child = join(root, "subdir");
     mkdirSync(child, { recursive: true });
     try {
@@ -176,7 +189,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("accepts root equality", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     try {
       const config = makeConfig({ test: { path: root, root } });
       const result = resolveAndValidateWorkspace("test", config);
@@ -188,8 +201,8 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects sibling prefix escape", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-root-"));
-    const evil = mkdtempSync(join(tmpdir(), "pi-root-evil")); // siblings by prefix
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-root-")));
+    const evil = realpathSync(mkdtempSync(join(tmpdir(), "pi-root-evil"))); // siblings by prefix
     try {
       const config = makeConfig({ test: { path: evil, root } });
       const result = resolveAndValidateWorkspace("test", config);
@@ -201,7 +214,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects a file instead of directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const filePath = join(root, "not-a-dir");
     writeFileSync(filePath, "content");
     try {
@@ -214,7 +227,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("accepts symlink inside root", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const realDir = join(root, "real");
     const linkDir = join(root, "link");
     mkdirSync(realDir, { recursive: true });
@@ -233,8 +246,8 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects symlink outside root", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
-    const outside = mkdtempSync(join(tmpdir(), "pi-outside-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-outside-")));
     const linkDir = join(root, "escape");
     try {
       symlinkSync(outside, linkDir);
@@ -254,7 +267,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
 // ── Loader behavior tests (#1440) ─────────────────────────────────────
 
 describe("loadPiConfig", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pi-load-config-"));
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "pi-load-config-")));
   const configPath = join(tmp, "pi-executor.json");
 
   beforeAll(() => { mockConfigDir = tmp; });
@@ -289,5 +302,156 @@ describe("loadPiConfig", () => {
     expect(cfg!.enabled).toBe(true);
     expect(cfg!.command).toBe("pi");
     expect(cfg!.workspaceAliases).toHaveProperty("work");
+  });
+
+  it("#1635: sessionStorageRoot defaults to the abtars state directory, never empty", () => {
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } },
+    }), "utf-8");
+    const cfg = loadPiConfig()!;
+    expect(cfg.sessionStorageRoot).toBe(join(homedir(), ".abtars", "state"));
+    expect(existsSync(cfg.sessionStorageRoot)).toBe(true); // created best-effort
+    // an explicit absolute path wins
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, sessionStorageRoot: "/tmp/pi-sess",
+    }), "utf-8");
+    expect(loadPiConfig()!.sessionStorageRoot).toBe("/tmp/pi-sess");
+    // an explicit empty string also falls back (empty = default)
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, sessionStorageRoot: "",
+    }), "utf-8");
+    expect(loadPiConfig()!.sessionStorageRoot).toBe(join(homedir(), ".abtars", "state"));
+  });
+
+  it("#1638: defaults maxConcurrent to 3 and preserves an explicit operator value", () => {
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } },
+    }), "utf-8");
+    expect(loadPiConfig()!.maxConcurrent).toBe(3);
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, maxConcurrent: 1,
+    }), "utf-8");
+    expect(loadPiConfig()!.maxConcurrent).toBe(1);
+  });
+});
+
+// ── #1647: bounded persisted-session proof ──────────────────────────────
+
+describe("validatePersistedSession (#1647)", () => {
+  let sessionRoot: string;
+
+  beforeEach(() => {
+    sessionRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-session-proof-")));
+  });
+
+  afterEach(() => {
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+
+  async function importValidator() {
+    return import("./config.js");
+  }
+
+  it("returns available only when the header id matches and the file is inside the root", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "a.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "sess-1" }) + "\n", "utf-8");
+    const ok = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "sess-1", sessionFile: file });
+    expect(ok).toEqual({ ok: true, sessionId: "sess-1", canonicalFile: file });
+    // Mismatched expected id -> session_missing.
+    const mismatch = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "sess-2", sessionFile: file });
+    expect(mismatch).toMatchObject({ ok: false, capability: "session_missing" });
+  });
+
+  it("maps identity absence, malformed, empty, and wrong-type headers to non-available capabilities", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const neverStarted = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: undefined, sessionFile: undefined });
+    expect(neverStarted).toMatchObject({ ok: false, capability: "never_started" });
+    const incomplete = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: undefined });
+    expect(incomplete).toMatchObject({ ok: false, capability: "session_missing" });
+    const missingFile = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: join(sessionRoot, "gone.jsonl") });
+    expect(missingFile).toMatchObject({ ok: false, capability: "session_missing" });
+    const emptyFile = join(sessionRoot, "empty.jsonl");
+    writeFileSync(emptyFile, "", "utf-8");
+    const empty = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: emptyFile });
+    expect(empty).toMatchObject({ ok: false, capability: "session_missing" });
+    const malformed = join(sessionRoot, "bad.jsonl");
+    writeFileSync(malformed, "this is not json\n", "utf-8");
+    const bad = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: malformed });
+    expect(bad).toMatchObject({ ok: false, capability: "session_missing" });
+    const wrongType = join(sessionRoot, "wrong.jsonl");
+    writeFileSync(wrongType, JSON.stringify({ type: "message", id: "s" }) + "\n", "utf-8");
+    const wt = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: wrongType });
+    expect(wt).toMatchObject({ ok: false, capability: "session_missing" });
+  });
+
+  it("rejects an over-limit first record without loading the conversation", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "huge.jsonl");
+    const hugeFirstLine = JSON.stringify({ type: "session", id: "s", payload: "x".repeat(80 * 1024) });
+    writeFileSync(file, hugeFirstLine + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: file });
+    expect(result).toMatchObject({ ok: false, capability: "session_missing" });
+    expect((result as { reason: string }).reason).toContain("64 KiB");
+  });
+
+  it("treats an outside-root target as policy_changed, not session_missing", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const outside = join(tmpdir(), `outside-${Date.now()}.jsonl`);
+    writeFileSync(outside, JSON.stringify({ type: "session", id: "s" }) + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: outside });
+    expect(result).toMatchObject({ ok: false, capability: "policy_changed" });
+    rmSync(outside, { force: true });
+  });
+
+  it("maps a vanished or misconfigured session root to policy_changed", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "a.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "s" }) + "\n", "utf-8");
+    const gone = validatePersistedSession({ sessionStorageRoot: join(sessionRoot, "no-such-root"), expectedSessionId: "s", sessionFile: file });
+    expect(gone).toMatchObject({ ok: false, capability: "policy_changed" });
+    const unset = validatePersistedSession({ sessionStorageRoot: "", expectedSessionId: "s", sessionFile: file });
+    expect(unset).toMatchObject({ ok: false, capability: "policy_changed" });
+  });
+
+  it("never loads or logs conversation content in reasons", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "secret.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "other" }) + "\n" + JSON.stringify({ secret: "private-conversation-data" }) + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: file });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("private-conversation-data");
+  });
+});
+
+// ── #1755: session-dir containment ───────────────────────────────────
+
+describe("buildSessionDirArgs (#1755)", () => {
+  it("returns --session-dir plus the configured root", () => {
+    const cfg = { sessionStorageRoot: "/state/pi" } as PiExecutorConfig;
+    expect(buildSessionDirArgs(cfg)).toEqual(["--session-dir", "/state/pi"]);
+  });
+});
+
+describe("validateFixedArgs (#1755)", () => {
+  it("rejects --session-dir (executor-owned)", () => {
+    const errors = validateFixedArgs(["--session-dir"]);
+    expect(errors.some((e) => e.includes("--session-dir"))).toBe(true);
+  });
+
+  it("rejects --session-id (executor-owned conversation identity)", () => {
+    const errors = validateFixedArgs(["--session-id"]);
+    expect(errors.some((e) => e.includes("--session-id"))).toBe(true);
+  });
+
+  it("no longer rejects dead flags --session-storage-root and --rpc-version", () => {
+    expect(validateFixedArgs(["--session-storage-root"])).toEqual([]);
+    expect(validateFixedArgs(["--rpc-version"])).toEqual([]);
+  });
+
+  it("still rejects other executor-owned flags", () => {
+    expect(validateFixedArgs(["--mode"]).length).toBeGreaterThan(0);
+    expect(validateFixedArgs(["--extension"]).length).toBeGreaterThan(0);
+    expect(validateFixedArgs(["--provider"]).length).toBeGreaterThan(0);
   });
 });

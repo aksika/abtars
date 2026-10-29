@@ -20,10 +20,13 @@ export async function wireTelegram(ctx: BootCtx): Promise<void> {
   const adapter = ctx.telegramAdapter;
   if (!adapter || !ctx.pipelineDeps || !ctx.transport) return;
 
+  const pipelineDeps = ctx.pipelineDeps;
   adapter.setMessageHandler({
-    pipeline: ctx.pipelineDeps,
+    pipeline: pipelineDeps,
     conversationBuffer: ctx.conversationBuffer,
-    transport: ctx.transport,
+    // #1800: read the live pipeline transport at use so a completed
+    // transport rebuild is visible without re-wiring the adapter.
+    get transport() { return pipelineDeps.transport; },
     memoryRuntime: ctx.memoryRuntime,
     sessionManager: ctx.sessionManager,
     actionGate: ctx.actionGate,
@@ -56,9 +59,11 @@ export async function wireDiscord(ctx: BootCtx): Promise<void> {
   const adapter = ctx.discordAdapter;
   if (!adapter || !ctx.pipelineDeps || !ctx.transport) return;
 
+  const pipelineDeps = ctx.pipelineDeps;
   adapter.setMessageHandler({
-    pipeline: ctx.pipelineDeps,
-    transport: ctx.transport,
+    pipeline: pipelineDeps,
+    // #1800: read the live pipeline transport at use (same as wireTelegram).
+    get transport() { return pipelineDeps.transport; },
     memoryRuntime: ctx.memoryRuntime,
     conversationBuffer: ctx.conversationBuffer,
   });
@@ -84,6 +89,14 @@ export async function wireTui(ctx: BootCtx): Promise<void> {
 
 /** Drain messages queued by the recovery handler while the pipeline was down. */
 export async function drainRecoveryQueue(ctx: BootCtx): Promise<void> {
+  // #1831: reset the per-chat notice throttle only when wiring could actually
+  // have happened (same precondition wireTelegram/wireDiscord require). A
+  // drain during a transport-rebuild gap must not re-arm the notice while the
+  // adapters are still unwired. Runs before the empty-queue return so wiring
+  // with nothing queued still ends the episode.
+  if (ctx.pipelineDeps && ctx.transport) {
+    (ctx as unknown as { _recoveryNoticeThrottle?: { clear(): void } })._recoveryNoticeThrottle?.clear();
+  }
   const queue = (ctx as unknown as { _recoveryQueue?: Array<{ msg: unknown; adapter: unknown }> })._recoveryQueue;
   if (!queue?.length || !ctx.pipelineDeps) return;
 

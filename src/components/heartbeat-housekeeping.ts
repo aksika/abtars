@@ -2,6 +2,7 @@ import { logInfo, logWarn, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import type { HeartbeatTask, HeartbeatTaskOutcome } from "../types/index.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
+import type { TaskDatabase } from "./tasks/kanban-board.js";
 
 const TAG = "housekeeping";
 const MINUTE = 60_000;
@@ -37,6 +38,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     { name: "update-check", intervalMs: 6 * HOUR, run: runUpdateCheck },
     { name: "metrics-prune", intervalMs: DAY, run: pruneMetrics },
     { name: "kanban-cleanup", intervalMs: DAY, run: cleanupKanban },
+    { name: "project-workspace-reclaim", intervalMs: DAY, run: reclaimProjectWorkspaces },
     { name: "pi-command-prune", intervalMs: DAY, run: prunePiCommands },
     { name: "attempt-prune", intervalMs: DAY, run: pruneTerminalAttempts },
   ];
@@ -153,6 +155,25 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} terminal cards (done/failed/delivered) > 7d`);
   }
 
+  /** #1846 — reclaims per-project workspaces orphaned by the kanban-cleanup
+   * purge above, once their card has been provably absent for a 3-day grace
+   * (7d terminal retention + 3d grace = 10d total). An unavailable task
+   * database is an expected no-op state, not a failure: the reclaim module
+   * logs and deletes nothing on a null handle. */
+  async function reclaimProjectWorkspaces(): Promise<void> {
+    const { reclaimOrphanedProjectWorkspaces } = await import("./project-workspace-reclaim.js");
+    const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
+    const { abtarsHome } = await import("../paths.js");
+    const { join } = await import("node:path");
+    let db: TaskDatabase | null = null;
+    try {
+      db = requireTaskDatabase();
+    } catch {
+      // better-sqlite3 missing or kanban DB unusable — reclaim treats null as a no-op pass.
+    }
+    reclaimOrphanedProjectWorkspaces(db, join(abtarsHome(), "workspace", "projects"));
+  }
+
   /** #1551 — wires the previously-dead PiRunStore.cleanupOldCommands + the
    * uncovered remote_pi_approvals_consumed table onto the same 7d cadence as
    * kanban-cleanup above. requireTaskDatabase() is the shared handle every
@@ -161,11 +182,20 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   async function prunePiCommands(): Promise<void> {
     const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
     const { PiRunStore } = await import("./pi-executor/pi-run-store.js");
-    const store = new PiRunStore({ db: requireTaskDatabase() });
+    // The configured session root is irrelevant to command/approval pruning;
+    // pass the config value when resolvable, else an empty root (never used
+    // by the cleanup methods).
+    let sessionStorageRoot = "";
+    try {
+      const { loadPiConfig } = await import("./pi-executor/config.js");
+      sessionStorageRoot = loadPiConfig()?.sessionStorageRoot ?? "";
+    } catch { /* best effort */ }
+    const store = new PiRunStore({ db: requireTaskDatabase(), sessionStorageRoot });
     const commands = store.cleanupOldCommands(7 * 24);
     const approvals = store.cleanupConsumedApprovals(7 * 24);
-    if (commands > 0 || approvals > 0) {
-      logInfo(TAG, `Pi telemetry: purged ${commands} commands, ${approvals} consumed approvals > 7d`);
+    const runs = store.cleanupOldRuns(7);
+    if (commands > 0 || approvals > 0 || runs > 0) {
+      logInfo(TAG, `Pi telemetry: purged ${commands} commands, ${approvals} consumed approvals, ${runs} terminal runs > 7d`);
     }
   }
 

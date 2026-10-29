@@ -3,8 +3,10 @@
  * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
-import { logInfo, logWarn, logDebug } from "./logger.js";
+import { logInfo, logWarn, logDebug, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
+import { classifyContent } from "./clean-response.js";
+import type { ContentOutcome } from "./clean-response.js";
 import { SpinDispatchAdmissionError } from "./spin-types.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanGetCard, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
@@ -12,13 +14,15 @@ import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-tran
 import type { CancelReason } from "./swarm-executor-types.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinDispatchResult, AwaitedSpinResult, DispatchAwaitedResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
-import { profileFor, type SessionProfile } from "./spin-profiles.js";
+import { profileFor, profileCarriesSoulBundle, type SessionProfile } from "./spin-profiles.js";
+import { subagentAgentUsesPiTransport } from "./agent-registry.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
-import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError } from "./execution-control.js";
+import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError, isReconcilerOwnedCard, type TerminalOutcome } from "./execution-control.js";
+import { drainPeerCallbackForCard } from "./peer-callback-outbox.js";
 import { createSpinMaintenance, type SpinMaintenance } from "./spin-maintenance.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
@@ -26,7 +30,8 @@ import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
 import { createOutputObserver, type OutputObserver } from "./session-output-feed.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
-import { normalizeContract } from "./worker-contract.js";
+import { normalizeContract, acceptancePassed } from "./worker-contract.js";
+import { BOOT_GREETING_TOKEN, type InternalBootMetadata } from "../types/platform.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -41,6 +46,18 @@ const SESSION_CREATE_TIMEOUT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 
 const MAX_STEER_ROUNDS = 10;
+
+/** Best-effort cleanup for execution-scoped sealed handles. */
+async function revokeSealedSecretExecution(executionId: string | undefined): Promise<void> {
+  if (!executionId) return;
+  try {
+    const { revokeSealedSecretExecution: revoke } = await import("./transport/tool-registry.js");
+    revoke(executionId);
+  } catch {
+    // Handle cleanup must never turn a terminal session transition into a
+    // second failure, and the execution id itself is not logged.
+  }
+}
 
 const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
   T: 1, O: 1, B: 1, D: 1, H: 1, W: 3,
@@ -66,7 +83,6 @@ export class Spin {
    * current provider directly instead of scraping an optional transport
    * property (which was never set and produced a circular no-op).
    */
-  private contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
 
   /** #1540: compose the closure-backed owners; tests may inject fresh ones. */
   constructor(components?: Partial<SpinComponents>) {
@@ -81,7 +97,6 @@ export class Spin {
   }
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
-  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void { this.contextProvider = holder; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
   setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
   setSessionOutputFeed(feed: SessionOutputFeed): void { this.sessionOutputFeed = feed; }
@@ -114,10 +129,13 @@ export class Spin {
    *  Non-active, platform="background" — visible in master /session (showAll) for the full cycle.
    *  Call at sleep start before the first runtime.complete(); the caller holds the returned id
    *  and passes it as sessionId to subsequent spin({ type:"D", sessionId }) calls. */
-  allocateDreamySession(name: string): ManagedSession {
+  allocateDreamySession(name: string, workingDir?: string): ManagedSession {
     const userId = getMasterUserId();
     const session = this.sessions.allocate({ type: "D", userId, platform: "background", chatId: 0, active: false });
     session.name = name;
+    // #1807: metadata mirror of the cycle cwd only — the runtime's recorded
+    // creation binding (not this field) attests how the transport was created.
+    if (workingDir) session.workingDir = workingDir;
     return session;
   }
 
@@ -156,11 +174,86 @@ export class Spin {
     return true;
   }
 
+  /**
+   * #1635 — Allocate a non-active, transportless C session envelope for a
+   * durable interactive coding session. One envelope spans all turn
+   * generations: the metadata carries the durable coding-session identity
+   * instead of an immutable (runId, generation) pair, so per-turn teardown
+   * never ends the envelope.
+   */
+  allocateCodingExternalSession(spec: {
+    userId: string;
+    platform: string;
+    name: string;
+    workingDir: string;
+    codingSessionId: string;
+  }): ManagedSession {
+    const session = this.sessions.allocate({ type: "C", userId: spec.userId, platform: spec.platform, chatId: 0, active: false });
+    session.name = spec.name;
+    session.workingDir = spec.workingDir;
+    (session as unknown as Record<string, unknown>).externalMetadata = {
+      kind: "coding",
+      codingSessionId: spec.codingSessionId,
+    };
+    return session;
+  }
+
+  /**
+   * #1635 — End a coding-session envelope. Validates the durable identity
+   * (never a per-turn generation pair). Preserves the Pi transcript — only
+   * the abTARS envelope ends.
+   */
+  endCodingExternalSession(sessionId: string, codingSessionId: string): boolean {
+    const session = this.sessions.getById(sessionId);
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { kind?: string; codingSessionId?: string } | undefined;
+    if (!meta || meta.kind !== "coding" || meta.codingSessionId !== codingSessionId) return false;
+    const r = this.sessions.end(session.userId, session.platform, session.shortIndex);
+    if (typeof r === "string") return false;
+    this.finalizeSession(r, "external_ended");
+    return true;
+  }
+
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
     return this.sessions.switch(userId, platform, index);
   }
 
+  /**
+   * #1635 — coding-session teardown hook (wired at boot). /session end|kill
+   * on a coding C envelope must release the Pi turn's slot/claim/lease and
+   * preserve the transcript BEFORE the envelope is finalized. A live coding
+   * process makes the synchronous end/kill call return a bounded retry result;
+   * the coding owner finalizes the envelope after asynchronous reap.
+   */
+  private _codingTeardown: ((sessionId: string) => boolean) | null = null;
+
+  setCodingSessionTeardown(cb: ((sessionId: string) => boolean) | null): void {
+    this._codingTeardown = cb;
+  }
+
+  private isCodingEnvelope(session: ManagedSession | undefined): session is ManagedSession {
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { kind?: string } | undefined;
+    return meta?.kind === "coding";
+  }
+
+  /** #1635 — resolve the coding teardown target and run the owner's
+   * generation-fenced teardown before the envelope is finalized. */
+  private preEndCodingTeardown(userId: string, platform: string, index?: number): boolean {
+    const target = this.sessions.resolveAddressable(userId, platform, index);
+    if (!this.isCodingEnvelope(target)) return true;
+    try {
+      return this._codingTeardown?.(target.id) ?? true;
+    } catch (err) {
+      logWarn("spin", `Coding teardown failed for ${target.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
   endSession(userId: string, platform: string, index?: number): ManagedSession | string {
+    if (!this.preEndCodingTeardown(userId, platform, index)) {
+      return "Coding session is still stopping; retry shortly";
+    }
     const r = this.sessions.end(userId, platform, index);
     if (typeof r === "string") return r;
     this.finalizeSession(r, "ended");
@@ -168,6 +261,9 @@ export class Spin {
   }
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
+    if (!this.preEndCodingTeardown(userId, platform, index)) {
+      return "Coding session is still stopping; retry shortly";
+    }
     const r = this.sessions.kill(userId, platform, index);
     if (typeof r === "string") {
       const bg = this.sessions.getByGlobalIndex(index);
@@ -259,6 +355,35 @@ export class Spin {
 
   private _greetingSent = false;
   private _greetingAdapter: { injectMessage: (msg: any) => void } | null = null;
+  /** #1515: bounded immutable question attached to the automatic boot
+   *  greeting only. Set before registerMasterSession(); never touched by
+   *  /session new, transport resets, or generic greetSession calls. */
+  private _bootGreetingQuestion: import("../types/platform.js").BootGreetingQuestion | null = null;
+
+  /**
+   * #1515: install at most one question for the automatic boot greeting.
+   * Preloaded in phase-pipeline-deps BEFORE registerMasterSession() so either
+   * registration or the later setGreetingAdapter() can fire the greeting with
+   * the question attached. Null clears the pending question.
+   */
+  setBootGreetingQuestion(question: import("../types/platform.js").BootGreetingQuestion | null): void {
+    this._bootGreetingQuestion = question
+      ? { id: question.id, text: question.text }
+      : null;
+  }
+
+  /**
+   * Re-arm the automatic boot greeting for a bridge (re)start. The Spin
+   * singleton outlives in-process restarts (main.ts loop), so without this
+   * the stale sent-flag — and possibly a stale preloaded question — would
+   * silently suppress every greeting after the first boot. Called once per
+   * startBridge before the boot graph; the pipelineDeps phase preloads a
+   * fresh question afterwards. Never touches sessions or transports.
+   */
+  resetBootGreeting(): void {
+    this._greetingSent = false;
+    this._bootGreetingQuestion = null;
+  }
 
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
@@ -279,6 +404,27 @@ export class Spin {
     this.tryFireGreeting();
   }
 
+  /**
+   * #1699: after a successful live transport rebuild, swap the rebuilt
+   * instance onto every bridge-owned session. Reference swap only — session
+   * lifecycle fields (status, busy, queue, delivery, ownership) are untouched.
+   * Runtime-owned sessions hold their own transports and are never rebound.
+   * Returns the number of rebound sessions.
+   */
+  rebindBridgeTransports(transport: IKiroTransport): number {
+    let rebound = 0;
+    for (const session of this.listAllSessions()) {
+      if (session.transportOwner !== "bridge") continue;
+      session.transport = transport;
+      const t = transport as { _rawClient?: { pid?: number }; agent?: { pid?: number } };
+      session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+      pushLog(session, "master transport rebound after rebuild");
+      rebound++;
+    }
+    logInfo(TAG, `Bridge-owned transports rebound: ${rebound}`);
+    return rebound;
+  }
+
   /** Set the adapter for boot greeting. Called after platforms are up. */
   setGreetingAdapter(adapter: { injectMessage: (msg: any) => void }): void {
     this._greetingAdapter = adapter;
@@ -292,20 +438,48 @@ export class Spin {
     this._greetingSent = true;
     const { userId, chatId, platform } = this._masterOpts;
     const session = this.getActiveSession(userId, platform);
-    this.greetSession(session, chatId, userId);
+    // #1515: ONLY the automatic boot path passes the preloaded question.
+    // Direct greetSession calls (/session new, transport resets) never carry
+    // it, so they neither attach nor consume one.
+    const dreamQuestion = this._bootGreetingQuestion
+      ? { id: this._bootGreetingQuestion.id, text: this._bootGreetingQuestion.text }
+      : undefined;
+    // The closure created by greetSession owns the immutable retry copy. Do
+    // not retain the pending question on Spin after the first boot injection.
+    this._bootGreetingQuestion = null;
+    this.greetSession(session, chatId, userId, undefined, dreamQuestion, true);
   }
 
   /** Inject a greeting into an interactive session (A/C only). */
-  greetSession(session: ManagedSession, chatId: number, userId: string, adapter?: { injectMessage: (msg: any) => void }): void {
+  greetSession(
+    session: ManagedSession,
+    chatId: number,
+    userId: string,
+    adapter?: { injectMessage: (msg: any) => void },
+    dreamQuestion?: { id: string; text: string },
+    boot = false,
+  ): void {
     const type = sessionType(session);
     if (type !== "A" && type !== "C") return;
-    if (session.messageCount > 0) return;
+    // Boot greetings fire on every bridge (re)start even when the surviving
+    // in-process session already counts messages; direct calls keep the guard.
+    if (!boot && session.messageCount > 0) return;
     const a = adapter ?? this._greetingAdapter;
     if (!a) return;
+
+    // #1515: the automatic boot greeting carries the trusted question
+    // metadata; retries reuse the same bounded immutable copy.
+    const bootQuestion = dreamQuestion ? { id: dreamQuestion.id, text: dreamQuestion.text } : undefined;
 
     let attempt = 0;
     const inject = (): void => {
       attempt++;
+      const internal = bootQuestion
+        ? ({ kind: "boot_greeting", dreamQuestion: bootQuestion } as InternalBootMetadata)
+        : undefined;
+      if (internal) {
+        Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+      }
       a.injectMessage({
         platform: session.platform,
         channelId: String(chatId),
@@ -316,6 +490,7 @@ export class Spin {
         timestamp: Date.now(),
         isGroup: false,
         isVoice: false,
+        internal,
       });
       setTimeout(() => {
         if (session.messageCount > 0) return;
@@ -400,7 +575,7 @@ export class Spin {
     let agentSession: import("./subagent-runtime.js").AgentSession;
     try {
       agentSession = await Promise.race([
-        this.runtime!.session(attachAgent, userId),
+        this.runtime!.session(attachAgent, userId, { sessionType: sessionType(session) }),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
     } catch (err) {
@@ -494,7 +669,11 @@ export class Spin {
   // branches here. Continuation (pipeline main turn, sleep step N) is just
   // spin() with a sessionId.
 
-  async spin(spec: SpinSessionSpec): Promise<SpinResult> {
+  /** #1651 v2: awaited calls return the settled result contract. */
+  async spin(spec: SpinSessionSpec & { await: true }): Promise<AwaitedSpinResult>;
+  /** #1651 v2: fire-and-forget calls return only dispatch identity. */
+  async spin(spec: SpinSessionSpec): Promise<SpinDispatchResult>;
+  async spin(spec: SpinSessionSpec): Promise<AwaitedSpinResult | SpinDispatchResult> {
     if (!this.runtime) throw new Error("Spin: runtime not set");
     if (spec.signal?.aborted) throw new Error("Execution cancelled");
     const profile = profileFor(spec.type);
@@ -511,11 +690,12 @@ export class Spin {
       if (spec.cardId !== undefined) {
         try { kanbanFail(spec.cardId, note); } catch { /* best effort */ }
       }
-      return {
-        sessionId: spec.sessionId ?? "",
-        cardId: spec.cardId,
-        result: `[SYSTEM BUG] ${note}`,
-      };
+      // #1651 v2: the awaited contract still holds on the fail-soft path — the
+      // diagnostic text IS the content the caller receives.
+      if (spec.await) {
+        return { sessionId: spec.sessionId ?? "", cardId: spec.cardId, result: `[SYSTEM BUG] ${note}`, outcome: "text" };
+      }
+      return { sessionId: spec.sessionId ?? "", cardId: spec.cardId };
     }
 
     // 1. Defaults
@@ -544,11 +724,34 @@ export class Spin {
       session = this.sessions.allocate({ type: spec.type, userId, platform, chatId });
       if (spec.metadata) session.metadata = { ...spec.metadata };
     }
+
+    // #1751: an ownerless O turn must never resolve to a project-scoped
+    // session. This also fences explicit-session and active-session paths,
+    // which bypass getOrCreateVisibleSession above.
+    if (spec.type === "O" && !spec.orcContext && session.orcContext !== undefined) {
+      session = this.getOrCreateVisibleSession(userId, spec.type)!;
+    }
     const stepIndex = (session.messageCount >> 1) + 1;
+
+    // #1691/#1913: one active A/O execution per reusable session. A second call
+    // against a session whose execution is still running is rejected before
+    // any session field, turn control, card association, or transport state
+    // is mutated — it is never serialized behind the first execution and can
+    // never overwrite its context. The coordinator's start-port catch maps
+    // this rejected start to the bounded `start_port_rejected` release.
+    if ((spec.type === "O" || spec.type === "A") && session.activeExecutionId) {
+      // Chat reaction starts must not replace the running turn's generation
+      // before the transport rejects overlap. The caller queues this refusal.
+      throw new SpinDispatchAdmissionError("type_busy", `${spec.type} session is busy — an execution is already active on this session`);
+    }
 
     // A legacy/user O turn has no project authority. Never inherit the prior
     // project's context when a project-scoped session is reused.
-    if (spec.type === "O" && !spec.orcContext) session.orcContext = undefined;
+    if (spec.type === "O" && !spec.orcContext) {
+      session.orcContext = undefined;
+      session.orcTurnControl = undefined;
+      session.orcMaxPromptRounds = undefined;
+    }
 
     // #1332: Assign execution generation for steering continuity
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
@@ -575,7 +778,7 @@ export class Spin {
     }
 
     // #1444: Execution telemetry scope — tracks provider calls for this generation
-    const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
+    const executionTelemetry = createExecutionTelemetryScope(capturedExecutionId);
 
     // 3. Kanban card (user-facing work only)
     let cardId = spec.cardId;
@@ -593,7 +796,7 @@ export class Spin {
     // control at the earliest point so forced settlement can fail it exactly
     // once instead of leaving it running.
     if (cardId !== undefined) spec.executionControl?.setCardId(cardId);
-    if (cardId !== undefined && this.executions.admit(spec.type, cardId)) {
+    if (cardId !== undefined && this.executions.admit(spec.type, cardId, spec.executionControl?.executionRef)) {
       kanbanRunning(cardId);
     }
 
@@ -603,20 +806,28 @@ export class Spin {
     // whose own cards are agent-sourced; missing/cyclic/unreadable ancestry
     // fails closed to interactive. The mode lives only on the contexts built
     // below — never on the reusable session.
-    const authorizationMode = resolveToolAuthorizationMode(cardId);
+    // #1752: sleep origin takes precedence — a D spin from the sleep capability is unattended-sleep regardless of card provenance
+    const authorizationMode = spec.executionOrigin === "sleep"
+      ? "unattended-sleep" as const
+      : resolveToolAuthorizationMode(cardId);
 
-    // #1319: Track card association and publish execution.started for Orc
+    // #1319: Track card association for Orc turns. The execution.started
+    // publish moved behind the durable bind below (#1778) — subscribers must
+    // never observe an execution whose run was never owned. Turns with no
+    // durable run to bind publish here: there is nothing to order against.
     if (cardId !== undefined && spec.type === "O") {
       session.activeCardId = cardId;
       session.activeRootCardId = resolveRootId(cardId);
-      this.orcActivityFeed?.publish({
-        kind: "execution.started",
-        timestamp: Date.now(),
-        sessionId: session.id,
-        executionId: session.activeExecutionId!,
-        rootCardId: session.activeRootCardId,
-        cardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+      if (!spec.orcContext) {
+        this.orcActivityFeed?.publish({
+          kind: "execution.started",
+          timestamp: Date.now(),
+          sessionId: session.id,
+          executionId: capturedExecutionId,
+          rootCardId: session.activeRootCardId,
+          cardId,
+        } as Parameters<OrcActivityFeed["publish"]>[0]);
+      }
     }
 
     // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
@@ -625,6 +836,14 @@ export class Spin {
     //       the cardId in this.running forever, wedging single-slot types
     //       (O/T/B/D/H) until bridge restart. (#1274)
     const started = Date.now();
+    // #1691: the bound turn identity is captured exactly once, immediately
+    // after the durable bind succeeds. Prompt, steering continuation,
+    // completion, and release all use these immutable local values — the
+    // session fields are inspection mirrors only and can never become the
+    // release authority of a successor turn.
+    let boundOrcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2 | undefined;
+    let boundOrcTurnControl: import("./orc-project/orc-project-contracts.js").OrcTurnControl | undefined;
+    let boundMaxPromptRounds: number | undefined;
     try {
       // #1611: the candidate policy is immutable per attached session —
       // reusing a session with a conflicting policy fails closed, whether or
@@ -637,14 +856,38 @@ export class Spin {
       // A failed/stale bind must never start a model turn under an unowned project.
       if (spec.type === "O" && spec.orcContext) {
         session.orcContext = spec.orcContext;
+        // #1680: the host-owned one-shot turn control and its policy-derived
+        // prompt bound travel with the bound run for the whole turn.
+        session.orcTurnControl = spec.orcTurnControl;
+        session.orcMaxPromptRounds = spec.orcMaxPromptRounds;
         const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, session.activeExecutionId!);
+        const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, capturedExecutionId);
         if (!bind.ok) throw new Error(`Orc bindExecution rejected: ${bind.reason}`);
-        session.orcContext = {
+        // #1691: the immutable release/prompt authority for this turn — a
+        // fresh object, never the session field. The session fields may
+        // mirror it, but only these locals travel with the completion
+        // helpers; a successor turn can never be released by a late
+        // completion reading newer session state.
+        boundOrcContext = {
           ...spec.orcContext,
           sessionId: session.id,
-          executionId: session.activeExecutionId,
+          executionId: capturedExecutionId,
         };
+        session.orcContext = boundOrcContext;
+        boundOrcTurnControl = spec.orcTurnControl;
+        boundMaxPromptRounds = spec.orcMaxPromptRounds;
+        // #1778: the bind CAS above committed — only now is execution.started
+        // truthful to publish.
+        if (cardId !== undefined) {
+          this.orcActivityFeed?.publish({
+            kind: "execution.started",
+            timestamp: Date.now(),
+            sessionId: session.id,
+            executionId: capturedExecutionId,
+            rootCardId: session.activeRootCardId,
+            cardId,
+          } as Parameters<OrcActivityFeed["publish"]>[0]);
+        }
       }
       // 4. before-hook
       await profile.beforePrompt?.(session, cardId);
@@ -653,11 +896,30 @@ export class Spin {
       //    already has one (A per-user main turn, D step N, O reuse). Only
       //    create+attach for a NEW persistent session.
       let sessionTransport = session.transport as IKiroTransport | undefined;
+      const attachAgent = session.executionAgent ?? agent;
+      // #1807: sleep executions carry the composed scope and key runtime
+      // acquisition by the cycle-owned D session identity. Anything else
+      // keeps existing behavior.
+      const sleepScope = spec.executionOrigin === "sleep" ? spec.executionScope : undefined;
+      const cycleKey = spec.executionOrigin === "sleep" && spec.sessionId ? spec.sessionId : undefined;
+      if (spec.executionOrigin === "sleep" && !sleepScope) {
+        throw new Error("sleep dispatch without execution scope — refusing to inherit daemon cwd");
+      }
+      if (sleepScope && cycleKey && sessionTransport) {
+        // Already-attached managed transport: verify against the runtime's
+        // recorded creation binding (absent is unverified, not a match).
+        // Fail before provider/tool work; never re-root in place.
+        const { canonicalizeCwd } = await import("./subagent-runtime.js");
+        const binding = this.runtime.verifyTransportBinding(attachAgent, cycleKey);
+        const requested = canonicalizeCwd(sleepScope.cwd);
+        if (binding === undefined || binding !== requested) {
+          throw new Error(`sleep transport binding mismatch/unverified for ${cycleKey} — failing before dispatch`);
+        }
+      }
       if (persistent && !sessionTransport) {
         // #1432: reattachment honors the selected executionAgent recorded at
         // allocation (K) so a resumed session keeps its model configuration.
-        const attachAgent = session.executionAgent ?? agent;
-        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : undefined, { candidatePolicy: requestedPolicy });
+        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : (cycleKey ?? undefined), { candidatePolicy: requestedPolicy, executionScope: sleepScope, sessionType: sessionType(session) });
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
@@ -667,10 +929,21 @@ export class Spin {
         session.status = "ready";
       }
 
-      // 6. Build prompt via decorators
+      // 6. Build prompt via decorators. #1940: resolve the Pi route before
+      // one-shot transports exist so the SOUL decorator does not duplicate
+      // the bundle installed as the session system prompt.
+      let piRoute = false;
+      if (profileCarriesSoulBundle(sessionType(session))) {
+        // Persistent sessions already hold their transport: the marker is
+        // authoritative and needs no config read. One-shots have no transport
+        // yet, so resolve the configured route before creating one.
+        piRoute = sessionTransport
+          ? (sessionTransport as { piAgentSessionRoute?: boolean }).piAgentSessionRoute === true
+          : subagentAgentUsesPiTransport(agent);
+      }
       let prompt = spec.prompt ?? spec.goal ?? "";
       for (const decorate of profile.decorators) {
-        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
+        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId, piRoute });
       }
       // #1366: Inject Worker contract into prompt when contractId is set
       if (spec.contractId && cardId !== undefined) {
@@ -695,18 +968,27 @@ export class Spin {
         // #1552: the trusted session type always comes from the allocated
         // ManagedSession — model arguments can never select or override it.
         sessionType: sessionType(session),
-        durableContextIntent: spec.durableContextIntent,
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,
         deadlineAt: spec.deadlineAt,
         providerInactivityTimeoutMs: spec.providerInactivityTimeoutMs,
-        orcContext: session.orcContext,
+        // #1691: the initial prompt uses the captured bound turn identity,
+        // never a mutable session field that a successor could have replaced.
+        executionId: capturedExecutionId,
+        orcContext: boundOrcContext ?? session.orcContext,
+        // #1850: trusted worker origin for relay containment, resolved at
+        // dispatch for card-backed worker turns; absent elsewhere.
+        workOrigin: spec.workOrigin,
+        // #1680: the host-owned turn control and the policy-derived prompt
+        // bound reach every transport through the shared context.
+        orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
+        maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
         executionTelemetry,
-        // #1527: Spin forwards its own provider reference (late-bound holder
-        // populated by boot composition), never a scraped transport property.
-        contextProvider: this.contextProvider.current ?? undefined,
         // #1629: trusted per-execution tool authorization mode.
         authorizationMode,
+        // #1786: per-execution sandbox override (peer deny-all). Transports
+        // prefer it over their constructed default; see PromptRequestContext.
+        sandboxPolicy: spec.tools,
       };
       const leaseEmitter = spec.attemptId && spec.executionControl?.generation !== undefined
         ? new ExecutorProgressEmitter()
@@ -717,7 +999,9 @@ export class Spin {
         const base: OutputObserver = this.sessionOutputFeed
           ? createOutputObserver(this.sessionOutputFeed, {
             sessionId: session.id,
-            executionId: session.activeExecutionId!,
+            // #1691: output correlation uses the captured execution identity,
+            // never a potentially newer session.activeExecutionId.
+            executionId: capturedExecutionId,
           })
           : {};
         if (!leaseEmitter) return base;
@@ -727,12 +1011,12 @@ export class Spin {
             base.onDelta?.(event);
             if (event.kind !== "text" || !event.text) return;
             leaseOutputUnits += Math.max(1, Buffer.byteLength(event.text, "utf8"));
-            leaseEmitter.emitOutput(spec.attemptId!, spec.executionControl!.generation!, "spin-local", leaseOutputUnits, `output:${session.activeExecutionId}:${leaseOutputUnits}`);
+            leaseEmitter.emitOutput(spec.attemptId!, spec.executionControl!.generation!, "spin-local", leaseOutputUnits, `output:${capturedExecutionId}:${leaseOutputUnits}`);
           },
           onToolStart: (event) => {
             base.onToolStart?.(event);
             leaseToolOrdinal++;
-            leaseEmitter.emitToolStart(spec.attemptId!, spec.executionControl!.generation!, "spin-local", `tool:${session.activeExecutionId}:${leaseToolOrdinal}`, event.name);
+            leaseEmitter.emitToolStart(spec.attemptId!, spec.executionControl!.generation!, "spin-local", `tool:${capturedExecutionId}:${leaseToolOrdinal}`, event.name);
           },
           end: (reason) => base.end?.(reason),
           invalidate: () => base.invalidate?.(),
@@ -749,7 +1033,7 @@ export class Spin {
         image?: { mime: string; base64: string },
         ctx?: import("./transport/kiro-transport.js").PromptRequestContext,
       ): Promise<string> => {
-        if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
+        if ((!this.sessionOutputFeed && !leaseEmitter) || session.activeExecutionId !== capturedExecutionId) {
           return await transport.sendPrompt(key, msg, image, ctx);
         }
         const obs = makeOutputObserver();
@@ -787,7 +1071,6 @@ export class Spin {
           return {
             send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, {
               ...(ctx ?? {}),
-              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             }),
             steer: typeof sessionTransport.steer === "function"
               ? (content, lease) => sessionTransport!.steer!(content, lease)
@@ -798,7 +1081,14 @@ export class Spin {
         }
         const executor = await this.runtime!.openExecution(agent, session.id, {
           timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds,
+          sessionType: sessionType(session), signal: spec.signal,
         });
+        // #1935: an execution returned after the call was aborted is disposed
+        // before use; it must never resume provider/tool work.
+        if (spec.signal?.aborted) {
+          await executor.close();
+          throw new Error("Execution cancelled");
+        }
         // #1248: Bind execution control to runtime cancel mechanism
         if (spec.executionControl) {
           spec.executionControl.bind(async (reason) => {
@@ -814,15 +1104,14 @@ export class Spin {
           send: async (msg, img, ctx) => {
             const enrichedContext = {
               ...(ctx ?? {}),
-              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             };
-            if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
-              return (await executor.send(msg, img, enrichedContext)) || "(no output)";
+            if ((!this.sessionOutputFeed && !leaseEmitter) || session.activeExecutionId !== capturedExecutionId) {
+              return await executor.send(msg, img, enrichedContext);
             }
             const obs = makeOutputObserver();
             const enriched = { ...(ctx ?? {}), outputObserver: obs };
             try {
-              const r = (await executor.send(msg, img, { ...enrichedContext, ...enriched })) || "(no output)";
+              const r = await executor.send(msg, img, { ...enrichedContext, ...enriched });
               obs.end?.("complete");
               return r;
             } catch (err) {
@@ -870,8 +1159,8 @@ export class Spin {
         // The initial send promise is created first so the pump can observe
         // send settlement synchronously (see #1627 race note in the pump).
         const sendPromise = send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext);
-        const pump = driver.steer ? this.createNativeSteeringPump(session, driver, sendPromise) : null;
-        if (!pump) session.steeringAccepting = true;
+        const pump = driver.steer ? this.createNativeSteeringPump(session, driver, sendPromise, capturedExecutionId) : null;
+        if (!pump && session.activeExecutionId === capturedExecutionId) session.steeringAccepting = true;
         try {
           if (pump) {
             // Native path (#1531): the initial send stays active through all
@@ -880,7 +1169,7 @@ export class Spin {
             // while the send is in flight; its result never replaces the send
             // result and a steering-only failure never replaces the send error.
             try {
-              const result = (await sendPromise) || "(no output)";
+              const result = await sendPromise;
               await pump.settle();
               return result;
             } catch (sendErr) {
@@ -890,23 +1179,39 @@ export class Spin {
           }
           // Sequential path (ACP/tmux): no in-process agent queue; instructions
           // queued during the send are drained as post-send continuations.
-          let result = (await sendPromise) || "(no output)";
+          let result = await sendPromise;
+          if (session.activeExecutionId !== capturedExecutionId) return result;
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
+            // #1691: a stale sequential turn must not lease or mutate a newer
+            // generation's instruction queue or acceptance gate.
+            if (session.activeExecutionId !== capturedExecutionId) return result;
             const batch = leaseInstructions(session, "steer");
-            if (!batch) { session.steeringAccepting = false; break; }
+            if (!batch) {
+              if (session.activeExecutionId === capturedExecutionId) session.steeringAccepting = false;
+              break;
+            }
             try {
               const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
               markDelivered(batch);
-              result = (await send(driver, steeringPrompt, undefined, {
+              result = await send(driver, steeringPrompt, undefined, {
                 userId: spec.userId ?? userId,
                 // #1552: every context Spin builds carries the trusted type.
                 sessionType: sessionType(session),
                 executionTelemetry,
-                orcContext: session.orcContext,
+                // #1680: steering continuations belong to the same Orc turn and
+                // inherit its turn control and prompt bound. #1691: the bound
+                // captured values are used, never a successor's session state.
+                executionId: capturedExecutionId,
+                orcContext: boundOrcContext ?? session.orcContext,
+                // #1850: steering continuations belong to the same execution
+                // and inherit its trusted worker origin.
+                workOrigin: spec.workOrigin,
+                orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
+                maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
                 // #1629: steering continuations belong to the same execution
                 // and inherit its trusted authorization mode.
                 authorizationMode,
-              })) || "(no output)";
+              });
               markConsumed(batch, session);
             } catch (steerErr) {
               if (batch.instructions.some((instruction) => instruction.state === "delivered")) {
@@ -917,8 +1222,10 @@ export class Spin {
               throw steerErr;
             }
           }
-          session.steeringAccepting = false;
-          if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          if (session.activeExecutionId === capturedExecutionId) {
+            session.steeringAccepting = false;
+            if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          }
           return result;
         } finally {
           await driver.close();
@@ -929,25 +1236,28 @@ export class Spin {
         executeWithSteering().then(r => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, terminate, telemetryUsage);
+          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, classifyContent(r), terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
         }).catch(e => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, e, terminate, telemetryUsage);
+          this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, e, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
         });
         return { sessionId: session.id, cardId };
       }
       const result = await executeWithSteering();
+      // #1651: the provider's own string is never replaced by a placeholder.
+      // One classification per settled turn, shared by settlement and callers.
+      const outcome = classifyContent(result);
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
-      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, terminate, telemetryUsage);
-      return { sessionId: session.id, cardId, result };
+      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, outcome, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
+      return { sessionId: session.id, executionId: capturedExecutionId, cardId, result, outcome };
     } catch (err) {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
-      await this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, err, terminate, telemetryUsage);
+      await this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, err, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
       if (spec.await) {
         // #1502: surface the cardId on rejection so caller-owned settlers (the
         // scheduled-task runner) can fail the Kanban card. Under caller ownership
@@ -984,8 +1294,7 @@ export class Spin {
    * in-flight handoff is abandoned and its batch terminalized exactly once,
    * and no new handoff starts.
    */
-  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver, sendPromise: Promise<unknown>): { settle: () => Promise<void> } {
-    const executionId = session.activeExecutionId ?? "";
+  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver, sendPromise: Promise<unknown>, executionId: string): { settle: () => Promise<void> } {
     let activeLease: import("./spin-types.js").InstructionLease | null = null;
     let closing = false;
     let rounds = 0;
@@ -1000,6 +1309,9 @@ export class Spin {
 
     const drain = async (): Promise<void> => {
       while (!closing) {
+        // #1691: a late pump must never lease or expire instructions belonging
+        // to a newer generation that reused this session.
+        if (session.activeExecutionId !== executionId) return;
         if (activeLease) return;          // one native handoff at a time
         if (rounds >= MAX_STEER_ROUNDS) { // round limit reached
           session.steeringAccepting = false;
@@ -1056,28 +1368,30 @@ export class Spin {
     };
 
     const run = (): void => {
-      if (pumpPromise) return;
+      if (pumpPromise || session.activeExecutionId !== executionId) return;
       pumpPromise = drain().finally(() => { pumpPromise = null; });
     };
 
     // Subscribe BEFORE opening acceptance: an instruction accepted while the
     // driver is still opening must be visible to this pump, never dropped.
     const unsub = subscribeSteerEvents({ sessionId: session.id, executionId }, (event) => {
-      if (event.type !== "steer.queued" || closing) return;
+      if (event.type !== "steer.queued" || closing || session.activeExecutionId !== executionId) return;
       if (activeLease) return;            // the running drain loop picks up successors
       run();
     });
-    session.steeringAccepting = true;
+    if (session.activeExecutionId === executionId) session.steeringAccepting = true;
 
     return {
       settle: async () => {
         if (closing) return;              // idempotent — exactly one cleanup
         closing = true;
-        session.steeringAccepting = false;
+        if (session.activeExecutionId === executionId) session.steeringAccepting = false;
         if (pumpPromise) {
           try { await pumpPromise; } catch { /* drain never rejects */ }
         }
-        if (session.instructionQueue.length > 0) expireInstructions(session, "execution_ended");
+        if (session.activeExecutionId === executionId && session.instructionQueue.length > 0) {
+          expireInstructions(session, "execution_ended");
+        }
         unsub();
       },
     };
@@ -1092,12 +1406,45 @@ export class Spin {
     return session.status === "ended" || session.activeExecutionId !== capturedExecutionId;
   }
 
-  private async finishSpin(
-    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
+  /**
+   * #1691: package the captured bound turn identity for the completion
+   * helpers. Undefined when no durable Orc bind happened (non-O turns or a
+   * pre-bind failure), so those paths keep their legacy session fallback.
+   */
+  private boundTurnContext(
+    orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2 | undefined,
+    orcTurnControl: import("./orc-project/orc-project-contracts.js").OrcTurnControl | undefined,
+    maxPromptRounds: number | undefined,
+  ): { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number } | undefined {
+    return orcContext ? { orcContext, orcTurnControl, maxPromptRounds } : undefined;
+  }
+
+  /**
+   * #1778: release Spin occupancy through the bound execution control, never
+   * by bare card ID. close() proves the closing generation still owns the
+   * execution (binding) and refuses a slot a successor re-admitted — a stale
+   * completion can no longer free its successor's slot. Control-less turns
+   * (legacy paths and unit fakes) keep the blind release.
+   */
+  private releaseExecutionSlot(spec: SpinSessionSpec, cardId: number, outcome: TerminalOutcome): void {
+    const ref = spec.executionControl?.executionRef;
+    if (ref !== undefined) {
+      this.executions.close(ref, outcome);
+    } else {
+      this.executions.release(spec.type, cardId);
+    }
+  }
+
+  private async finishSpin(    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
+    outcome: ContentOutcome,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+    // #1691: the immutable bound turn identity captured at bind time. When
+    // present it is the release authority — never the mutable session fields.
+    bound?: { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number },
   ): Promise<void> {
+    await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — a late provider
     // settlement must not mutate session state, memory, hooks, or cards.
     if (this.isStaleCompletion(session, capturedExecutionId)) {
@@ -1128,15 +1475,23 @@ export class Spin {
     pushLog(session, "complete");
 
     if (this.memory) {
-      const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
-      this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
-      this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+      // #1651 v2: only real text content enters durable memory. A turn that
+      // produced nothing — or only a chat control marker — must not be recorded
+      // as a real assistant message. Before the sentinel was removed this
+      // recorded the literal "(no output)" as if the model had answered.
+      if (outcome === "text") {
+        const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
+        this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
+        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+      } else {
+        logInfo(TAG, `Session ${session.id}: turn produced no text content (${outcome}) — not recorded to memory`);
+      }
     }
     if (cardId !== undefined) {
       // #1248: If cancellation already won, skip normal completion settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping finishSpin settlement`);
-        this.executions.release(spec.type, cardId);
+        this.releaseExecutionSlot(spec, cardId, spec.executionControl.terminalOutcome ?? "cancelled");
         return;
       }
 
@@ -1157,24 +1512,45 @@ export class Spin {
         try {
           const svc = new WorkerSupervisionService();
           const generation = spec.executionControl?.generation;
-          const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
-          if (outcome.settled) {
-            workerSummary = outcome.summary;
-            if (outcome.envelope) {
-              const criteria = outcome.envelope.criteria;
-              criteriaVerdict = criteria.length > 0
-                ? criteria.every(c => c.status === "passed") ? "passed" : "failed"
-                : "unreadable";
+          // #1644: settlement identity is required — a supervised result
+          // without attempt ID/generation never settles (the generationless
+          // no-attempt path was removed).
+          if (spec.attemptId === undefined || generation === undefined) {
+            if (spec.contractId) {
+              staleWorkerResult = true;
+              logWarn(TAG, `Card ${cardId}: supervised Worker result without attempt identity (attemptId=${spec.attemptId ?? "none"}, generation=${generation ?? "none"}) — rejected`);
             }
-            if (spec.executionControl) {
-              spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
+          } else {
+            // #1656: the request execution-scope cwd is authoritative for
+            // scheduled Workers; an explicitly allocated session working
+            // directory serves non-scheduled callers. A supervised attempt
+            // with neither verifies fail-closed — never process.cwd().
+            const verificationCwd = spec.executionScope?.cwd ?? session.workingDir;
+            const outcome = svc.collectAndSettle(cardId, result, verificationCwd, spec.attemptId, generation, usage ?? undefined);
+            if (outcome.settled) {
+              workerSummary = outcome.summary;
+              if (outcome.envelope) {
+                // #1656: exact-contract acceptance decides the W-card
+                // projection. When the contract is unavailable (never for a
+                // settled supervised attempt), fall back to the envelope's own
+                // criteria rather than inventing a verdict.
+                const settledContract = spec.contractId ? svc.getContract(spec.contractId) : undefined;
+                criteriaVerdict = settledContract
+                  ? acceptancePassed(settledContract, outcome.envelope) ? "passed" : "failed"
+                  : outcome.envelope.criteria.length > 0
+                    ? outcome.envelope.criteria.every(c => c.status === "passed") ? "passed" : "failed"
+                    : "unreadable";
+              }
+              if (spec.executionControl) {
+                spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
+              }
+            } else if (outcome.stale) {
+              staleWorkerResult = true;
+              if (outcome.budgetViolation && spec.settlementOwner !== "caller") {
+                kanbanRetryOrFail(cardId, outcome.summary);
+              }
+              logWarn(TAG, `Card ${cardId}: ${outcome.budgetViolation ? "budget-violating" : "stale"} Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
             }
-          } else if (outcome.stale) {
-            staleWorkerResult = true;
-            if (outcome.budgetViolation && spec.settlementOwner !== "caller") {
-              kanbanRetryOrFail(cardId, outcome.summary);
-            }
-            logWarn(TAG, `Card ${cardId}: ${outcome.budgetViolation ? "budget-violating" : "stale"} Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
           }
         } catch (err) {
           if (spec.contractId) {
@@ -1209,39 +1585,136 @@ export class Spin {
       // #1599: a supervised worker card settles by its criteria verdict, not by
       // the execution turn returning. Criteria failed → settle failed (never
       // delivered); criteria unreadable → defer terminal settlement.
+      // #1651 v2: an unsupervised card whose turn carried no textual content
+      // settles failed — a card reporting `done` with nothing in it is the same
+      // lie the "(no output)" sentinel used to tell one layer up. A reaction is
+      // a chat control signal, not card content. Supervised Workers are
+      // unaffected: their evidence outranks the text outcome.
+      const noContentReason = outcome === "no_reply"
+        ? "model signalled no reply"
+        : outcome === "reaction"
+          ? "model returned only a reaction"
+          : "model returned no output";
+      // #1778: peer delivery intents commit atomically with the card terminal
+      // they report (kanban outbox), then deliver best-effort on the same
+      // tick. Supervised project results are still emitted by
+      // ProjectReviewService only after accepted settlement commits — the
+      // execution turn must not send a premature peer "done" callback.
+      const peerCallback = spec.callbackPeer && !supervisedProject ? spec.callbackPeer : undefined;
       if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
         if (criteriaVerdict === "failed") {
-          kanbanFail(cardId, workerSummary);
+          kanbanFail(cardId, workerSummary, true,
+            peerCallback ? { peer: peerCallback, status: "failed", error: workerSummary } : undefined);
         } else if (criteriaVerdict === "unreadable") {
           logWarn(TAG, `Card ${cardId}: supervised worker criteria unreadable — deferring terminal settlement`);
+        } else if (criteriaVerdict === null && outcome !== "text") {
+          logWarn(TAG, `Card ${cardId}: ${noContentReason} — settling failed instead of done`);
+          kanbanFail(cardId, noContentReason, true,
+            peerCallback ? { peer: peerCallback, status: "failed", error: noContentReason } : undefined);
         } else {
-          kanbanComplete(cardId, null, workerSummary);
+          // #1651 v2: never report done to a peer for a turn without text.
+          const doneCallback = peerCallback && (criteriaVerdict !== null || outcome === "text")
+            ? {
+                peer: peerCallback, status: "done" as const,
+                resultSummary: result.slice(0, 500),
+                artifacts,
+                tokensUsed: kanbanGetCard(cardId)?.tokens_used ?? 0,
+              }
+            : undefined;
+          kanbanComplete(cardId, null, workerSummary, true, doneCallback);
         }
+      } else if (peerCallback && criteriaVerdict !== "unreadable" && (criteriaVerdict !== null || outcome === "text")) {
+        // No card terminal was committed above (stale result, caller-owned,
+        // or supervised-project deferral): queue a done intent only when the
+        // turn itself decided success and the card still terminalized through
+        // its owner below. Delivery still waits for the owning commit.
+        logDebug(TAG, `Card ${cardId}: peer done callback deferred to the owning settlement`);
       }
-      // Supervised project results are emitted by ProjectReviewService only
-      // after accepted settlement commits. The execution turn must not send a
-      // premature peer "done" callback.
-      if (spec.callbackPeer && !supervisedProject) {
-        if (criteriaVerdict === "failed") {
-          fireCallback(spec.callbackPeer, cardId, "failed", undefined, workerSummary);
-        } else if (criteriaVerdict !== "unreadable") {
-          const card = kanbanGetCard(cardId);
-          fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
-        }
+      if (peerCallback) {
+        // Same-tick best-effort delivery; anything unsent stays queued for
+        // the boot recovery drain. Never throws into settlement.
+        drainPeerCallbackForCard(cardId).catch(err => logAndSwallow(TAG, "peer callback drain", err));
       }
     }
 
-    // #1319: Publish execution.completed before clearing association
-    if (spec.type === "O" && session.activeExecutionId) {
+    // #1480/#1680: Release the Orc run before any observability publish or
+    // session-association clear. A normal model termination still must
+    // satisfy the durable intent postcondition: an unsatisfied intent
+    // (prose-only completion) is released `failed` with the stable
+    // `intent_postcondition_unsatisfied` code. A turn that ended by the
+    // host-owned turn control (durable intent satisfied) releases `completed`
+    // with `failure_code = NULL`. #1691: the release authority is the captured
+    // bound context, never the mutable session fields. #1778: the durable
+    // CAS wins before `execution.completed` is published and before the
+    // session association clears, so a successor turn can never bind while
+    // this run is still live.
+    const releaseContext = bound?.orcContext ?? session.orcContext;
+    if (releaseContext) {
+      let outcome: import("./orc-project/orc-project-contracts.js").OrcRunOutcome = "completed";
+      let failureCode: import("./orc-project/orc-project-contracts.js").OrcRunFailureCode | undefined;
+      const terminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
+      if (terminal) {
+        if (terminal.kind === "failed") {
+          outcome = "failed";
+          failureCode = terminal.failureCode;
+        } else if (terminal.kind === "cancelled") {
+          outcome = "failed";
+          failureCode = terminal.failureCode;
+        }
+        // intent_satisfied keeps `completed` / NULL.
+      } else if (releaseContext.intentKind) {
+        // Natural model completion: verify the durable postcondition. A read
+        // failure fails closed to unsatisfied — provider text alone can never
+        // satisfy a durable Orc intent.
+        try {
+          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+          const { intentPolicyFor, readOrcProjectSnapshot } = await import("./orc-project/orc-intent-policy.js");
+          const store = new OrcProjectRunStore();
+          const completion = intentPolicyFor(releaseContext.intentKind)
+            .completion(readOrcProjectSnapshot(store.db, releaseContext.projectCardId));
+          if (!completion.satisfied) {
+            outcome = "failed";
+            failureCode = "intent_postcondition_unsatisfied";
+          }
+        } catch (err) {
+          logWarn(TAG, `Orc intent postcondition re-read failed: ${err instanceof Error ? err.message : String(err)}`);
+          outcome = "failed";
+          failureCode = "intent_postcondition_unsatisfied";
+        }
+      }
+      try {
+        const { getActiveOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getActiveOrcCoordinator();
+        if (coordinator) {
+          const released = coordinator.releaseOwnedRun(releaseContext, outcome, failureCode);
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
+        } else {
+          // #1628: coordinator unavailable — fall back to the direct store
+          // release; the boot sweep remains the recovery floor. #1778: no
+          // ownership-released wake is lost here — listeners subscribe on a
+          // coordinator instance, so with no coordinator there is nobody to
+          // wake in-process; the durable release is the recovery signal.
+          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+          const store = new OrcProjectRunStore();
+          const released = store.release(releaseContext, outcome, failureCode);
+          if (!released) this.reportFailedOrcRelease(store, releaseContext);
+        }
+      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+
+    // #1319: Publish execution.completed only after the durable release CAS
+    // was attempted, and clear the session association after it — a successor
+    // turn on this session can no longer observe a live run as free.
+    if (spec.type === "O") {
       this.orcActivityFeed?.publish({
         kind: "execution.completed",
         summary: result.slice(0, 200),
         timestamp: Date.now(),
         sessionId: session.id,
-        executionId: session.activeExecutionId,
+        executionId: capturedExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+      } as Parameters<OrcActivityFeed["publish"]>[0]);
     }
     session.activeExecutionId = undefined;
     session.activeCardId = undefined;
@@ -1249,31 +1722,15 @@ export class Spin {
 
     await profile.afterPrompt?.(session, cardId);
 
-    // #1480: Release Orc run after successful turn
-    if (session.orcContext) {
-      try {
-        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
-        const coordinator = getOrCreateOrcCoordinator();
-        if (coordinator) {
-          coordinator.releaseOwnedRun(session.orcContext, "completed");
-        } else {
-          // #1628: coordinator unavailable — fall back to the direct store
-          // release; the boot sweep remains the recovery floor.
-          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-          new OrcProjectRunStore().release(session.orcContext, "completed");
-        }
-      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
-    }
-
     const stepEvent: StepEvent = {
-      sessionId: session.id, cardId, stepIndex, result,
+      sessionId: session.id, cardId, stepIndex, result, outcome,
       durationMs: Date.now() - started,
       inputTokens: usage?.input, outputTokens: usage?.output,
     };
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+    if (cardId !== undefined) { this.releaseExecutionSlot(spec, cardId, "completed"); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
   }
 
   private async failSpin(
@@ -1281,7 +1738,11 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+    // #1691: the immutable bound turn identity captured at bind time. When
+    // present it is the release authority — never the mutable session fields.
+    bound?: { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number },
   ): Promise<void> {
+    await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — its failure must
     // not mutate session state, memory, hooks, or cards.
     if (this.isStaleCompletion(session, capturedExecutionId)) {
@@ -1296,11 +1757,19 @@ export class Spin {
     logWarn(TAG, `${spec.type} spin failed (error=${errorKind}, error_chars=${msg.length})`);
     pushLog(session, `failed (${errorKind})`);
     let staleWorkerFailure = false;
+    // #1751: an `intent_satisfied` latch is durable-verified under the exact
+    // bound run (orc-project-contracts.ts:181) — the transport throwing
+    // afterwards is late noise about a turn that already succeeded. Releasing
+    // `provider_failure` here lost the run: the root was re-queued and the
+    // project was later aborted as ownerless. The release authority is the
+    // captured bound control, never the session mirror.
+    const boundTerminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
+    const handoffSatisfied = boundTerminal?.kind === "intent_satisfied";
     if (cardId !== undefined) {
       // #1248: If terminal already won (cancellation), skip fail settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping failSpin settlement`);
-        this.executions.release(spec.type, cardId);
+        this.releaseExecutionSlot(spec, cardId, spec.executionControl.terminalOutcome ?? "cancelled");
         return;
       }
       if (spec.attemptId) {
@@ -1329,45 +1798,67 @@ export class Spin {
           logWarn(TAG, `Card ${cardId}: failure settlement failed: ${settlementErr instanceof Error ? settlementErr.message : String(settlementErr)}`);
         }
       }
-      if (!staleWorkerFailure && spec.settlementOwner !== "caller") {
-        kanbanRetryOrFail(cardId, msg);
-        if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+      if (!staleWorkerFailure && !handoffSatisfied && spec.settlementOwner !== "caller") {
+        // #1778: the failed intent commits atomically with the card terminal
+        // inside RetryOrFail. A retrying (non-terminal) backoff queues nothing
+        // — interim attempts are not peer verdicts; the terminal attempt's
+        // callback is the exactly-once delivery.
+        kanbanRetryOrFail(cardId, msg,
+          spec.callbackPeer ? { peer: spec.callbackPeer, status: "failed", error: msg.slice(0, 1000) } : undefined);
+        if (spec.callbackPeer) {
+          drainPeerCallbackForCard(cardId).catch(err => logAndSwallow(TAG, "peer callback drain", err));
+        }
       }
     }
 
-    // #1319: Publish execution.failed before clearing association
-    if (spec.type === "O" && session.activeExecutionId) {
+    // #1480/#1680: Release the Orc run before the failure publish and the
+    // association clear (see finishSpin). The stable bounded failure code
+    // comes from the host-owned turn control when the transport recorded one
+    // (prompt_round_limit, turn_cancelled); anything else maps to
+    // `provider_failure`. Raw provider/model prose is never persisted. #1691:
+    // the release authority is the captured bound context, never the mutable
+    // session fields.
+    const releaseContext = bound?.orcContext ?? session.orcContext;
+    if (releaseContext) {
+      let failureCode: import("./orc-project/orc-project-contracts.js").OrcRunFailureCode | undefined;
+      if (boundTerminal?.kind === "failed") failureCode = boundTerminal.failureCode;
+      else if (boundTerminal?.kind === "cancelled") failureCode = boundTerminal.failureCode;
+      try {
+        const { getActiveOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getActiveOrcCoordinator();
+        if (coordinator) {
+          const released = coordinator.releaseOwnedRun(releaseContext, handoffSatisfied ? "completed" : "failed", handoffSatisfied ? undefined : failureCode);
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
+        } else {
+          // #1628: coordinator unavailable — fall back to the direct store
+          // release; the boot sweep remains the recovery floor.
+          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+          const store = new OrcProjectRunStore();
+          const released = store.release(releaseContext, handoffSatisfied ? "completed" : "failed", handoffSatisfied ? undefined : failureCode);
+          if (!released) this.reportFailedOrcRelease(store, releaseContext);
+        }
+      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+
+    // #1319: Publish execution.failed only after the durable release CAS was
+    // attempted. A satisfied handoff is not a failed execution — publishing
+    // it would be an operator-visible lie about a turn that already succeeded.
+    if (spec.type === "O" && !handoffSatisfied) {
       this.orcActivityFeed?.publish({
         kind: "execution.failed",
         error: msg,
         timestamp: Date.now(),
         sessionId: session.id,
-        executionId: session.activeExecutionId,
+        executionId: capturedExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+      } as Parameters<OrcActivityFeed["publish"]>[0]);
     }
     session.activeExecutionId = undefined;
     session.activeCardId = undefined;
     session.activeRootCardId = undefined;
 
     await profile.afterPrompt?.(session, cardId);
-
-    // #1480: Release Orc run after failed turn
-    if (session.orcContext) {
-      try {
-        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
-        const coordinator = getOrCreateOrcCoordinator();
-        if (coordinator) {
-          coordinator.releaseOwnedRun(session.orcContext, "failed");
-        } else {
-          // #1628: coordinator unavailable — fall back to the direct store
-          // release; the boot sweep remains the recovery floor.
-          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-          new OrcProjectRunStore().release(session.orcContext, "failed");
-        }
-      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
-    }
 
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex,
@@ -1377,11 +1868,43 @@ export class Spin {
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+    if (cardId !== undefined) { this.releaseExecutionSlot(spec, cardId, "failed"); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+  }
+
+  /**
+   * #1671: a failed terminal release CAS is not silently dropped. Read the run
+   * once and classify: a terminal row is benign idempotency; a still-live row
+   * is a bounded invariant failure with a typed mismatch reason; a missing row
+   * is run_unknown. Diagnostics carry only stable IDs, generations, state, and
+   * reason codes through the redacting logger.
+   */
+  private reportFailedOrcRelease(
+    store: import("./orc-project/orc-project-run-store.js").OrcProjectRunStore,
+    context: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2,
+  ): void {
+    const { classifyFailedRelease } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
+    const failure = classifyFailedRelease(store, context);
+    if (failure.kind === "run_unknown") {
+      logWarn(TAG, `Orc release: run_unknown (run=${context.runId}, project=${context.projectCardId})`);
+    } else if (failure.kind === "already_terminal") {
+      logInfo(TAG, `Orc release: run ${context.runId} already ${failure.state} — benign idempotency`);
+    } else {
+      logError(TAG, `Orc release rejected while live: run=${context.runId} project=${context.projectCardId} project_generation=${context.projectGeneration} ownership_generation=${context.ownershipGeneration} state=${failure.state} reason=${failure.reason}`);
+    }
   }
 
   private releaseSessionTransport(session: ManagedSession): void {
-    if (session.transportOwner === "runtime" && session.releaseTransport) {
+    const transport = session.transport as (IKiroTransport & { piAgentSessionRoute?: boolean }) | undefined;
+    // #1940 R2: the Pi session of an ending Spin session ends with it, also
+    // on a bridge-owned transport that stays attached to other sessions.
+    if (transport?.piAgentSessionRoute === true) {
+      void transport.resetSession(session.id).catch((err) => logAndSwallow(TAG, "dispose Pi session", err));
+    }
+    // A runtime transport cached for a shared key can serve other live
+    // sessions; destroying it would end their Pi sessions too.
+    const shared = transport !== undefined && this.sessions.listAll()
+      .some((other) => other !== session && other.transport === transport && other.status !== "ended");
+    if (session.transportOwner === "runtime" && session.releaseTransport && !shared) {
       try { void session.releaseTransport(); } catch (err) { logAndSwallow(TAG, "releaseTransport", err); }
     }
     session.transportOwner = undefined;
@@ -1395,9 +1918,9 @@ export class Spin {
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
 
-  /** #1271: Background one-shot (e.g. compaction summary). Returns the result string. */
+  /** #1271: Background one-shot (e.g. compaction summary). Returns text only. */
   async dispatchBackground(opts: DispatchBackgroundOptions): Promise<string> {
-    const { result } = await this.spin({
+    const { result, outcome } = await this.spin({
       type: opts.type ?? "S",
       prompt: opts.prompt,
       timeoutMs: opts.timeoutMs,
@@ -1406,7 +1929,14 @@ export class Spin {
       settlementOwner: "spin",
       await: true,
     });
-    return result ?? "";
+    // #1651 v2: background callers persist the returned string as durable
+    // domain content (currently conversation compaction). Never let a
+    // reaction/control marker or a contentless turn cross that boundary as if
+    // it were a successful summary.
+    if (outcome !== "text") {
+      throw new Error(`background spin returned non-text outcome: ${outcome}`);
+    }
+    return result;
   }
 
   // ── Dispatch (legacy wrappers, #1271) ───────────────────────────────────
@@ -1417,7 +1947,12 @@ export class Spin {
   /** #1010: O-type reuses existing session (one Orc). All others create new. */
   private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
     if (type === "O") {
-      const existing = this.sessions.listAll().find(s => s.id.includes("_O_"));
+      // #1751: never hand a project-scoped session to a turn with no project
+      // authority. spin() clears `orcContext` for an O turn without one, so
+      // reusing a live project's session erases that project's ownership —
+      // which is how a foreign O card took over a project's session and ran
+      // minutes past the project's abort.
+      const existing = this.sessions.listAll().find(s => s.id.includes("_O_") && s.orcContext === undefined);
       if (existing) return existing;
     }
     const sub = this.createSubSession(userId, "telegram", type);
@@ -1458,7 +1993,7 @@ export class Spin {
       return { cardId };
     }
 
-    void this.spin({
+    this.settleUnawaitedSpin(this.spin({
       type: request.type,
       goal: request.goal,
       cardId,
@@ -1479,17 +2014,46 @@ export class Spin {
       executionControl: request.executionControl,
       settlementOwner: request.settlementOwner,
       executionScope: request.executionScope,
+      // #1850: trusted worker origin for relay containment.
+      workOrigin: request.workOrigin,
       deadlineAt: request.deadlineAt,
       deliveryReady: request.deliveryReady,
-    });
+    }), request.type, cardId);
     return { cardId };
+  }
+
+  // spin.ts — the only interpreter of a fire-and-forget spin failure.
+  // #1750: `void this.spin(...)` made every pre-try/catch throw in spin() a
+  // process-fatal unhandled rejection (main.ts exits on it). Contention is a
+  // legitimate refusal and leaves the card queued for the existing wake paths;
+  // anything else is a defect and fails the card so it cannot sit queued forever.
+  // Never rethrow: this promise has no observer above it.
+  private settleUnawaitedSpin(promise: Promise<unknown>, type: SessionType, cardId: number): void {
+    void promise.catch((err: unknown) => {
+      if (err instanceof SpinDispatchAdmissionError || err instanceof SpinBindRejectionError) {
+        logWarn(TAG, `${type} card:${cardId} dispatch refused (${err.name}) — left queued: ${err.message}`);
+        return;
+      }
+      const note = err instanceof Error ? err.message : String(err);
+      logError(TAG, `${type} card:${cardId} dispatch failed before execution — failing card`, err);
+      try {
+        // #1778: a pre-execution failure must not settle a Reconciler-owned
+        // card from Spin — leave it queued for its owner driver.
+        if (isReconcilerOwnedCard(cardId)) {
+          logWarn(TAG, `${type} card:${cardId} dispatch failed before execution — Reconciler-owned, left queued: ${note.slice(0, 200)}`);
+          return;
+        }
+        kanbanFail(cardId, `dispatch failed before execution: ${note}`);
+      }
+      catch (failErr) { logAndSwallow(TAG, "kanbanFail after dispatch rejection", failErr); }
+    });
   }
 
   /**
    * @deprecated Use `spin({ type, goal, …, await: true })` instead.
    * Backward-compat wrapper: synchronously dispatches and returns the result.
    */
-  async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
+  async dispatchAwait(request: SpinRequest): Promise<DispatchAwaitedResult> {
     // #987: enforce concurrency + cooldown gates
     // #1274: also enforce session cap (await:true — throw is safe, caller awaits)
     // #1520: typed admission rejection so the scheduler can defer the same
@@ -1505,7 +2069,7 @@ export class Spin {
       }
       throw new SpinDispatchAdmissionError("type_busy", `${request.type} session busy — try again shortly.`);
     }
-    const { cardId, result } = await this.spin({
+    const { cardId, result, outcome } = await this.spin({
       type: request.type,
       goal: request.goal,
       title: request.title,
@@ -1525,7 +2089,9 @@ export class Spin {
       deadlineAt: request.deadlineAt,
       deliveryReady: request.deliveryReady,
     });
-    return { cardId: cardId!, result: result! };
+    // #1651 v2: the awaited contract is preserved end to end — `outcome` is
+    // never reconstructed from result truthiness by the caller.
+    return { cardId: cardId!, result: result!, outcome: outcome! };
   }
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
@@ -1533,7 +2099,9 @@ export class Spin {
 
     // #1516: Central Worker admission authority — enforce the durable project
     // agent cap before any card, contract, attempt, or reservation is created.
-    const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+    // #1644: a bound Orc context owns the root identity; the caller's parent
+    // argument cannot redirect project work to another root.
+    const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
     const slot = checkWorkerSlotForProject(rootCardId);
     if (!slot.ok) {
       const err = new Error(`agent_cap_reached: active=${slot.active} worker_limit=${slot.workerLimit} — wait for active workers to complete before spawning more`);
@@ -1560,6 +2128,7 @@ export class Spin {
         verification_commands: request.contract.verification_commands,
         required_capabilities: request.contract.required_capabilities,
         supports_root_criteria: request.contract.supports_root_criteria,
+        workspace_alias: request.contract.workspace_alias,
         limits: request.contract.limits,
         provenance: {
           root_card_id: 0,
@@ -1571,52 +2140,73 @@ export class Spin {
       if (!preCheck.ok) {
         throw new Error(`Contract validation failed: ${preCheck.errors.map(e => e.message).join("; ")}`);
       }
-      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
       // #1604 R3: required mapping — the pre-check runs before any card is
       // created, so an omitted mapping fails the spawn, never the settlement.
+      // #1729 v2: artifact-evidence rule enforced on the same pre-check.
       const mappingError = validateWorkerRootCriteria(
         rootCardId,
         request.contract.id || "(pending)",
         request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : [],
+        {
+          criteria: request.contract.criteria,
+          expectedArtifacts: request.contract.expected_artifacts ?? [],
+        },
       );
       if (mappingError) throw new Error(mappingError);
 
     }
 
-    // Create card (kanbanEnqueue is synchronous, no spin start)
-    const cardTitle = request.title ?? request.goal.slice(0, 80);
-    const cardId = kanbanEnqueue(cardTitle, request.source ?? "agent", undefined, {
-      priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-      type: "W",
-      parent_id: parentCardId,
-      notes: request.contract ? JSON.stringify({ supervised: true }) : undefined,
-    });
-    // Create contract + attempt BEFORE spin starts, so the card is never
-    // visible to Reconciler/Spin without supervision data.
-    if (request.contract && cardId) {
+    // Create card + contract + attempt atomically (supervised path) so the
+    // card is never visible to Reconciler/Spin without supervision data and
+    // cannot outlive a rejected project-authority check.
+    if (request.contract) {
       const service = new WorkerSupervisionService();
-      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
-      const result = service.createChild(request.goal, cardId, rootCardId, "orc", {
+      const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
+      const result = service.createChild(request.goal, rootCardId, "orc", {
+        title: request.title ?? request.goal.slice(0, 80),
+        source: request.source ?? "agent",
+        priority: (request.priority ?? "MEDIUM") as string,
         criteria: request.contract.criteria as Array<{ id: string; description: string }>,
         expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
         verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
         requiredCapabilities: [...request.contract.required_capabilities],
         supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
         limits: { ...request.contract.limits },
+        workspaceAlias: request.contract.workspace_alias,
+        // #1686: derived children keep their immutable revision lineage
+        // (repair parent-contract reference and retry context).
+        revisionMeta: request.contract.revision_meta,
+        // #1644: the bound Orc invocation context is the only spawn authority
+        // for tool-driven work; tool arguments cannot choose or override it.
+        authority: request.authority,
       });
       if ("error" in result) {
         throw new Error(`Contract creation rejected: ${result.error}`);
       }
       request.attemptId = result.attemptId;
       // Reconciler is the single scheduling authority for supervised Workers.
-      // kanbanEnqueue already emitted card:queued; because contract creation is
-      // synchronous, the queued wake observes a fully initialized attempt.
-      // Starting Spin here would race the claim and allow a Worker to execute
-      // without the durable ownership transition being the source of truth.
-      return cardId;
+      // createChild already emitted card:queued after commit; because contract
+      // creation is synchronous, the queued wake observes a fully initialized
+      // attempt. Starting Spin here would race the claim and allow a Worker to
+      // execute without the durable ownership transition being the source of
+      // truth.
+      return result.cardId;
+    }
+    // A project-owned child must carry the contract/attempt tuple that records
+    // its immutable authority. The legacy unsupervised branch has no durable
+    // lineage and would otherwise let a stale Orc create work that cannot be
+    // fenced at settlement time.
+    if (request.authority) {
+      throw new Error("project mutation rejected: supervised child contract required");
     }
     // No contract — legacy unsupervised path.
-    void this.spin({
+    const cardId = kanbanEnqueue(request.title ?? request.goal.slice(0, 80), request.source ?? "agent", undefined, {
+      priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      type: "W",
+      parent_id: parentCardId,
+    });
+    this.settleUnawaitedSpin(this.spin({
       type: "W",
       goal: request.goal,
       cardId,
@@ -1624,7 +2214,6 @@ export class Spin {
       title: request.title,
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
-      contractId: request.contract?.id,
       attemptId: request.attemptId,
       executionControl: request.executionControl,
       executionScope: request.executionScope,
@@ -1638,7 +2227,7 @@ export class Spin {
       chatId: request.chatId ? Number(request.chatId) : undefined,
       settlementOwner: "spin",
       await: false,
-    });
+    }), "W", cardId);
     return cardId;
   }
 
@@ -1668,6 +2257,7 @@ export class Spin {
   private finalizeSession(session: ManagedSession, reason: string): void {
     const metadata = session as unknown as Record<string, unknown>;
     if (session.status === "ended" && metadata["endedAt"] !== undefined) return;
+    void revokeSealedSecretExecution(session.activeExecutionId);
     this.releaseSessionTransport(session);
     session.active = false;
     metadata["endedAt"] = Date.now();
@@ -1694,26 +2284,29 @@ export class Spin {
 }
 
 /**
- * #1629: Resolve the trusted tool-authorization mode for the current Spin
- * execution from durable Kanban provenance. Only a successfully read durable
- * root with `source === "task"` selects `unattended-task`; missing cards,
- * unreadable/cyclic/deep ancestry, missing or unknown source all fail closed
- * to `interactive`. The result is per execution and never stored on the
- * reusable session.
+ * #1629/#1663: Resolve the trusted tool-authorization mode for the current
+ * Spin execution from durable Kanban provenance. Only a successfully read
+ * durable root with `source === "task"` selects `unattended-task`; a card-backed
+ * execution with missing or unreadable/cyclic/deep ancestry is `unverified`.
+ * A known non-task root and a prompt-only execution remain `interactive`. The
+ * result is per execution and never stored on the reusable session.
  */
 export function resolveToolAuthorizationMode(cardId: number | undefined): import("./action-gate.js").ToolAuthorizationMode {
   if (cardId === undefined) return "interactive";
   try {
     const rootId = resolveRootId(cardId);
-    if (rootId === undefined) return "interactive";
-    return kanbanGetCard(rootId)?.source === "task"
+    if (rootId === undefined) return "unverified";
+    const rootCard = kanbanGetCard(rootId);
+    if (!rootCard) return "unverified";
+    return rootCard.source === "task"
       ? "unattended-task"
       : "interactive";
   } catch (err) {
     // A provenance read failure must never turn into unattended authority or
-    // escape before Spin's execution try/catch. Fail closed for this run.
+    // allow a non-idempotent delivery side effect. Keep the run alive with an
+    // explicitly unverified mode so restricted tools fail closed.
     logWarn(TAG, `Unable to resolve tool authorization provenance for card ${cardId}: ${err instanceof Error ? err.message : String(err)}`);
-    return "interactive";
+    return "unverified";
   }
 }
 
@@ -1724,20 +2317,6 @@ export function resolveToolAuthorizationMode(cardId: number | undefined): import
 export function renderSteeringContinuation(batch: QueuedSessionInstruction[]): string {
   const items = batch.map((i, idx) => `${idx + 1}. ${i.text}`).join("\n");
   return `[USER STEERING — received while you were working]\n${items}\n[/USER STEERING]\n\nIncorporate this direction into the current project. Do not restart completed work unnecessarily. Report the updated result.`;
-}
-
-/** #675: Fire result callback to the delegating peer. Fire-and-forget. */
-async function fireCallback(peerName: string, taskId: number, status: "done" | "failed", result?: string, error?: string, artifacts?: Array<{ name: string; content: string }>, tokensUsed?: number): Promise<void> {
-  try {
-    const { getPeerTransport } = await import("./peer-transport/index.js");
-    const transport = getPeerTransport();
-    const payload: Record<string, unknown> = { action: "callback", task_id: taskId, status, result_summary: result, error, tokens_used: tokensUsed ?? 0 };
-    if (artifacts?.length) payload.artifacts = artifacts;
-    await transport.send(peerName, { type: "callback", payload });
-    logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
-  } catch (err) {
-    logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 export const spin = new Spin();

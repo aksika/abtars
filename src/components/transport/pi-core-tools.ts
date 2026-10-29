@@ -1,8 +1,12 @@
 import { logWarn } from "../logger.js";
+import { recordDeliveredRecall } from "../answer-evidence.js";
+import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
+
+export { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
-import { getToolDefinitions, executeToolCall } from "./tool-registry.js";
-import type { ToolDefinition } from "./tool-registry.js";
+import { getToolDefinitions, executeToolCall, checkToolAvailability } from "./tool-registry.js";
+import type { PortToolDescriptor } from "./pi-port.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
 import { checkTool } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError, parseToolResultToDiagnostic, buildUnknownDiagnostic } from "./tool-failure-diagnostic.js";
@@ -10,6 +14,22 @@ import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 const TAG = "pi-core-tools";
+
+export function limitPiCoreToolResult(toolName: string, result: string): string {
+  if (result.length <= PI_CORE_TOOL_RESULT_MAX_CHARS) return result;
+  logWarn(
+    TAG,
+    `Tool ${toolName} result ${result.length} > ${PI_CORE_TOOL_RESULT_MAX_CHARS} chars — truncated`,
+  );
+  // The marker must fit inside the bound, so the delivered count depends on the
+  // rendered marker length. Render once against an upper-bound placeholder to
+  // size the prefix, then render again with the real delivered count.
+  const marker = (delivered: number): string =>
+    `\n\n[TRUNCATED: tool returned ${result.length} chars, ${delivered} delivered. ` +
+    `This result is incomplete — do not treat it as the whole answer.]`;
+  const delivered = PI_CORE_TOOL_RESULT_MAX_CHARS - marker(PI_CORE_TOOL_RESULT_MAX_CHARS).length;
+  return `${result.slice(0, delivered)}${marker(delivered)}`;
+}
 
 export interface PiCoreToolContext {
   executionId: string;
@@ -21,16 +41,22 @@ export interface PiCoreToolContext {
   onToolFailure?: (diagnostic: ToolFailureDiagnosticV1) => void;
   /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
-  /** #1502 Task 10: task-local execution scope. */
+/** #1502 Task 10: task-local execution scope. */
   executionScope?: ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1850: trusted worker origin descriptor for relay containment. */
+  workOrigin?: import("./tool-registry.js").WorkOrigin;
   /** #1552: trusted session type supplied by Spin; absent types fail closed. */
   sessionType?: import("../spin-types.js").SessionType;
-  /** #1552: late-bound memory-tool dependencies (runtime + quota holder). */
+  /** #1552: late-bound memory-tool dependencies (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   /** #1629: trusted tool authorization mode (from Spin via the transport). */
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1680: host-owned one-shot turn control — intent satisfaction stops the
+   *  active turn at the durable transition instead of waiting for another
+   *  provider round. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
@@ -77,18 +103,26 @@ export function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
   }
 }
 
-function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext): AgentTool {
-  validatePiSchemaOrThrow(def.parameters);
+/**
+ * #1777: the converter depends only on the descriptor portion of a registry
+ * definition (name/description/parameters). The full `ToolDefinition` stays
+ * with the registry — dispatch binds by tool name via `executeToolCall`, and
+ * a descriptor is presentation metadata, never authority to execute a tool.
+ * `ToolDefinition` remains assignable here; using a registry-only field
+ * inside this function is a compile error by construction.
+ */
+function definitionToAgentTool(descriptor: PortToolDescriptor, context: PiCoreToolContext): AgentTool {
+  validatePiSchemaOrThrow(descriptor.parameters);
 
-  const adapted = adaptParameters(def.parameters ?? {});
+  const adapted = adaptParameters(descriptor.parameters ?? {});
   const parameters = context.createUnsafeSchema
     ? context.createUnsafeSchema(adapted)
     : adapted;
 
   return {
-    name: def.name,
-    description: def.description,
-    label: def.name,
+    name: descriptor.name,
+    description: descriptor.description,
+    label: descriptor.name,
     parameters: parameters as import("typebox").TSchema,
     executionMode: "sequential",
 
@@ -100,7 +134,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       const params = rawParams && typeof rawParams === "object" && !Array.isArray(rawParams)
         ? rawParams as Record<string, unknown>
         : {};
-      const toolDecision = context.safety.beforeTool(def.name, params);
+      const toolDecision = context.safety.beforeTool(descriptor.name, params);
       if (toolDecision.decision === "skip") {
         return {
           content: [{ type: "text", text: "Tool call skipped — batch cancelled" }],
@@ -108,7 +142,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         };
       }
       if (toolDecision.decision === "error") {
-        const decisionDiag = buildUnknownDiagnostic(context.executionId, def.name, toolDecision.reason);
+        const decisionDiag = buildUnknownDiagnostic(context.executionId, descriptor.name, toolDecision.reason);
         context.onToolFailure?.(decisionDiag);
         throw new PiCoreToolExecutionError(decisionDiag);
       }
@@ -119,24 +153,37 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       let outcomeRecorded = false;
       let lastDiag: ToolFailureDiagnosticV1 | undefined;
       try {
-        const result = await executeToolCall(def.name, params, {
+        const result = await executeToolCall(descriptor.name, params, {
           userId: context.userId,
+          executionId: context.executionId,
           signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,
           executionScope: context.executionScope,
           orcContext: context.orcContext,
+          // #1850: trusted worker origin for relay containment.
+          workOrigin: context.workOrigin,
           sessionType: context.sessionType,
           memoryToolDeps: context.memoryToolDeps,
           authorizationMode: context.authorizationMode,
+          orcTurnControl: context.orcTurnControl,
         });
 
-        const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);
-        if (diag) {
-          lastDiag = diag;
-          logWarn(TAG, `Tool ${def.name} failed [${diag.execution_id}]: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
+        // #1680: when the durable intent postcondition won, the turn ends here —
+        // the safety controller stops further provider rounds so the model
+        // cannot keep calling tools after its intent was consumed. The run CAS
+        // and Spin's execution generation reject any late event regardless.
+        const terminal = context.orcTurnControl?.completed;
+        if (terminal?.kind === "intent_satisfied") {
+          context.safety.requestStop(`intent satisfied: ${terminal.code}`);
         }
 
-        if (def.name === "memory_store") {
+        const diag = parseToolResultToDiagnostic(result, context.executionId, descriptor.name);
+        if (diag) {
+          lastDiag = diag;
+          logWarn(TAG, `Tool ${descriptor.name} failed [${diag.execution_id}]: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
+        }
+
+        if (descriptor.name === "memory_store") {
           try {
             const parsed = JSON.parse(result) as { stored?: boolean };
             const classification = Number(params["classification"] ?? params["class"] ?? 1);
@@ -149,12 +196,12 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           }
         }
 
-        const outcome = context.safety.afterTool(def.name, result);
+        const outcome = context.safety.afterTool(descriptor.name, result);
         outcomeRecorded = true;
         if (outcome.decision === "error") {
           const finalDiag = lastDiag
             ? { ...lastDiag, reason: "repeated_failure" as const, safety_incident: "repeated_failure" as const }
-            : buildUnknownDiagnostic(context.executionId, def.name, outcome.reason);
+            : buildUnknownDiagnostic(context.executionId, descriptor.name, outcome.reason);
           context.onToolFailure?.(finalDiag);
           throw new PiCoreToolExecutionError(finalDiag);
         }
@@ -164,21 +211,25 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
 
         context.onToolSuccess?.();
 
+        const delivered = limitPiCoreToolResult(descriptor.name, result);
+        if (descriptor.name === "memory_recall" && !lastDiag && !signal?.aborted && !context.signal?.aborted) {
+          recordDeliveredRecall(context.executionId, delivered);
+        }
         return {
-          content: [{ type: "text", text: result.slice(0, 2000) }],
-          details: { tool: def.name },
+          content: [{ type: "text", text: delivered }],
+          details: { tool: descriptor.name },
         };
       } catch (err) {
         if (err instanceof PiCoreToolExecutionError) throw err;
 
         const errorClass = err instanceof Error ? err.name : "unknown";
         const errorMsg = err instanceof Error ? err.message : String(err);
-        const fallbackDiag = buildUnknownDiagnostic(context.executionId, def.name, errorMsg);
+        const fallbackDiag = buildUnknownDiagnostic(context.executionId, descriptor.name, errorMsg);
         context.onToolFailure?.(fallbackDiag);
-        logWarn(TAG, `Tool ${def.name} execution failed [${context.executionId}] (${errorClass})`);
+        logWarn(TAG, `Tool ${descriptor.name} execution failed [${context.executionId}] (${errorClass})`);
 
         if (!outcomeRecorded) {
-          context.safety.afterTool(def.name, JSON.stringify({ error: errorClass }));
+          context.safety.afterTool(descriptor.name, JSON.stringify({ error: errorClass }));
         }
         throw new PiCoreToolExecutionError(fallbackDiag);
       }
@@ -196,10 +247,19 @@ export function createPiAgentTools(context: PiCoreToolContext): AgentTool[] {
     const allowed = checkTool(def.name, policy);
     if (!allowed.allowed) continue;
 
+    // #1663: the shared contextual availability policy — unattended scheduled
+    // executions never receive a send_document schema, so the model cannot
+    // plan around a capability it cannot use. The registry execution boundary
+    // remains authoritative; this filter only improves model behavior.
+    if (!checkToolAvailability(def.name, context).allowed) continue;
+
     // #1552 R1: memory_store is only ever presented to Main (A) and Dreamy
     // (D). Every other type — including missing/forged types — does not see
     // the tool, so a model cannot even attempt it through the schema.
     if (def.name === "memory_store" && context.sessionType !== "A" && context.sessionType !== "D") continue;
+    // #1660: secret_find is Main-only; its execution-time gate is mirrored at
+    // presentation so non-Main models never see the schema.
+    if (def.name === "secret_find" && context.sessionType !== "A") continue;
 
     try {
       const agentTool = definitionToAgentTool(def, context);

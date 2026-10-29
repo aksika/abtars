@@ -1,0 +1,60 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-ewdLJm",
+  "startedAt": 1786403231755,
+  "durationMs": 314242,
+  "passed": 9,
+  "failed": 1,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=d21e0f47-282 card=#1 session=1786403262_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786403262_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=303305 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file appeared in the workspace"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run d21e0f47-282 status running/awaiting_input after 120000ms\n"
+    }
+  ]
+}

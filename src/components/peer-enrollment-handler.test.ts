@@ -63,7 +63,7 @@ describe("PeerEnrollmentHandler", () => {
   let initKey: { signingKey: string; verifyKey: string };
   let tribeToken: string;
   let peersPath: string;
-  let registered: Array<{ name: string; ws: FakeWs }>;
+  let registered: Array<{ name: string; ws: unknown }>;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "enroll-test-"));
@@ -94,7 +94,7 @@ describe("PeerEnrollmentHandler", () => {
 
   function makeDeps(overrides: Partial<PeerEnrollmentDeps> = {}): PeerEnrollmentDeps {
     return {
-      registerPeerWs: (name, ws) => { registered.push({ name, ws: ws as FakeWs }); },
+      registerPeerWs: (name, ws) => { registered.push({ name, ws }); },
       now: () => FIXED_MS,
       randomBytes: (n: number) => { expect(n).toBe(16); return FIXED_NONCE; },
       readPeersJson: () => existsSync(peersPath) ? JSON.parse(readFileSync(peersPath, "utf-8")) : {},

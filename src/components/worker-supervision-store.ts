@@ -1,7 +1,29 @@
-import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { kanbanTransition, requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { commitSupervisedOutcome } from "./orc-project/orc-workflow-settlement.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { addColumnIfMissing } from "../utils/sqlite-migrate.js";
 import { logSwarmTrace } from "./swarm-trace.js";
+import {
+  authorizeActiveProjectWork,
+  cardIsSupervisedProjectChild,
+  emitProjectAuthorityRejection,
+  type ProjectAuthorityRejection,
+  type ProjectMutationAuthority,
+} from "./project-acceptance/project-review-store.js";
+import {
+  isExecutorKind,
+  normalizeLegacyExecutorId,
+  normalizeLegacyExecutorKind,
+  type ExecutorKind,
+} from "./worker-executor-identity.js";
+
+export type { ExecutorKind } from "./worker-executor-identity.js";
+
+/** #1720 — hard cap for late-completion settlement grace. */
+const MAX_COMPLETION_GRACE_MS = 5_000;
+/** #1720 — grace fallback when the attempt's contract carries no usable duration. */
+const FALLBACK_COMPLETION_GRACE_MS = 1_000;
 
 export type AttemptLifecycle =
   | "pending"
@@ -13,8 +35,6 @@ export type AttemptLifecycle =
   | "failed"
   | "cancelled"
   | "timed_out";
-
-export type ExecutorKind = "agent" | "pi" | "remote";
 
 export interface ContractRow {
   id: string;
@@ -34,7 +54,7 @@ export interface AttemptRow {
   card_id: number;
   contract_id: string;
   ordinal: number;
-  executor_kind: string;
+  executor_kind: ExecutorKind;
   executor_id: string;
   generation: number;
   lifecycle: AttemptLifecycle;
@@ -53,6 +73,14 @@ export interface AttemptRow {
   output_tokens: number | null;
   charged_tokens: number;
   usage_charged_at: string | null;
+  /** #1638: durable executor-neutral runtime binding (Pi run id/generation). */
+  executor_resource_id: string | null;
+  executor_resource_generation: number | null;
+  execution_continuity: string | null;
+  /** #1644: immutable root project authority captured at attempt creation. */
+  root_project_card_id: number | null;
+  root_project_generation: number | null;
+  scheduled_run_id: string | null;
 }
 
 export interface ReservationRow {
@@ -88,6 +116,8 @@ export interface ExecutionClaim {
 export class WorkerSupervisionStore {
   readonly db: TaskDatabase;
 
+  private static readonly EXECUTOR_IDENTITY_MIGRATION = "1637_executor_identity";
+
   constructor(db?: TaskDatabase) {
     this.db = db ?? requireTaskDatabase();
     this.migrate();
@@ -104,7 +134,7 @@ export class WorkerSupervisionStore {
       if (needsMigration) {
         db.exec(`ALTER TABLE worker_contracts RENAME TO worker_contracts_old`);
         // Drop the old UNIQUE index that conflicts with the new table
-        try { db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`); } catch {}
+        db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`);
       }
     }
 
@@ -168,6 +198,17 @@ export class WorkerSupervisionStore {
       );
     `);
 
+    // Migration markers keep one-time data migrations out of the hot path.
+    // WorkerSupervisionStore is constructed by several lifecycle/read paths;
+    // without this marker #1637 would rescan and parse every worker result on
+    // each construction after the first upgrade.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_supervision_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
     // Migrate old rows to revision 1 if worker_contracts_old exists and has data
     try {
       const oldExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
@@ -193,21 +234,40 @@ export class WorkerSupervisionStore {
       }
     } catch { /* worker_contracts_old does not exist or is empty — skip migration */ }
 
-    // Safe migration: add columns if they don't exist
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN generation INTEGER DEFAULT 1`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'pending'`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN source_attempt_id TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN retry_directive_id TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN earliest_claim_at TEXT`); } catch {}
+    // Safe migration: add columns if they don't exist (duplicate-column failures are expected)
+    addColumnIfMissing(db, "worker_attempts", "generation INTEGER DEFAULT 1");
+    addColumnIfMissing(db, "worker_attempts", "lifecycle TEXT NOT NULL DEFAULT 'pending'");
+    addColumnIfMissing(db, "worker_attempts", "claimed_at TEXT");
+    addColumnIfMissing(db, "worker_attempts", "hard_deadline_at TEXT");
+    addColumnIfMissing(db, "worker_attempts", "cancel_reason TEXT");
+    addColumnIfMissing(db, "worker_attempts", "source_attempt_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "retry_directive_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "earliest_claim_at TEXT");
     // #1510: Add budget and usage columns
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN input_tokens INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN output_tokens INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN charged_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN usage_charged_at TEXT`); } catch {}
+    addColumnIfMissing(db, "worker_attempts", "reserved_tokens INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "worker_attempts", "input_tokens INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "output_tokens INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "charged_tokens INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "worker_attempts", "usage_charged_at TEXT");
+    // #1638: executor-neutral runtime resource binding (Pi run id/generation).
+    // execution_continuity stays a plain TEXT column — SQLite cannot add a
+    // CHECK via ADD COLUMN; its 'initial'|'resumed'|'fresh' domain is enforced
+    // in the typed store operations below.
+    addColumnIfMissing(db, "worker_attempts", "executor_resource_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "executor_resource_generation INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "execution_continuity TEXT");
+    // #1644: immutable root project authority (card id, supervision generation,
+    // scheduled run id) captured when the attempt is created and copied verbatim
+    // to every retry/repair successor. Legacy rows stay NULL; they cannot be
+    // claimed or settled as live supervised project work without authority.
+    addColumnIfMissing(db, "worker_attempts", "root_project_card_id INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "root_project_generation INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "scheduled_run_id TEXT");
+    db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_attempt_runtime_generation
+        ON worker_attempts(executor_kind, executor_resource_id, executor_resource_generation)
+        WHERE executor_resource_id IS NOT NULL
+      `);
 
     // Backfill lifecycle for rows created before the #1364 state machine.
     db.exec(`
@@ -222,6 +282,80 @@ export class WorkerSupervisionStore {
       END
       WHERE lifecycle = 'pending' AND status <> 'pending'
     `);
+
+    // #1637: one durable executor identity. Normalize the two legacy attempt
+    // synonyms (local_worker -> agent, remote_worker -> remote) and the
+    // built-in Spin ID (spin -> spin-local), then normalize the embedded
+    // envelope JSON and recompute its digest — all in one transaction so the
+    // attempt row and its audit envelope can never advance contradictory.
+    // The marker makes this genuinely one-time and the in-transaction check
+    // keeps concurrent store construction idempotent.
+    db.transaction(() => {
+      const applied = db.prepare(`
+        SELECT 1 FROM worker_supervision_migrations WHERE name = ?
+      `).get(WorkerSupervisionStore.EXECUTOR_IDENTITY_MIGRATION);
+
+      const legacyKindRows = db.prepare(`
+        SELECT id, executor_kind, executor_id, lifecycle FROM worker_attempts
+        WHERE executor_kind IN ('local_worker', 'remote_worker')
+           OR executor_id = 'spin'
+      `).all() as Array<{ id: string; executor_kind: string; executor_id: string; lifecycle: string }>;
+
+      // The marker avoids parsing every result after the first upgrade. The
+      // small attempt query still lets a migration fixture or an older writer
+      // inserted after the marker self-heal without scanning worker_results.
+      if (applied && legacyKindRows.length === 0) return;
+
+      for (const row of legacyKindRows) {
+        const kind = normalizeLegacyExecutorKind(row.executor_kind);
+        if (!kind) continue;
+        const id = normalizeLegacyExecutorId(kind, row.executor_id);
+        db.prepare(`
+          UPDATE worker_attempts SET executor_kind = ?, executor_id = ?
+          WHERE id = ?
+        `).run(kind, id, row.id);
+      }
+
+      // The expensive envelope rewrite and the marker insert run only on the
+      // first upgrade; a later legacy attempt row self-heals through the query
+      // above without rescanning worker_results.
+      if (applied) return;
+      this.migrateLegacyEnvelopes();
+
+      db.prepare(`
+        INSERT OR IGNORE INTO worker_supervision_migrations (name) VALUES (?)
+      `).run(WorkerSupervisionStore.EXECUTOR_IDENTITY_MIGRATION);
+    });
+  }
+
+  /** #1637: rewrite legacy executor synonyms inside stored envelope JSON and
+   * recompute the digest from the exact updated JSON. Throws (rolling back
+   * the caller's transaction) when a targeted envelope cannot be parsed. */
+  private migrateLegacyEnvelopes(): void {
+    const rows = this.db.prepare(`SELECT attempt_id, envelope_json, envelope_digest FROM worker_results`).all() as Array<{ attempt_id: string; envelope_json: string; envelope_digest: string }>;
+    for (const row of rows) {
+      let parsed: { attempt?: { executor_kind?: string; executor_id?: string } };
+      try {
+        parsed = JSON.parse(row.envelope_json) as { attempt?: { executor_kind?: string; executor_id?: string } };
+      } catch (err) {
+        throw new Error(`migration aborted: worker_results.${row.attempt_id} envelope is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const attempt = parsed.attempt;
+      if (!attempt || typeof attempt !== "object") continue;
+      const kind = normalizeLegacyExecutorKind(attempt.executor_kind);
+      if (!kind && !(attempt.executor_kind === "agent" && attempt.executor_id === "spin")) continue;
+      const newKind = kind ?? (attempt.executor_kind as "agent");
+      attempt.executor_kind = newKind;
+      if (typeof attempt.executor_id === "string") {
+        attempt.executor_id = normalizeLegacyExecutorId(newKind, attempt.executor_id);
+      }
+      const updatedJson = JSON.stringify(parsed);
+      const updatedDigest = this.computeEnvelopeDigest(updatedJson);
+      this.db.prepare(`
+        UPDATE worker_results SET envelope_json = ?, envelope_digest = ?
+        WHERE attempt_id = ?
+      `).run(updatedJson, updatedDigest, row.attempt_id);
+    }
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
@@ -261,11 +395,15 @@ export class WorkerSupervisionStore {
     card_id: number;
     contract_id: string;
     ordinal: number;
-    executor_kind: string;
+    executor_kind: ExecutorKind;
     executor_id: string;
     remote_task_id?: number;
     status: string;
     started_at: string;
+    /** #1644: immutable root project lineage; required for supervised project attempts. */
+    root_project_card_id?: number | null;
+    root_project_generation?: number | null;
+    scheduled_run_id?: string | null;
   }): void {
     const lifecycle: AttemptLifecycle = attempt.status === "running"
       ? "running"
@@ -277,9 +415,9 @@ export class WorkerSupervisionStore {
             ? "cancelled"
             : "pending";
     this.db.prepare(`
-      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, lifecycle, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, lifecycle, attempt.started_at);
+      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, lifecycle, started_at, root_project_card_id, root_project_generation, scheduled_run_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, lifecycle, attempt.started_at, attempt.root_project_card_id ?? null, attempt.root_project_generation ?? null, attempt.scheduled_run_id ?? null);
   }
 
   getAttempt(attemptId: string): AttemptRow | undefined {
@@ -292,6 +430,54 @@ export class WorkerSupervisionStore {
 
   getLatestAttempt(cardId: number): AttemptRow | undefined {
     return this.db.prepare(`SELECT * FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(cardId) as AttemptRow | undefined;
+  }
+
+  // ── #1644: attempt-bound project authority ─────────────────────────────
+
+  /**
+   * Resolve the immutable root authority an attempt row carries. Attempts
+   * created after #1644 always carry lineage; legacy rows under a supervised
+   * project root fail closed as `missing` — authority is never inferred later;
+   * standalone (non-project) attempts are unaffected.
+   */
+  projectAuthorityForAttempt(
+    attempt: Pick<AttemptRow, "card_id" | "root_project_card_id" | "root_project_generation" | "scheduled_run_id">,
+  ): { kind: "authority"; authority: ProjectMutationAuthority } | { kind: "missing" } | { kind: "not_project" } {
+    if (attempt.root_project_card_id != null && attempt.root_project_generation != null) {
+      return {
+        kind: "authority",
+        authority: {
+          projectCardId: attempt.root_project_card_id,
+          projectGeneration: attempt.root_project_generation,
+          scheduledRunId: attempt.scheduled_run_id ?? undefined,
+        },
+      };
+    }
+    if (cardIsSupervisedProjectChild(this.db, attempt.card_id)) return { kind: "missing" };
+    return { kind: "not_project" };
+  }
+
+  /**
+   * #1644: active-work authorization for one attempt on the caller's
+   * connection — callers invoke it inside their transaction so the predicate
+   * and the mutation are decided atomically. Emits exactly one bounded
+   * rejection trace when the attempt is stale for its project root.
+   */
+  authorizeAttemptForProjectWork(
+    attempt: Pick<AttemptRow, "card_id" | "root_project_card_id" | "root_project_generation" | "scheduled_run_id">,
+    operation: string,
+  ): ProjectAuthorityRejection | null {
+    const resolved = this.projectAuthorityForAttempt(attempt);
+    if (resolved.kind === "not_project") return null;
+    if (resolved.kind === "missing") {
+      emitProjectAuthorityRejection(operation, undefined, "missing_authority", { cardId: attempt.card_id });
+      return "missing_authority";
+    }
+    const rejection = authorizeActiveProjectWork(this.db, resolved.authority);
+    if (rejection) {
+      emitProjectAuthorityRejection(operation, resolved.authority, rejection, { cardId: attempt.card_id });
+    }
+    return rejection;
   }
 
   // ── #1364: Lifecycle and claim operations ──────────────────────────────
@@ -318,6 +504,23 @@ export class WorkerSupervisionStore {
     return result.changes > 0;
   }
 
+  /** #1644: lifecycle mutations that can keep project work alive or accept a
+   * result must decide authority and the CAS on the same database transaction. */
+  private authorizedLifecycleTransition(
+    attemptId: string,
+    fromLifecycles: readonly AttemptLifecycle[],
+    toLifecycle: AttemptLifecycle,
+    operation: string,
+    extraSets?: Record<string, string | null>,
+  ): boolean {
+    return this.db.transaction(() => {
+      const attempt = this.getAttempt(attemptId);
+      if (!attempt || !fromLifecycles.includes(attempt.lifecycle)) return false;
+      if (this.authorizeAttemptForProjectWork(attempt, operation) !== null) return false;
+      return this.lifecycleTransition(attemptId, fromLifecycles, toLifecycle, extraSets);
+    });
+  }
+
   claimAttempt(
     cardId: number,
     contractId: string,
@@ -326,37 +529,44 @@ export class WorkerSupervisionStore {
     generation: number,
     hardDeadlineAt?: string,
   ): ExecutionClaim | null {
-    const latest = this.getLatestAttempt(cardId);
-    if (!latest) return null;
-    if (latest.lifecycle !== "pending") return null;
+    return this.db.transaction(() => {
+      const latest = this.getLatestAttempt(cardId);
+      if (!latest) return null;
+      if (latest.lifecycle !== "pending") return null;
+      // #1637: the pending attempt owns its executor identity. Claim validates
+      // the stored pair and never rewrites either column with dispatch-resolved
+      // values — dispatch or retry must not silently reroute an accepted contract.
+      if (latest.executor_kind !== executorKind || latest.executor_id !== executorId) return null;
+      // #1644: a supervised project attempt is claimable only while its root
+      // project is live at its immutable generation/run.
+      if (this.authorizeAttemptForProjectWork(latest, "attempt_claim") !== null) return null;
 
-    const attemptId = latest.id;
+      const attemptId = latest.id;
 
-    const claimedAt = new Date().toISOString();
-    const claim: ExecutionClaim = {
-      attemptId,
-      cardId,
-      contractId,
-      executorKind,
-      executorId,
-      generation,
-      claimedAt,
-      hardDeadlineAt,
-    };
+      const claimedAt = new Date().toISOString();
+      const claim: ExecutionClaim = {
+        attemptId,
+        cardId,
+        contractId,
+        executorKind,
+        executorId,
+        generation,
+        claimedAt,
+        hardDeadlineAt,
+      };
 
-    const updated = this.lifecycleTransition(attemptId, ["pending"], "claimed", {
-      executor_kind: executorKind,
-      executor_id: executorId,
-      generation: String(generation),
-      claimed_at: claimedAt,
-      hard_deadline_at: hardDeadlineAt ?? null,
+      const updated = this.lifecycleTransition(attemptId, ["pending"], "claimed", {
+        generation: String(generation),
+        claimed_at: claimedAt,
+        hard_deadline_at: hardDeadlineAt ?? null,
+      });
+
+      if (updated) {
+        logSwarmTrace({ event: "attempt_claimed", card: cardId, attempt: attemptId, generation, executor: executorId });
+      }
+
+      return updated ? claim : null;
     });
-
-    if (updated) {
-      logSwarmTrace({ event: "attempt_claimed", card: cardId, attempt: attemptId, generation, executor: executorId });
-    }
-
-    return updated ? claim : null;
   }
 
   /** Claim a scheduled retry and its budget reservation atomically. */
@@ -373,19 +583,24 @@ export class WorkerSupervisionStore {
     try {
       return this.db.transaction(() => {
         const attempt = this.db.prepare(`
-          SELECT id, contract_id, executor_kind, executor_id, lifecycle, source_attempt_id
+          SELECT id, card_id, contract_id, executor_kind, executor_id, lifecycle, source_attempt_id,
+                 root_project_card_id, root_project_generation, scheduled_run_id
           FROM worker_attempts
           WHERE id = ? AND card_id = ?
             AND id = (SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1)
         `).get(attemptId, cardId, cardId) as {
-          id: string; contract_id: string; executor_kind: string; executor_id: string;
+          id: string; card_id: number; contract_id: string; executor_kind: string; executor_id: string;
           lifecycle: AttemptLifecycle; source_attempt_id: string | null;
+          root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null;
         } | undefined;
         if (!attempt || attempt.lifecycle !== "pending" ||
             attempt.contract_id !== contractId ||
             attempt.executor_kind !== executorKind ||
             attempt.executor_id !== executorId ||
             attempt.source_attempt_id !== sourceAttemptId) return null;
+        // #1644: retries are claimable only while the root project is live at
+        // the immutable generation/run the lineage carries.
+        if (this.authorizeAttemptForProjectWork(attempt, "retry_claim") !== null) return null;
 
         const claimedAt = new Date().toISOString();
         const updated = this.db.prepare(`
@@ -410,11 +625,69 @@ export class WorkerSupervisionStore {
   }
 
   markAttemptStartObservable(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed"], "starting");
+    return this.authorizedLifecycleTransition(attemptId, ["claimed"], "starting", "attempt_start");
+  }
+
+  // ── #1638: executor-neutral runtime resource binding ─────────────────────
+
+  /** Durable (attempt, generation) -> (resource id, resource generation)
+   * mapping. Requires the latest attempt with matching generation and
+   * executor kind in claimed|starting. An exact repeated bind is idempotent;
+   * any different tuple for an already-bound attempt conflicts. */
+  bindExecutorResource(input: {
+    attemptId: string;
+    expectedAttemptGeneration: number;
+    executorKind: ExecutorKind;
+    resourceId: string;
+    resourceGeneration: number;
+    continuity: "initial" | "resumed" | "fresh";
+  }): "bound" | "idempotent" | "stale" | "conflict" {
+    return this.db.transaction(() => {
+      const attempt = this.db.prepare(`SELECT id, card_id, generation, executor_kind, lifecycle, executor_resource_id, executor_resource_generation, root_project_card_id, root_project_generation, scheduled_run_id FROM worker_attempts WHERE id = ?`).get(input.attemptId) as {
+        id: string; card_id: number; generation: number; executor_kind: string; lifecycle: AttemptLifecycle;
+        executor_resource_id: string | null; executor_resource_generation: number | null;
+        root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null;
+      } | undefined;
+      if (!attempt) return "stale";
+      if (attempt.generation !== input.expectedAttemptGeneration) return "stale";
+      if (attempt.executor_kind !== input.executorKind) return "conflict";
+      if (attempt.lifecycle !== "claimed" && attempt.lifecycle !== "starting") return "stale";
+      if (attempt.executor_resource_id !== null && attempt.executor_resource_generation !== null) {
+        return attempt.executor_resource_id === input.resourceId
+          && attempt.executor_resource_generation === input.resourceGeneration
+          ? "idempotent" : "conflict";
+      }
+      if (this.authorizeAttemptForProjectWork(attempt, "executor_resource_bind") !== null) return "stale";
+      const updated = this.db.prepare(`
+        UPDATE worker_attempts
+        SET executor_resource_id = ?, executor_resource_generation = ?, execution_continuity = ?
+        WHERE id = ? AND generation = ? AND lifecycle IN ('claimed', 'starting') AND executor_resource_id IS NULL
+      `).run(input.resourceId, input.resourceGeneration, input.continuity, input.attemptId, input.expectedAttemptGeneration);
+      return updated.changes === 1 ? "bound" : "conflict";
+    });
+  }
+
+  getExecutorResourceBinding(attemptId: string): { resourceId: string; resourceGeneration: number; continuity: "initial" | "resumed" | "fresh" } | undefined {
+    const row = this.db.prepare(`
+      SELECT executor_resource_id, executor_resource_generation, execution_continuity
+      FROM worker_attempts WHERE id = ?
+    `).get(attemptId) as { executor_resource_id: string | null; executor_resource_generation: number | null; execution_continuity: string | null } | undefined;
+    if (!row || row.executor_resource_id === null || row.executor_resource_generation === null) return undefined;
+    const continuity = row.execution_continuity === "resumed" ? "resumed" as const
+      : row.execution_continuity === "fresh" ? "fresh" as const : "initial" as const;
+    return { resourceId: row.executor_resource_id, resourceGeneration: row.executor_resource_generation, continuity };
+  }
+
+  getAttemptForExecutorResource(kind: ExecutorKind, id: string, generation: number): AttemptRow | undefined {
+    return this.db.prepare(`
+      SELECT * FROM worker_attempts
+      WHERE executor_kind = ? AND executor_resource_id = ? AND executor_resource_generation = ?
+      ORDER BY generation DESC LIMIT 1
+    `).get(kind, id, generation) as AttemptRow | undefined;
   }
 
   markAttemptRunning(attemptId: string): boolean {
-    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    const ok = this.authorizedLifecycleTransition(attemptId, ["claimed", "starting"], "running", "attempt_running");
     if (ok) {
       const attempt = this.getAttempt(attemptId);
       if (attempt) logSwarmTrace({ event: "attempt_running", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, executor: attempt.executor_id });
@@ -428,6 +701,53 @@ export class WorkerSupervisionStore {
     });
   }
 
+  /** #1644: cancel_worker owns both the child lifecycle and its card CAS.
+   * The bound project authority is checked on this connection before either
+   * mutation, so an Orc turn cannot fail a child after the root is terminal. */
+  cancelProjectChild(
+    cardId: number,
+    authority: ProjectMutationAuthority,
+    reason: string,
+  ): boolean {
+    return this.db.transaction(() => {
+      const card = this.db.prepare(`SELECT parent_id, type, status FROM kanban_board WHERE id = ?`).get(cardId) as {
+        parent_id: number | null;
+        type: string | null;
+        status: string;
+      } | undefined;
+      if (!card || card.parent_id !== authority.projectCardId || card.type !== "W") return false;
+      if (card.status !== "queued" && card.status !== "running") return false;
+      const rootRejection = authorizeActiveProjectWork(this.db, authority);
+      if (rootRejection) {
+        emitProjectAuthorityRejection("cancel_worker", authority, rootRejection, { cardId });
+        return false;
+      }
+
+      const attempt = this.getLatestAttempt(cardId);
+      if (!attempt) return false;
+      if (this.authorizeAttemptForProjectWork(attempt, "cancel_worker") !== null) return false;
+
+      if (attempt.lifecycle === "pending") {
+        if (!this.cancelPendingAttempt(attempt.id, reason)) return false;
+      } else if (attempt.lifecycle === "claimed" || attempt.lifecycle === "starting" || attempt.lifecycle === "running") {
+        if (!this.requestCancel(attempt.id, reason)) return false;
+      } else if (attempt.lifecycle !== "cancel_requested") {
+        return false;
+      }
+
+      const outcome = kanbanTransition({
+        cardId,
+        from: ["queued", "running"],
+        to: "failed",
+        actor: "settle_failed",
+        reason: reason.slice(0, 300),
+        fields: { error: reason.slice(0, 1000), completed_at: new Date().toISOString() },
+        emit: false,
+      }, this.db);
+      return outcome.kind === "applied" || outcome.kind === "reasserted";
+    });
+  }
+
   /** Cancel work that has not been claimed yet so it can never be dispatched. */
   cancelPendingAttempt(attemptId: string, reason: string): boolean {
     return this.lifecycleTransition(attemptId, ["pending"], "cancelled", {
@@ -438,7 +758,7 @@ export class WorkerSupervisionStore {
   }
 
   completeAttempt(attemptId: string): boolean {
-    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
+    const ok = this.authorizedLifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", "attempt_complete", {
       status: "settled",
       settled_at: new Date().toISOString(),
     });
@@ -593,7 +913,7 @@ export class WorkerSupervisionStore {
         ordinal: attempt.ordinal,
         contract_id: attempt.contract_id,
         contract_digest: contractRow?.contract_digest ?? "",
-        executor_kind: attempt.executor_kind === "remote" ? "remote_worker" : "local_worker",
+        executor_kind: attempt.executor_kind,
         executor_id: attempt.executor_id,
         started_at: attempt.started_at,
         finished_at: new Date(now).toISOString(),
@@ -608,7 +928,67 @@ export class WorkerSupervisionStore {
 
   // ── #1510: Atomic capacity-and-budget-guarded claim ─────────────────────
 
-  getActiveAttemptCountForExecutor(executorKind: string, executorId: string): number {
+  // ── #1638: proven-no-start deferral ─────────────────────────────────────
+
+  /**
+   * #1638 — Atomically return a `starting` attempt to `pending` after the
+   * adapter proved no process was started (typed `provesNoStart` observation).
+   * CAS requires the latest matching attempt generation in `starting`, then:
+   * - returns lifecycle/status to `pending`;
+   * - clears claimed_at, hard_deadline_at, and reservation accounting;
+   * - closes the executor lease with `deferred:<reason>`;
+   * - flips this attempt's retry reservation `claimed` -> `active` if one
+   *   exists (state hygiene, not budget accounting — the attempt is never
+   *   settled, so retry budget is preserved by non-settlement);
+   * - leaves the card queued and attempt ordinal/generation unchanged.
+   * Never settles the attempt; never consumes retry budget.
+   */
+  deferClaimAfterProvenNoStart(input: {
+    attemptId: string;
+    expectedGeneration: number;
+    reason: "capacity" | "resource_busy";
+  }): "deferred" | "stale" | "conflict" {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
+        if (!attempt) return "stale";
+        const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
+        if (!latest || latest.id !== input.attemptId) return "stale";
+        if (attempt.generation !== input.expectedGeneration) return "stale";
+        if (attempt.lifecycle !== "starting") return "stale";
+        // Returning a live claim to pending is still project work. A terminal
+        // root must win before this requeue mutation, otherwise a stale
+        // adapter could create a fresh dispatch opportunity after invalidation.
+        if (this.authorizeAttemptForProjectWork(attempt, "attempt_defer") !== null) return "stale";
+
+        const updated = this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = 'pending', status = 'pending',
+              claimed_at = NULL, hard_deadline_at = NULL,
+              reserved_tokens = 0, earliest_claim_at = NULL
+          WHERE id = ? AND lifecycle = 'starting'
+        `).run(input.attemptId);
+        if (updated.changes !== 1) return "conflict";
+
+        const leaseStore = new ExecutorLeaseStore(this.db);
+        leaseStore.closeLease(input.attemptId, attempt.generation, `deferred:${input.reason}`);
+
+        if (attempt.source_attempt_id) {
+          this.db.prepare(`
+            UPDATE retry_budget_reservations SET status = 'active', updated_at = datetime('now')
+            WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'claimed'
+          `).run(attempt.source_attempt_id, input.attemptId);
+        }
+
+        logSwarmTrace({ event: "attempt_deferred", card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, reason: input.reason });
+        return "deferred";
+      });
+    } catch {
+      return "conflict";
+    }
+  }
+
+  getActiveAttemptCountForExecutor(executorKind: ExecutorKind, executorId: string): number {
     const sql = `
       SELECT COUNT(*) AS cnt FROM worker_attempts
       WHERE executor_kind = ? AND executor_id = ?
@@ -618,7 +998,7 @@ export class WorkerSupervisionStore {
     return row?.cnt ?? 0;
   }
 
-  getActiveAttemptsForExecutor(executorKind: string, executorId: string): AttemptRow[] {
+  getActiveAttemptsForExecutor(executorKind: ExecutorKind, executorId: string): AttemptRow[] {
     return this.db.prepare(`
       SELECT * FROM worker_attempts
       WHERE executor_kind = ? AND executor_id = ?
@@ -679,12 +1059,26 @@ export class WorkerSupervisionStore {
     try {
       return this.db.transaction(() => {
         const attempt = this.db.prepare(`
-          SELECT id, lifecycle, ordinal FROM worker_attempts
+          SELECT id, card_id, lifecycle, ordinal, executor_kind, executor_id,
+                 root_project_card_id, root_project_generation, scheduled_run_id
+          FROM worker_attempts
           WHERE id = ? AND card_id = ?
-        `).get(input.attemptId, input.cardId) as { id: string; lifecycle: AttemptLifecycle; ordinal: number } | undefined;
+        `).get(input.attemptId, input.cardId) as { id: string; card_id: number; lifecycle: AttemptLifecycle; ordinal: number; executor_kind: string; executor_id: string; root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null } | undefined;
         if (!attempt) return { kind: "stale", reason: "attempt not found" };
         if (attempt.lifecycle !== "pending") return { kind: "stale", reason: `attempt lifecycle is ${attempt.lifecycle}` };
         if (!this.isCardLatestAttempt(input.cardId, input.attemptId)) return { kind: "stale", reason: "not latest attempt" };
+        // #1644: a supervised project attempt is claimable only while its root
+        // project is live at its immutable generation/run.
+        const authorityRejection = this.authorizeAttemptForProjectWork(attempt, "attempt_claim");
+        if (authorityRejection !== null) return { kind: "stale", reason: authorityRejection };
+        // #1637: the pending attempt owns its executor identity. Claim
+        // validates the stored pair; dispatch resolution is never permission
+        // to rewrite the attempt's executor kind or ID.
+        if (!isExecutorKind(attempt.executor_kind) ||
+            attempt.executor_kind !== input.executorKind ||
+            attempt.executor_id !== input.executorId) {
+          return { kind: "executor_mismatch", reason: `attempt is ${attempt.executor_kind}/${attempt.executor_id}, requested ${input.executorKind}/${input.executorId}` };
+        }
 
         const card = this.db.prepare(`
           SELECT status, parent_id FROM kanban_board WHERE id = ?
@@ -736,10 +1130,10 @@ export class WorkerSupervisionStore {
         const claimedAt = new Date().toISOString();
         const updated = this.db.prepare(`
           UPDATE worker_attempts
-          SET lifecycle = 'claimed', claimed_at = ?, generation = ?, executor_kind = ?, executor_id = ?,
+          SET lifecycle = 'claimed', claimed_at = ?, generation = ?,
               hard_deadline_at = ?, reserved_tokens = ?
           WHERE id = ? AND lifecycle = 'pending'
-        `).run(claimedAt, input.generation, input.executorKind, input.executorId,
+        `).run(claimedAt, input.generation,
               input.hardDeadlineAt ?? null, input.reservedTokens, input.attemptId);
         if (updated.changes !== 1) return { kind: "claim_failed", reason: "update did not match" };
 
@@ -770,14 +1164,30 @@ export class WorkerSupervisionStore {
 
   // ── #1510: Single terminal settlement primitive ─────────────────────────
 
-  getActiveProjectSupervision(projectId: number): { state: string } | undefined {
+  /** #1720 — Bounded tolerance for completions that reach settlement just
+   * past their hard deadline. Workers pace to the announced budget, so
+   * genuine completions cluster at the boundary; event-loop jitter must not
+   * discard paid-for evidence. Proportional to the lane's own contract
+   * budget and capped; falls back small when no usable duration exists. */
+  private completionGraceMs(attempt: AttemptRow): number {
     try {
-      const { ProjectReviewStore } = require("./project-acceptance/project-review-store.js");
-      const reviewStore = new ProjectReviewStore(this.db);
-      return reviewStore.getSupervision(projectId);
-    } catch { return undefined; }
+      const row = this.getContract(attempt.contract_id);
+      const parsed: unknown = row ? JSON.parse(row.contract_json) : null;
+      if (typeof parsed !== "object" || parsed === null) return FALLBACK_COMPLETION_GRACE_MS;
+      const limits = (parsed as { limits?: unknown }).limits;
+      if (typeof limits !== "object" || limits === null) return FALLBACK_COMPLETION_GRACE_MS;
+      const duration = (limits as { max_duration_ms?: unknown }).max_duration_ms;
+      if (typeof duration !== "number" || !Number.isFinite(duration) || !Number.isInteger(duration) || duration <= 0) {
+        return FALLBACK_COMPLETION_GRACE_MS;
+      }
+      return Math.min(duration * 0.01, MAX_COMPLETION_GRACE_MS);
+    } catch {
+      return FALLBACK_COMPLETION_GRACE_MS;
+    }
   }
 
+  /** Public terminal-settlement wrapper — opens one transaction around the
+   * canonical body. */
   terminalSettlement(input: {
     attemptId: string;
     expectedGeneration: number;
@@ -786,129 +1196,207 @@ export class WorkerSupervisionStore {
     normalizedUsage?: { input: number; output: number; trustworthy: boolean };
     envelope?: WorkerResultEnvelopeV1;
     now?: number;
+    terminalCause?: "input_requested";
   }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
     try {
-      return this.db.transaction(() => {
-        const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
-        if (!attempt) return { kind: "stale" };
-        const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
-        if (!latest || latest.id !== input.attemptId) return { kind: "stale" };
-        if (attempt.generation !== input.expectedGeneration) return { kind: "stale" };
-
-        const terminalLifecycles: AttemptLifecycle[] = ["completed", "failed", "cancelled", "timed_out"];
-        if (terminalLifecycles.includes(attempt.lifecycle)) {
-          if (input.envelope) {
-            const existing = this.db.prepare(`SELECT envelope_digest FROM worker_results WHERE attempt_id = ?`).get(input.attemptId) as { envelope_digest: string } | undefined;
-            if (!existing) return { kind: "stale", lifecycle: attempt.lifecycle };
-            if (existing) {
-              const newDigest = this.computeEnvelopeDigest(JSON.stringify(input.envelope));
-              if (existing.envelope_digest !== newDigest) return { kind: "conflict" };
-            }
-          }
-          return { kind: "replayed", lifecycle: attempt.lifecycle, chargedTokens: attempt.charged_tokens };
-        }
-
-        const allowedFrom: AttemptLifecycle[] = input.desiredState === "timed_out" || input.desiredState === "cancelled"
-          ? ["pending", "claimed", "starting", "running", "cancel_requested"]
-          : ["claimed", "starting", "running", "cancel_requested"];
-        if (!allowedFrom.includes(attempt.lifecycle)) return { kind: "stale" };
-
-        let effectiveState = input.desiredState;
-        const now = input.now ?? Date.now();
-
-        if (input.desiredState === "completed") {
-          if (attempt.hard_deadline_at && now >= new Date(attempt.hard_deadline_at).getTime()) {
-            effectiveState = "timed_out";
-          }
-        }
-
-        const usage = input.normalizedUsage
-          && Number.isFinite(input.normalizedUsage.input) && input.normalizedUsage.input >= 0
-          && Number.isFinite(input.normalizedUsage.output) && input.normalizedUsage.output >= 0
-          ? input.normalizedUsage
-          : undefined;
-        let chargeTokens = 0;
-        let budgetViolation = false;
-
-        if (attempt.reserved_tokens > 0) {
-          if (usage && usage.trustworthy) {
-            chargeTokens = usage.input + usage.output;
-            if (chargeTokens > attempt.reserved_tokens) {
-              chargeTokens = usage.input + usage.output;
-              budgetViolation = true;
-            }
-          } else {
-            chargeTokens = attempt.reserved_tokens;
-          }
-        } else if (usage && usage.trustworthy) {
-          chargeTokens = usage.input + usage.output;
-        }
-
-        if (budgetViolation && effectiveState === "completed") {
-          effectiveState = "failed";
-        }
-
-        const settledAt = new Date(now).toISOString();
-
-        if (attempt.usage_charged_at == null) {
-          this.db.prepare(`
-            UPDATE worker_attempts
-            SET input_tokens = ?, output_tokens = ?, charged_tokens = ?, usage_charged_at = ?
-            WHERE id = ? AND usage_charged_at IS NULL
-          `).run(usage?.input ?? null, usage?.output ?? null, chargeTokens, settledAt, input.attemptId);
-
-          const card = this.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(attempt.card_id) as { parent_id: number | null } | undefined;
-          this.db.prepare(`
-            UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
-            WHERE id = ?
-          `).run(chargeTokens, attempt.card_id);
-          if (card?.parent_id) {
-            this.db.prepare(`
-              UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
-              WHERE id = ? AND type = 'O'
-            `).run(chargeTokens, card.parent_id);
-          }
-        }
-
-        const durableStatus = effectiveState === "completed" ? "settled" : effectiveState;
-        this.db.prepare(`
-          UPDATE worker_attempts
-          SET lifecycle = ?, status = ?, settled_at = ?, cancel_reason = ?
-          WHERE id = ? AND lifecycle = ?
-        `).run(effectiveState, durableStatus, settledAt,
-              budgetViolation ? `token_budget_exceeded: ${input.stableReason}`
-                : effectiveState !== input.desiredState ? `late_completion_timed_out: ${input.stableReason}` : input.stableReason,
-              input.attemptId, attempt.lifecycle);
-
-        const leaseStore = new ExecutorLeaseStore(this.db);
-        leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
-
-        if (effectiveState === "completed" && input.envelope) {
-          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
-          if (!existingResult) {
-            this.insertResult(input.attemptId, input.envelope);
-          }
-        } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
-          // #1588: record evidence of absence — a non-completed terminal
-          // settlement must not leave worker_results empty, or the reviewer
-          // cannot tell "no evidence" from "evidence says failed". Criteria
-          // are derived as not_run, never passed.
-          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
-          if (!existingResult) {
-            this.insertResult(input.attemptId, this.buildAbsenceEnvelope(attempt, effectiveState, now));
-          }
-        }
-
-        logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
-
-        const violationResult = budgetViolation
-          ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }
-          : { kind: "settled" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id };
-        return violationResult;
-      });
+      return this.db.transaction(() => this.settleAttemptInTransaction(input));
     } catch {
       return { kind: "conflict" };
     }
+  }
+
+  /** #1638 — The canonical single terminal-settlement body. Runs INSIDE an
+   * already-open transaction (the public wrapper or the supervised Pi
+   * settlement coordinator). Owns every attempt terminal transition, charge,
+   * result persistence, lease close, and card token rollup. When the caller
+   * supplies a valid envelope on a non-completed outcome, it is persisted;
+   * the evidence-of-absence envelope remains the fallback. */
+  settleAttemptInTransaction(input: {
+    attemptId: string;
+    expectedGeneration: number;
+    desiredState: "completed" | "failed" | "cancelled" | "timed_out";
+    stableReason: string;
+    normalizedUsage?: { input: number; output: number; trustworthy: boolean };
+    envelope?: WorkerResultEnvelopeV1;
+    now?: number;
+    /** #1638: semantic terminal cause. `input_requested` always charges zero
+     * tokens and releases the reservation — never a caller-selected billing
+     * policy. */
+    terminalCause?: "input_requested";
+  }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
+    const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
+    if (!attempt) return { kind: "stale" };
+    const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
+    if (!latest || latest.id !== input.attemptId) return { kind: "stale" };
+    if (attempt.generation !== input.expectedGeneration) return { kind: "stale" };
+
+    const terminalLifecycles: AttemptLifecycle[] = ["completed", "failed", "cancelled", "timed_out"];
+    if (terminalLifecycles.includes(attempt.lifecycle)) {
+      if (input.envelope) {
+        const existing = this.db.prepare(`SELECT envelope_digest FROM worker_results WHERE attempt_id = ?`).get(input.attemptId) as { envelope_digest: string } | undefined;
+        if (!existing) return { kind: "stale", lifecycle: attempt.lifecycle };
+        if (existing) {
+          const newDigest = this.computeEnvelopeDigest(JSON.stringify(input.envelope));
+          if (existing.envelope_digest !== newDigest) return { kind: "conflict" };
+        }
+      }
+      return { kind: "replayed", lifecycle: attempt.lifecycle, chargedTokens: attempt.charged_tokens };
+    }
+
+    // #1644: a supervised project attempt is ACCEPTED only while its root
+    // project is live at its immutable generation/run. A late completed result
+    // for a terminal root is rejected before usage charging, result insertion,
+    // lease closure, or any card mutation. Replays of an already-terminal
+    // attempt are inert and intentionally bypass this fence (idempotent,
+    // cannot alter state). Cleanup settlements (failed/cancelled/timed_out)
+    // are not fenced: they cannot accept a result or resurrect the root, and
+    // the abort path must be able to cancel live children after the root
+    // freezes terminal (R3).
+    if (input.desiredState === "completed") {
+      if (this.authorizeAttemptForProjectWork(attempt, "attempt_settlement") !== null) {
+        return { kind: "stale", lifecycle: attempt.lifecycle };
+      }
+    }
+
+    const allowedFrom: AttemptLifecycle[] = input.desiredState === "timed_out" || input.desiredState === "cancelled"
+      ? ["pending", "claimed", "starting", "running", "cancel_requested"]
+      : ["claimed", "starting", "running", "cancel_requested"];
+    if (!allowedFrom.includes(attempt.lifecycle)) return { kind: "stale" };
+
+    let effectiveState = input.desiredState;
+    const now = input.now ?? Date.now();
+
+    if (input.desiredState === "completed" && attempt.hard_deadline_at) {
+      // #1720: a completion that reaches settlement just past its hard
+      // deadline is real, evidenced work; discard it only beyond a bounded
+      // grace window. Without an envelope there is no grace at any lateness.
+      const latenessMs = now - new Date(attempt.hard_deadline_at).getTime();
+      const withinGrace = input.envelope !== undefined && latenessMs <= this.completionGraceMs(attempt);
+      if (latenessMs >= 0 && !withinGrace) {
+        effectiveState = "timed_out";
+      }
+    }
+
+    const usage = input.normalizedUsage
+      && Number.isFinite(input.normalizedUsage.input) && input.normalizedUsage.input >= 0
+      && Number.isFinite(input.normalizedUsage.output) && input.normalizedUsage.output >= 0
+      ? input.normalizedUsage
+      : undefined;
+    let chargeTokens = 0;
+    let budgetViolation = false;
+
+    // #1638: input_requested is semantic — the worker stopped to ask a live
+    // question; it always charges zero and releases its reservation.
+    if (input.terminalCause === "input_requested") {
+      chargeTokens = 0;
+    } else if (attempt.reserved_tokens > 0) {
+      if (usage && usage.trustworthy) {
+        chargeTokens = usage.input + usage.output;
+        if (chargeTokens > attempt.reserved_tokens) {
+          chargeTokens = usage.input + usage.output;
+          budgetViolation = true;
+        }
+      } else {
+        chargeTokens = attempt.reserved_tokens;
+      }
+    } else if (usage && usage.trustworthy) {
+      chargeTokens = usage.input + usage.output;
+    }
+
+    if (budgetViolation && effectiveState === "completed") {
+      effectiveState = "failed";
+    }
+
+    const settledAt = new Date(now).toISOString();
+
+    if (attempt.usage_charged_at == null) {
+      this.db.prepare(`
+        UPDATE worker_attempts
+        SET input_tokens = ?, output_tokens = ?, charged_tokens = ?, usage_charged_at = ?
+        WHERE id = ? AND usage_charged_at IS NULL
+      `).run(usage?.input ?? null, usage?.output ?? null, chargeTokens, settledAt, input.attemptId);
+
+      const card = this.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(attempt.card_id) as { parent_id: number | null } | undefined;
+      this.db.prepare(`
+        UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(chargeTokens, attempt.card_id);
+      if (card?.parent_id) {
+        this.db.prepare(`
+          UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+          WHERE id = ? AND type = 'O'
+        `).run(chargeTokens, card.parent_id);
+      }
+    }
+
+    const durableStatus = effectiveState === "completed" ? "settled" : effectiveState;
+    this.db.prepare(`
+      UPDATE worker_attempts
+      SET lifecycle = ?, status = ?, settled_at = ?, cancel_reason = ?
+      WHERE id = ? AND lifecycle = ?
+    `).run(effectiveState, durableStatus, settledAt,
+          budgetViolation ? `token_budget_exceeded: ${input.stableReason}`
+            : effectiveState !== input.desiredState ? `late_completion_timed_out: ${input.stableReason}` : input.stableReason,
+          input.attemptId, attempt.lifecycle);
+
+    const leaseStore = new ExecutorLeaseStore(this.db);
+    leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
+
+    // A terminal attempt can no longer hold retry budget. In particular,
+    // input_requested must release the reservation without consuming it;
+    // ordinary terminal outcomes consume the reservation exactly once.
+    this.db.prepare(`
+      UPDATE retry_budget_reservations
+      SET status = ?, updated_at = datetime('now')
+      WHERE target_attempt_id = ? AND status IN ('active', 'claimed')
+    `).run(input.terminalCause === "input_requested" ? "released" : "consumed", input.attemptId);
+
+    if (effectiveState === "completed" && input.envelope) {
+      const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+      if (!existingResult) {
+        this.insertResult(input.attemptId, input.envelope);
+      }
+    } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
+      // #1588/#1638: persist genuine failure evidence when the caller
+      // supplied a valid envelope (e.g. a Pi input request); the absence
+      // envelope remains the fallback so results are never empty. The
+      // reviewer can distinguish "no evidence" from "evidence says failed".
+      const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+      if (!existingResult) {
+        this.insertResult(input.attemptId, input.envelope ?? this.buildAbsenceEnvelope(attempt, effectiveState, now));
+      }
+    }
+
+    logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
+
+    // #1792 Task 5: supervised successor obligation shares THIS transaction
+    // (joint commit). Resolves the workflow run/node by stable identity;
+    // unsupervised and legacy-supervised attempts return silently with zero
+    // behavior change. The hook never throws: containment + logging protect
+    // the settlement result (recovery via recoverUnconsumedCompletions).
+    if (attempt.root_project_card_id != null) {
+      const rootCard = attempt.root_project_card_id;
+      try {
+        this.db.transaction(() => {
+          commitSupervisedOutcome(this.db, {
+            attemptId: input.attemptId,
+            cardId: attempt.card_id,
+            rootCardId: rootCard,
+            lifecycle: effectiveState,
+            generation: attempt.generation || 1,
+            stableReason: input.stableReason,
+            envelopeJson: null,
+          });
+        });
+      } catch (err) {
+        logSwarmTrace({ event: "workflow_successor_contained", card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: err instanceof Error ? err.message.slice(0, 200) : "unknown" });
+      }
+    }
+
+    const violationResult = budgetViolation
+      ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }
+      : { kind: "settled" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id };
+    return violationResult;
   }
 
   getActiveSupervisedAttempts(): AttemptRow[] {

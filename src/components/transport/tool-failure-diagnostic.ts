@@ -18,7 +18,91 @@ export type ToolFailureReason =
   | "candidate_round_limit"
   | "prompt_round_limit"
   | "candidate_exhausted"
+  // #1659: structured memory mutation failures (never collapsed to `unknown`).
+  | "memory_validation"
+  | "memory_not_found"
+  | "memory_conflict"
+  | "memory_unauthorized"
+  | "memory_idempotency_conflict"
+  | "memory_unavailable"
+  | "memory_outcome_unknown"
+  // #1677: typed Orc review-turn rejections (tool envelopes carry `reason`).
+  | "context_missing"
+  | "invalid_arguments"
+  | "project_mismatch"
+  | "supervision_missing"
+  | "project_terminal"
+  | "project_not_reviewable"
+  | "project_generation_mismatch"
+  | "review_case_unknown"
+  | "review_case_project_mismatch"
+  | "review_case_generation_mismatch"
+  | "review_case_not_open"
+  | "review_case_unreadable"
+  | "case_too_large"
+  | "review_ownership_stale"
+  | "settlement_lost"
+  | "peer_terminal_identity_missing"
+  | "peer_terminal_identity_mismatch"
+  | "internal_error"
+  | "peer_relay_blocked"
+  | "peer_sandbox"
   | "unknown";
+
+/**
+ * #1752 R8: which recorded tool diagnostics may promote an empty final
+ * assistant response into a thrown terminal turn failure. A plain
+ * `nonzero_exit` (and likewise `policy_rejected` / `shell_syntax_error`,
+ * both returned to the model as content) was already surfaced — the model
+ * saw it and chose to stop — so it must not terminate the turn.
+ */
+export const TERMINAL_TOOL_REASONS: ReadonlySet<ToolFailureReason> = new Set([
+  "repeated_failure",
+  "spawn_error",
+  "timeout",
+  "aborted",
+]);
+
+/**
+ * #1767: empty-turn-after-tool-failure policy. A terminal tool class always
+ * throws. Any other recorded failure throws except under the sleep origin:
+ * the sleep pump treats an empty turn after a surfaced tool error as a
+ * completed step (#1752 R8), but scheduled unattended-task runs,
+ * interactive chat, unverified provenance, and direct transport callers
+ * (absent mode) fail closed — an Orc that stops after its artifact write
+ * failed, without writing the artifact and without any error surfacing, is
+ * a failure (Molty 2026-09-04 finance-daily / daily-ai).
+ */
+export function shouldThrowAfterToolFailure(
+  reason: ToolFailureReason,
+  authorizationMode: import("../action-gate.js").ToolAuthorizationMode | undefined,
+): boolean {
+  if ((TERMINAL_TOOL_REASONS as ReadonlySet<string>).has(reason)) return true;
+  return authorizationMode !== "unattended-sleep";
+}
+
+const MEMORY_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  "memory_validation", "memory_not_found", "memory_conflict",
+  "memory_unauthorized", "memory_idempotency_conflict",
+  "memory_unavailable", "memory_outcome_unknown",
+]);
+
+// #1677: the closed set of typed codes a tool result can carry today. Only
+// these map to a typed reason; an unrecognized `reason` falls through to
+// `unknown` exactly as before. The sealed-secret tools' inverted envelopes
+// (`{ error: "<code>", reason: "<prose>" }`) can never match — their prose
+// is not a member — so they keep today's `unknown` classification.
+const ORC_TOOL_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  "context_missing", "invalid_arguments", "project_mismatch",
+  "supervision_missing", "project_terminal", "project_not_reviewable",
+  "project_generation_mismatch", "review_case_unknown",
+  "review_case_project_mismatch", "review_case_generation_mismatch",
+  "review_case_not_open", "review_case_unreadable", "case_too_large",
+  "review_ownership_stale",
+  "settlement_lost", "peer_terminal_identity_missing", "peer_terminal_identity_mismatch",
+  "internal_error",
+  "peer_relay_blocked", "peer_sandbox",
+]);
 
 export interface ToolFailureDiagnosticV1 {
   version: 1;
@@ -32,12 +116,21 @@ export interface ToolFailureDiagnosticV1 {
   signal?: string;
   timed_out: boolean;
   aborted: boolean;
+  cleanup_incomplete?: boolean;
   stderr_excerpt?: string;
   stdout_excerpt?: string;
   safety_incident?: BehaviorIncidentType;
   candidate_exhausted?: boolean;
   /** #1595: structured bash syntax error — never auto-corrected, model must re-submit. */
   syntax_hint?: string;
+  /** #1659: bounded structural memory failure metadata, redacted. */
+  memory_failure?: {
+    code: string;
+    request_id: string;
+    retryable: boolean;
+    action: string;
+    stage: string;
+  };
   /** #1595: a prior tool failure retained only as supporting context when a terminal cause leads. */
   last_tool_failure?: {
     tool: string;
@@ -56,6 +149,7 @@ export interface BashResultV1 {
   signal?: string;
   timed_out: boolean;
   aborted: boolean;
+  cleanup_incomplete?: boolean;
   command_fingerprint: string;
   command_preview: string;
 }
@@ -147,6 +241,7 @@ export function parseBashResultToDiagnostic(
       signal,
       timed_out: timedOut,
       aborted,
+      ...(parsed.cleanup_incomplete === true ? { cleanup_incomplete: true } : {}),
       stderr_excerpt: stderr,
       stdout_excerpt: stdout,
       ...(syntaxHint ? { syntax_hint: syntaxHint } : {}),
@@ -166,6 +261,44 @@ export function parseToolResultToDiagnostic(
     const hasBashFields = "exit_code" in parsed || "timed_out" in parsed || "command_fingerprint" in parsed;
     if (hasBashFields) {
       return parseBashResultToDiagnostic(result, executionId, tool);
+    }
+    // #1659: a structured memory failure maps by its bridge code — never
+    // fall back to `unknown` when a known code exists.
+    const code = typeof parsed.code === "string" ? parsed.code : "";
+    if (MEMORY_FAILURE_REASONS.has(code)) {
+      const memoryFailure: ToolFailureDiagnosticV1["memory_failure"] = {
+        code,
+        request_id: typeof parsed.requestId === "string" ? capAndRedact(parsed.requestId, 64) : "",
+        retryable: parsed.retryable === true,
+        action: typeof parsed.action === "string" ? capAndRedact(parsed.action, 32) : "",
+        stage: typeof parsed.stage === "string" ? capAndRedact(parsed.stage, 32) : "",
+      };
+      return {
+        version: 1,
+        execution_id: executionId,
+        tool,
+        reason: code as ToolFailureReason,
+        timed_out: false,
+        aborted: false,
+        stderr_excerpt: typeof parsed.message === "string" ? capAndRedact(parsed.message, STDERR_CAP) : undefined,
+        memory_failure: memoryFailure,
+      };
+    }
+    // #1677: a typed Orc review-turn rejection maps by its `reason` field —
+    // never fall back to `unknown` when a known code exists. Placed after bash
+    // (bash results with a `reason` keep the bash branch) and after memory,
+    // before the generic `error` fallback.
+    const reason = typeof parsed.reason === "string" ? parsed.reason : "";
+    if (ORC_TOOL_FAILURE_REASONS.has(reason)) {
+      return {
+        version: 1,
+        execution_id: executionId,
+        tool,
+        reason: reason as ToolFailureReason,
+        timed_out: false,
+        aborted: false,
+        stderr_excerpt: typeof parsed.error === "string" ? capAndRedact(parsed.error, STDERR_CAP) : undefined,
+      };
     }
     if (parsed.error != null) {
       return {
@@ -227,11 +360,9 @@ export function buildSafetyDiagnostic(
   executionId: string,
   incident: { type: BehaviorIncidentType; toolName?: string },
 ): ToolFailureDiagnosticV1 {
-  const reason = incident.type === "candidate_round_limit"
-    ? "candidate_round_limit"
-    : incident.type === "prompt_round_limit"
-      ? "prompt_round_limit"
-      : "unknown";
+  const reason = incident.type === "prompt_round_limit"
+    ? "prompt_round_limit"
+    : "unknown";
   return {
     version: 1,
     execution_id: executionId,
@@ -240,7 +371,7 @@ export function buildSafetyDiagnostic(
     timed_out: false,
     aborted: false,
     safety_incident: incident.type,
-    candidate_exhausted: incident.type === "candidate_round_limit",
+    candidate_exhausted: false,
   };
 }
 
@@ -258,9 +389,7 @@ export function summarizeToolFailure(d: ToolFailureDiagnosticV1): NonNullable<To
 /**
  * #1595: assemble the final diagnostic when a run ended empty after a safety
  * termination. The terminal cause ALWAYS leads; a prior tool failure is
- * supporting context only (`last_tool_failure`), and candidate_exhausted is
- * never reported unless the terminal incident actually is candidate_round_limit
- * (a run that continued past rotation must not claim exhaustion).
+ * supporting context only (`last_tool_failure`).
  */
 export function buildTerminalDiagnostic(
   executionId: string,
@@ -297,6 +426,10 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
     parts.push("reason: candidate round limit");
   } else if (d.reason === "prompt_round_limit") {
     parts.push("reason: prompt round limit");
+  } else if (MEMORY_FAILURE_REASONS.has(d.reason)) {
+    parts.push(`reason: ${d.reason}`);
+  } else if (ORC_TOOL_FAILURE_REASONS.has(d.reason)) {
+    parts.push(`reason: ${d.reason}`);
   } else if (d.reason === "unknown") {
     parts.push("reason: unknown error");
   }
@@ -304,6 +437,11 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
   if (d.syntax_hint) parts.push(`syntax: ${d.syntax_hint}`);
   if (d.exit_code != null && d.exit_code !== 0) parts.push(`exit:${d.exit_code}`);
   if (d.signal) parts.push(`signal:${d.signal}`);
+
+  if (d.memory_failure) {
+    const mf = d.memory_failure;
+    parts.push(`memory: code=${mf.code} requestId=${mf.request_id} retryable=${mf.retryable} action=${mf.action} stage=${mf.stage}`);
+  }
 
   if (d.stderr_excerpt) parts.push(`stderr: ${d.stderr_excerpt}`);
   if (d.stdout_excerpt) parts.push(`stdout: ${d.stdout_excerpt}`);

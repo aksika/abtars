@@ -1,15 +1,86 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { SupervisedPiRpcClient, PiRpcError, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+import { PiRpcError, SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
-import { resolveAndValidateWorkspace, buildTrustArgs, buildChildEnv, validateSessionFile } from "./config.js";
-import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim } from "./types.js";
+import { resolveWorkerOrcExtensionPath, WORKER_ORC_EXTENSION_PROTOCOL } from "./worker-orc-extension.js";
+import type { SupervisedPiCommunicationPort } from "./supervised-pi-communication.js";
+import { validatePersistedSession, type SessionProof } from "./config.js";
+import { mintPiConversationId, type PiConversationRole } from "../pi-session/pi-conversation-identity.js";
+import { PiRuntimeHost } from "./pi-runtime-host.js";
+import type { PiRunOrigin, PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
+import { boundedError, DIALOG_METHODS } from "./turn-utils.js";
 
 const TAG = "pi-executor";
+
+/** #1647 — generation-fenced end of the external Spin C session. The spin
+ * layer validates the immutable (runId, generation) metadata itself. */
+export type EndExternalSession = (
+  sessionId: string,
+  expected: { runId: string; generation: number },
+) => boolean;
+
+/** Bounded live-state probe before graceful interruption. */
+const INTERRUPT_PROBE_MS = 2_000;
+
+/**
+ * #1932 — origin-to-role for owned RPC launch identity. The role only
+ * selects the partitioned session directory; memory behavior stays on the
+ * existing memoryMode/env path. Unknown origins return null and keep the
+ * legacy flat launch — never a fabricated role binding (R3).
+ */
+function piRunOriginRole(origin: PiRunOrigin): PiConversationRole | null {
+  switch (origin) {
+    case "supervised":
+    case "agent":
+      return "worker";
+    case "user":
+      return "task";
+    case "peer":
+      return "peer";
+    default:
+      return null;
+  }
+}
+
+/**
+ * #1804 — supervised Pi readiness budget. Pi's availability list is a
+ * snapshot: an empty list or a list with no entry for the selected provider
+ * is indeterminate (a refresh may have timed out or re-registration may
+ * still be in flight), never proof of missing credentials. Re-read within
+ * this bounded budget; indeterminate evidence after the budget is a probe
+ * failure, never an unavailable-model verdict. Both block submission and
+ * stay distinguishable for operators.
+ */
+const READINESS_MAX_READS = 3;
+const READINESS_RETRY_DELAY_MS = 250;
+
+/** #1804 — readiness outcome for a supervised attempt (pre-submission only). */
+type PiReadinessResult =
+  | { ready: true }
+  | { ready: false; kind: "unavailable" | "probe_failed"; reason: string };
+
+/** #1804 — definitive unready state: the selected model is not available. */
+function readinessUnavailable(detail: string): PiReadinessResult {
+  return {
+    ready: false,
+    kind: "unavailable",
+    reason: `Pi model unavailable: ${detail} (no task submitted)`.slice(0, 500),
+  };
+}
+
+/** #1804 — indeterminate evidence deadline: the probe could not conclude. */
+function readinessProbeFailed(detail: string): PiReadinessResult {
+  return {
+    ready: false,
+    kind: "probe_failed",
+    reason: `Pi readiness probe failed: ${detail} (no task submitted)`.slice(0, 500),
+  };
+}
 
 interface OwnedProcess {
   client: SupervisedPiRpcClient;
@@ -26,30 +97,101 @@ interface OwnedProcess {
   unsubUi: (() => void) | null;
 }
 
+export interface PiTerminalObservation {
+  runId: string;
+  generation: number;
+  outcome: PiTerminalOutcome;
+  /** Optional narrow status fence for pre-live failures. */
+  expectedStatuses?: PiRunStatus[];
+  metadata: { resultSummary?: string; changedFilesSummary?: string; usageJson?: string; error?: string; piSessionId?: string };
+  envelope?: import("../worker-contract.js").WorkerResultEnvelopeV1;
+  canonicalPath?: string;
+}
+
 export class PiExecutor {
-  private readonly config: PiExecutorConfig;
+  private readonly config_: PiExecutorConfig;
   private readonly store: PiRunStore;
+  /** #1635 — shared Pi runtime host: the single process cap and spawn path
+   * across `/pi run`, supervised workers, interactive turns, and native
+   * handoffs. */
+  readonly host: PiRuntimeHost;
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
+  /** #1638 — optional supervised/standalone settlement router (wired at boot
+   * when the coordinator exists). When set, every terminal observation goes
+   * through it so supervised runs settle through the Worker attempt. */
+  private _settlementRouter: ((input: PiTerminalObservation) => unknown) | null = null;
+  /** #1638 — supervised input suspension hook. When set, an input request on
+   * a SUPERVISED run suspends the run (interrupted) and settles the Worker
+   * attempt as input_requested instead of leaving the process in
+   * awaiting_input. Standalone runs keep the existing awaiting_input path. */
+  private _inputSuspendHook: ((runId: string, generation: number, request: RpcExtensionUIRequest) => Promise<boolean>) | null = null;
+  /** #1647 — generation-fenced closer for the external Spin C session. Wired
+   * at boot from ctx.sessionManager.endExternalSession. */
+  private _endExternalSession: EndExternalSession | null = null;
+  /** #1643 — typed supervised Worker/Orc communication port. When wired, raw
+   * tool_execution_start frames are routed before generic projection strips
+   * tool-call identity and arguments. */
+  private _communicationPort: SupervisedPiCommunicationPort | null = null;
+  /** #1647 — typed interruption router (wired at boot with the supervised
+   * coordinator). Routes standalone vs supervised interruption; the fallback
+   * uses the standalone store operation. */
+  private _interruptRouter: ((input: { runId: string; generation: number; continuity: SessionProof }) => { interrupted: boolean }) | null = null;
   /** #1358 — Lifecycle transition subscribers (multi). */
   private _transitionSubs = new Set<(runId: string, fromStatus: string | undefined, toStatus: string) => void>();
   /** Progress event subscribers (multi). */
   private _progressSubs = new Set<(runId: string, payload: string, progressType?: string) => void>();
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
-    this.config = config;
+    this.config_ = config;
     this.store = store;
+    this.host = new PiRuntimeHost(config);
+    // #1635 — every slot release (executor-owned or interactive/native)
+    // fans out to the shared post-release wake wired at boot.
+    this.host.setOnSlotReleased(() => { this._onCapacityReleased?.(); });
   }
 
-  get activeCount(): number { return this.live.size; }
-  get maxConcurrent(): number { return this.config.maxConcurrent; }
+  get activeCount(): number { return this.host.reservedCount; }
+  get maxConcurrent(): number { return this.config_.maxConcurrent; }
   get isStopped(): boolean { return this._stopped; }
   get piStore(): PiRunStore { return this.store; }
+  get config(): PiExecutorConfig { return this.config_; }
+
+  /** #1638 — route every terminal observation through the coordinator. */
+  setSettlementRouter(router: (input: PiTerminalObservation) => unknown): void {
+    this._settlementRouter = router;
+  }
+
+  /** #1638 — wire supervised input suspension (see coordinator). */
+  setInputSuspendHook(hook: (runId: string, generation: number, request: RpcExtensionUIRequest) => Promise<boolean>): void {
+    this._inputSuspendHook = hook;
+  }
+
+  /** #1647 — wire the generation-fenced external Spin C session closer. */
+  setExternalSessionCloser(closer: EndExternalSession): void {
+    this._endExternalSession = closer;
+  }
+
+  /** #1647 — wire the typed interruption router (standalone vs supervised). */
+  setInterruptRouter(router: (input: { runId: string; generation: number; continuity: SessionProof }) => { interrupted: boolean }): void {
+    this._interruptRouter = router;
+  }
+
+  /** #1643 — wire the typed supervised Worker/Orc communication port. */
+  setCommunicationPort(port: SupervisedPiCommunicationPort): void {
+    this._communicationPort = port;
+  }
 
   /** Register a callback fired when a Pi slot is released. */
   onCapacityReleased(cb: () => void): void {
     this._onCapacityReleased = cb;
+  }
+
+  /** Notify dispatchers when a pre-live startup path releases no owned
+   * process but still leaves a queued waiter eligible to run. */
+  notifyCapacityReleased(): void {
+    this._onCapacityReleased?.();
   }
 
   /** #1358 — Subscribe to run state transitions. Returns unsubscribe function. */
@@ -77,11 +219,27 @@ export class PiExecutor {
    * before spawning so early exit/error cannot escape observation.
    */
   async startWithClaim(runId: string, generation: number, sessionId: string): Promise<"started" | "error"> {
-    if (this._stopped) return "error";
-
     const run = this.store.get(runId);
-    if (!run || run.executionGeneration !== generation) return "error";
-    if (run.status !== "starting") return "error";
+    if (!run || run.executionGeneration !== generation || run.status !== "starting") {
+      // Reconciler can lose the race with shutdown or a newer generation
+      // after claiming a C session. Release only this exact generation.
+      this.store.releaseWorkspaceClaimForGeneration({ runId, generation });
+      try { this._endExternalSession?.(sessionId, { runId, generation }); } catch { /* best effort */ }
+      return "error";
+    }
+    if (this._stopped) {
+      await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error: "Pi executor is stopping" });
+      try { this._endExternalSession?.(sessionId, { runId, generation }); } catch { /* best effort */ }
+      return "error";
+    }
+
+    // #1635 — synchronously reserve the shared process slot before spawn.
+    // Capacity contention settles this generation; the reconciler's advisory
+    // gate already checked the same cap, this is the authoritative fence.
+    if (!this.host.tryReserveSlot()) {
+      await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error: "Pi capacity exhausted" });
+      return "error";
+    }
 
     this._fireTransition(runId, "queued", "starting");
 
@@ -106,6 +264,15 @@ export class PiExecutor {
       const owned = await this._startProcess(run, sessionId);
       if (!owned) {
         this.live.delete(runId);
+        // #1635 — the pre-live failure path releases the reserved slot. The
+        // ws/launch-error branch already settled this generation inside
+        // `_startProcess`; the CAS-fail branch settles nothing, so the
+        // release here covers both (releaseSlot is guarded).
+        this.host.releaseSlot();
+        this.store.releaseWorkspaceClaimForGeneration({ runId, generation });
+        // #1647 — a launch failure still ends the generation's external C
+        // session (generation-fenced by the spin layer).
+        this._endExternalSession?.(sessionId, { runId, generation });
         return "error";
       }
       this.live.set(runId, owned);
@@ -117,64 +284,138 @@ export class PiExecutor {
         await this._settleAndCleanup(owned, "failed", { error: "Pi process did not report initial state" });
         return "error";
       }
-      const initialOk = await this._settleInitial(runId, state.sessionId, state.sessionFile);
-      if (!initialOk) {
-        await this._settleAndCleanup(owned, "failed", { error: "Failed to transition run to running" });
-        return "error";
-      }
 
-      const isResume = generation > 1 && run.piSessionFile;
-      if (isResume) {
-        const resumeOk = await this._resumeContinuation(owned, run);
-        if (!resumeOk) {
+      // #1647 — branch on the persisted generation intent, never on the
+      // generation number or nullable session fields.
+      const intent = run.generationIntent ?? "initial";
+      if (intent === "resume") {
+        const resumeOk = await this._startResumed(owned, run);
+        if (!resumeOk) return "error";
+      } else if (intent === "initial") {
+        const initialOk = await this._startInitial(owned, run, state);
+        if (!initialOk) {
+          await this._settleAndCleanup(owned, "failed", { error: "Failed to transition run to running" });
           return "error";
         }
-      } else {
-        const promptOk = await this._submitPrompt(runId, run.operationalGoal);
+        // #1804 — initial readiness gate after the effective model/session
+        // selection and the starting -> running commit, before the first
+        // prompt. Cancellation/replacement during the probe wins: a late
+        // result never submits after it.
+        const readiness = await this._checkSupervisedReadiness(owned, run);
+        if (!this._stillOwnsForSubmission(owned)) return "error";
+        if (!readiness.ready) {
+          await this._settleAndCleanup(owned, "failed", { error: readiness.reason });
+          return "error";
+        }
+        const promptOk = await this._submitPrompt(runId, run.operationalGoal, generation);
         if (!promptOk) {
           await this._settleAndCleanup(owned, "failed", { error: "Initial prompt submission failed" });
           return "error";
         }
+      } else {
+        // Exhaustive — an unknown intent fails the generation closed.
+        await this._settleAndCleanup(owned, "failed", { error: `Unknown generation intent ${String(intent)}` });
+        return "error";
       }
 
       return "started";
     } catch (err) {
-      this.live.delete(runId);
-      await this.store.casTransition(runId, ["starting"], "failed", {
-        error: `Launch exception: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      nerve.fire("card:failed", run.cardId);
-      this._fireTransition(runId, "starting", "failed");
+      const error = `Launch exception: ${err instanceof Error ? err.message : String(err)}`;
+      const owned = this.live.get(runId);
+      if (owned) {
+        await this._settleAndCleanup(owned, "failed", { error });
+      } else {
+        // #1635 — no owned process: release the reserved slot alongside the
+        // generation settlement.
+        this.host.releaseSlot();
+        // Keep even pre-live exceptions on the single terminal router; a
+        // direct PiRunStore transition would strand the Worker attempt.
+        await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error });
+      }
       return "error";
     }
   }
 
-  private async _resumeContinuation(owned: OwnedProcess, run: PiRunRecord): Promise<boolean> {
-    if (!run.piSessionFile) {
-      await this._settleAndCleanup(owned, "failed", { error: "No saved session file for resume" });
-      return false;
-    }
-    const validated = validateSessionFile(this.config.sessionStorageRoot, run.piSessionFile);
-    if (validated.error) {
-      await this._settleAndCleanup(owned, "failed", { error: `Session file validation failed: ${validated.error}` });
+  /**
+   * #1647 — Verified resume start. The fresh process identity stays memory-only
+   * until the saved target is validated, switched, and verified:
+   *
+   *   validate saved target -> switch_session(saved file) -> get_state
+   *   -> require saved ID and validate returned file/header
+   *   -> CAS starting -> running persisting the VERIFIED SAVED identity
+   *   -> followUp("Continue where we left off")
+   *
+   * The freshly launched empty session is never persisted as the resume
+   * target. Any failure settles this generation once and submits neither the
+   * original goal nor a post-failure continuation.
+   */
+  private async _startResumed(owned: OwnedProcess, run: PiRunRecord): Promise<boolean> {
+    await this._configureModel(owned, run);
+    // Validate the saved target from the claimed run record — path checks and
+    // the bounded header/ID proof, never path existence alone.
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.config_.sessionStorageRoot,
+      expectedSessionId: run.piSessionId,
+      sessionFile: run.piSessionFile,
+    });
+    if (!proof.ok) {
+      await this._settleAndCleanup(owned, "failed", { error: "Resume target failed persisted-session validation" });
       return false;
     }
     try {
-      await owned.client.switchSession(validated.canonicalPath!);
+      await owned.client.switchSession(proof.canonicalFile);
       const state = await owned.client.getState();
       if (state.sessionId !== run.piSessionId) {
         await this._settleAndCleanup(owned, "failed", { error: "Switched session identity mismatch" });
         return false;
       }
-      const newFile = validateSessionFile(this.config.sessionStorageRoot, state.sessionFile ?? "");
-      if (newFile.error) {
-        await this._settleAndCleanup(owned, "failed", { error: `Resumed session file invalid: ${newFile.error}` });
+      const resumedProof = validatePersistedSession({
+        sessionStorageRoot: this.config_.sessionStorageRoot,
+        expectedSessionId: state.sessionId,
+        sessionFile: state.sessionFile,
+      });
+      if (!resumedProof.ok) {
+        await this._settleAndCleanup(owned, "failed", { error: "Resumed session failed persisted-session validation" });
+        return false;
+      }
+      if (resumedProof.canonicalFile !== proof.canonicalFile) {
+        // Pi must report the exact saved identity we admitted. A different
+        // valid session under the same root is not a successful resume.
+        await this._settleAndCleanup(owned, "failed", { error: "Switched session file identity mismatch" });
+        return false;
+      }
+      const transitioned = this.store.casTransition(run.id, "starting", "running", {
+        piSessionId: state.sessionId,
+        piSessionFile: resumedProof.canonicalFile,
+        resumeCapability: "available",
+      }, run.executionGeneration);
+      if (!transitioned) {
+        // Post-switch running CAS lost — close the owned process and the
+        // exact C session, never send followUp.
+        await this._settleAndCleanup(owned, "failed", { error: "Failed to transition resumed run to running" });
+        return false;
+      }
+      this._fireTransition(run.id, "starting", "running");
+      // #1804 — resumed readiness gate: the run is already running (resume
+      // verification above committed starting -> running first, never
+      // reordered). Check the restored effective selection before follow_up;
+      // an unready result settles running through the terminal path.
+      const readiness = await this._checkSupervisedReadiness(owned, run);
+      if (!this._stillOwnsForSubmission(owned)) return false;
+      if (!readiness.ready) {
+        await this._settleAndCleanup(owned, "failed", { error: readiness.reason });
         return false;
       }
       await owned.client.followUp("Continue where we left off");
-      this.store.touchActivity(run.id);
+      this.store.touchActivity(run.id, run.executionGeneration);
       return true;
     } catch (err) {
+      // #1804: cancellation/replacement during the readiness probe or the
+      // follow-up send wins — never settle a newer generation or a
+      // cancelling run as a resume failure.
+      if (this.live.get(run.id) !== owned || owned.settling) return false;
+      const live = this.store.get(run.id);
+      if (!live || live.executionGeneration !== owned.generation || live.status !== "running") return false;
       await this._settleAndCleanup(owned, "failed", {
         error: `Resume failed: ${err instanceof Error ? err.message : String(err)}`,
       });
@@ -182,50 +423,185 @@ export class PiExecutor {
     }
   }
 
-  private async _startProcess(run: PiRunRecord, sessionId: string): Promise<OwnedProcess | null> {
-    const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.config);
-    if (ws.error) {
-      await this._settleAndCleanupGen(run.id, run.executionGeneration, ["starting"], "failed", { error: ws.error });
-      return null;
+  /**
+   * #1647 — Initial start: configure model, persist the fresh identity with a
+   * truthfully derived capability (never optimistic), then CAS to running.
+   * The caller submits the operational goal exactly once after this succeeds.
+   */
+  private async _startInitial(owned: OwnedProcess, run: PiRunRecord, state: { sessionId: string; sessionFile?: string }): Promise<boolean> {
+    await this._configureModel(owned, run);
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.config_.sessionStorageRoot,
+      expectedSessionId: state.sessionId,
+      sessionFile: state.sessionFile,
+    });
+    const capability: ResumeCapability = proof.ok ? "available" : proof.capability;
+    const transitioned = this.store.casTransition(run.id, "starting", "running", {
+      piSessionId: state.sessionId,
+      piSessionFile: proof.ok ? proof.canonicalFile : undefined,
+      resumeCapability: capability,
+    }, run.executionGeneration);
+    if (transitioned) {
+      this._fireTransition(run.id, "starting", "running");
     }
+    return transitioned;
+  }
 
-    const gen = run.executionGeneration;
-    const client = new SupervisedPiRpcClient();
-
-    const args = [
-      ...this.config.fixedArgs,
-      "--mode", "rpc",
-      ...buildTrustArgs(this.config),
-    ];
-
-    const env = buildChildEnv(this.config, run);
-
+  private async _configureModel(owned: OwnedProcess, run: PiRunRecord): Promise<void> {
+    if (!run.modelId || !run.modelProvider) return;
     try {
-      await client.launch(this.config.command, args, ws.canonicalPath, env);
+      const models = await owned.client.getAvailableModels();
+      const match = models.find(m => m.id === run.modelId);
+      if (match) {
+        await owned.client.setModel(run.modelProvider, run.modelId);
+      } else {
+        logWarn(TAG, `Requested model ${run.modelId} not available in Pi catalogue, using default`);
+      }
     } catch (err) {
-      await client.close().catch(() => {});
-      const msg = err instanceof Error ? err.message : String(err);
-      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: `Launch failed: ${msg}` });
-      return null;
+      logWarn(TAG, `Model selection failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * #1804 — supervised Pi readiness: pre-submission check of the effective
+   * selected provider/model in the actual child runtime, after model/session
+   * selection and before `prompt`/`follow_up`. Scoped to supervised runs so
+   * shared runtime use never changes standalone, interactive, or TUI
+   * admission. Matches BOTH provider and model ID against Pi's
+   * credential-derived availability snapshot; never parses credential files,
+   * never forwards bridge credentials, never issues test inference, and
+   * never hard-codes providers. Never cached across attempts — every
+   * supervised start checks afresh. A successful check is advisory about
+   * local availability, never a guarantee that remote inference succeeds.
+   */
+  private async _checkSupervisedReadiness(
+    owned: OwnedProcess,
+    run: PiRunRecord,
+  ): Promise<PiReadinessResult> {
+    // #1804: scoped to supervised runs — shared runtime use (standalone,
+    // interactive, TUI) keeps its existing admission with no extra probe.
+    if (run.origin !== "supervised") return { ready: true };
+    // Only the availability snapshot is retried: empty or provider-incomplete
+    // snapshots are indeterminate (refresh timeout / re-registration), while
+    // an unreadable RPC is a probe failure now. `get_state`/`get_available_models`
+    // carry their own bounded command timeout.
+    let snapshotCause = "available-model snapshot indeterminate";
+    for (let read = 1; read <= READINESS_MAX_READS; read++) {
+      if (read > 1) {
+        await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+      }
+      let state: { model?: { provider: string; id: string } } | null = null;
+      try {
+        state = await owned.client.getState();
+      } catch (err) {
+        return readinessProbeFailed(`Pi state unreadable (${boundedError(err)})`);
+      }
+      const selected = state?.model;
+      if (!selected) {
+        // Definitive (verified against Pi 0.85.1): no selected model is not
+        // indeterminate evidence — it is the unready state itself.
+        return readinessUnavailable("Pi reported no selected model");
+      }
+      let models: Array<{ provider: string; id: string }>;
+      try {
+        models = await owned.client.getAvailableModels();
+      } catch (err) {
+        return readinessProbeFailed(`available-model snapshot unreadable (${boundedError(err)})`);
+      }
+      if (models.length === 0) {
+        snapshotCause = "available-model snapshot empty";
+        continue;
+      }
+      const providerModels = models.filter((m) => m.provider === selected.provider);
+      if (providerModels.length === 0) {
+        snapshotCause = `no snapshot entry for provider ${selected.provider}`;
+        continue;
+      }
+      if (!providerModels.some((m) => m.id === selected.id)) {
+        return readinessUnavailable(`${selected.provider}/${selected.id} not available in Pi runtime`);
+      }
+      return { ready: true };
+    }
+    return readinessProbeFailed(`${snapshotCause} after ${READINESS_MAX_READS} reads`);
+  }
+
+  /**
+   * #1804 — generation-fenced submission guard for the readiness window.
+   * Awaited readiness introduces an additional cancellation window:
+   * revalidate live ownership, generation, settling flag, and running
+   * status before submission. Cancellation/replacement wins over a late
+   * probe result; never touch a newer generation's resources.
+   */
+  private _stillOwnsForSubmission(owned: OwnedProcess): boolean {
+    if (this.live.get(owned.runId) !== owned || owned.settling) return false;
+    const run = this.store.get(owned.runId);
+    if (!run || run.executionGeneration !== owned.generation) return false;
+    return run.status === "running";
+  }
+
+  private async _startProcess(run: PiRunRecord, sessionId: string): Promise<OwnedProcess | null> {
+    const gen = run.executionGeneration;
+
+    // #1643 — supervised-only extension loading. Resolve BEFORE the runtime
+    // host reserves or spawns anything; a missing artifact is a bounded launch
+    // failure settled by the existing start-failure path. Every other Pi
+    // consumer passes no path and keeps its current argument vector.
+    let extensionPaths: readonly string[] = [];
+    if (run.origin === "supervised") {
+      const resolved = resolveWorkerOrcExtensionPath();
+      if (!resolved.ok) {
+        await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: resolved.error });
+        return null;
+      }
+      extensionPaths = [resolved.path];
     }
 
-    if (!this.store.casTransition(run.id, ["starting"], "starting", { observedPid: client.pid })) {
+    // #1635 — spawn through the shared runtime host (canonical workspace
+    // resolution, args/trust/env construction, process launch).
+    // #1932 — first launch mints the abtars-owned conversation ID and
+    // launches into its partitioned directory (R1-R2). Generations with an
+    // existing Pi session keep the legacy flat root: the known file may
+    // predate partitioning and the resume path switches to it explicitly.
+    // The post-launch proof adopts whatever Pi reports, so a Pi that
+    // ignored --session-id behaves exactly as today.
+    const originRole = piRunOriginRole(run.origin);
+    const ownedSession = !run.piSessionId && originRole
+      ? { role: originRole, conversationId: mintPiConversationId() }
+      : undefined;
+    const launched = await this.host.launch({
+      workspaceAlias: run.workspaceAlias,
+      envIdentity: {
+        id: run.id,
+        ownerPrincipalId: run.ownerPrincipalId,
+        executionGeneration: gen,
+      },
+      extensionPaths,
+      ownedSession,
+    });
+    if (!launched.ok) {
+      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: launched.error });
+      return null;
+    }
+    const client = launched.client;
+
+    if (!this.store.casTransition(run.id, ["starting"], "starting", { observedPid: client.pid }, gen)) {
       await client.close();
+      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: "Pi run generation changed before launch" });
       return null;
     }
 
-    const beforeEvidence = captureGitEvidence(ws.canonicalPath);
+    const beforeEvidence = captureGitEvidence(launched.canonicalPath);
     const unsubTermination = client.onTermination((event) => {
       this._onChildTerminated(run.id, gen, event);
     });
-    const unsubEvents = client.subscribe((event) => this._onRpcEvent(run.id, event));
-    const unsubUi = client.onUiRequest((request) => this._onUiRequest(run.id, request));
+    const unsubEvents = client.subscribe((event) => this._onRpcEvent(run.id, gen, event));
+    const unsubUi = client.onUiRequest((request) => this._onUiRequest(run.id, gen, request));
 
     return {
       client,
       generation: gen,
       runId: run.id,
-      workspacePath: ws.canonicalPath,
+      workspacePath: launched.canonicalPath,
       sessionId,
       beforeEvidence,
       abortTimer: null,
@@ -259,39 +635,16 @@ export class PiExecutor {
     });
   }
 
-  private async _settleInitial(runId: string, piSessionId: string, piSessionFile?: string): Promise<boolean> {
-    const run = this.store.get(runId);
-    if (!run || run.status !== "starting") return false;
+  private async _submitPrompt(runId: string, goal: string, expectedGeneration: number): Promise<boolean> {
     const owned = this.live.get(runId);
-    if (!owned) return false;
-
-    if (run.modelId && run.modelProvider) {
-      try {
-        const models = await owned.client.getAvailableModels();
-        const match = models.find(m => m.id === run.modelId);
-        if (match) {
-          await owned.client.setModel(run.modelProvider, run.modelId);
-        } else {
-          logWarn(TAG, `Requested model ${run.modelId} not available in Pi catalogue, using default`);
-        }
-      } catch (err) {
-        logWarn(TAG, `Model selection failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    const transitioned = this.store.casTransition(run.id, "starting", "running", { piSessionId, piSessionFile });
-    if (transitioned) {
-      this._fireTransition(run.id, "starting", "running");
-    }
-    return transitioned;
-  }
-
-  private async _submitPrompt(runId: string, goal: string): Promise<boolean> {
-    const owned = this.live.get(runId);
-    if (!owned) return false;
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return false;
+    // #1804: a late readiness result must not submit after cancellation or
+    // replacement — revalidate the durable generation/status at send time.
+    const live = this.store.get(runId);
+    if (!live || live.executionGeneration !== expectedGeneration || live.status !== "running") return false;
     try {
       await owned.client.prompt(goal);
-      this.store.touchActivity(runId);
+      this.store.touchActivity(runId, expectedGeneration);
       return true;
     } catch (err) {
       logWarn(TAG, `Prompt submission failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -306,7 +659,7 @@ export class PiExecutor {
     if (!owned) return false;
     try {
       await owned.client.steer(text);
-      this.store.touchActivity(runId);
+      this.store.touchActivity(runId, owned.generation);
       return true;
     } catch { return false; }
   }
@@ -332,7 +685,7 @@ export class PiExecutor {
       this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
       this._fireTransition(runId, "awaiting_input", "running");
     }
-    this.store.touchActivity(runId);
+    this.store.touchActivity(runId, generation);
     return { claimed: true, requestType: claim.requestType };
   }
 
@@ -419,7 +772,7 @@ export class PiExecutor {
         new Promise<void>(resolve => setTimeout(resolve, 10_000)),
       ]);
       if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
-      this.store.touchActivity(input.runId);
+      this.store.touchActivity(input.runId, input.expectedGeneration);
       if (!compactionEnded) {
         logDebug(TAG, `Run ${input.runId}: compact response ok, no compaction_end observed (${Date.now() - started}ms)`);
       }
@@ -448,8 +801,8 @@ export class PiExecutor {
   async checkWallClock(runId: string): Promise<boolean> {
     const owned = this.live.get(runId);
     if (!owned) return false;
-    if (Date.now() - owned.wallClockStart > this.config.maxWallClockMs) {
-      logWarn(TAG, `Run ${runId} exceeded max wall clock (${this.config.maxWallClockMs}ms) — aborting`);
+    if (Date.now() - owned.wallClockStart > this.config_.maxWallClockMs) {
+      logWarn(TAG, `Run ${runId} exceeded max wall clock (${this.config_.maxWallClockMs}ms) — aborting`);
       this._cancelProcess(runId, owned, "Cancelled: maximum wall clock exceeded");
       return true;
     }
@@ -458,6 +811,37 @@ export class PiExecutor {
 
   // ── settlement ───────────────────────────────────────────────────────────
 
+  /** #1638 — route a terminal observation through the coordinator when wired;
+   * standalone falls through to the existing PiRunStore.settleTerminal().
+   * Returns { committed, supervised } so the caller skips Pi-lane card events
+   * for supervised runs (the Worker lane owns those). */
+  private settleTerminalObservation(observation: PiTerminalObservation): { committed: boolean; supervised: boolean } {
+    if (this._settlementRouter) {
+      try {
+        const result = this._settlementRouter(observation);
+        if (result && typeof result === "object" && "kind" in result) {
+          const kind = (result as { kind: string }).kind;
+          const supervised = (result as { supervised?: boolean }).supervised === true;
+          return { committed: kind === "settled" || kind === "replayed", supervised };
+        }
+        return { committed: true, supervised: false };
+      } catch (err) {
+        logWarn(TAG, `settlement router failed for ${observation.runId}: ${err instanceof Error ? err.message : String(err)}`);
+        return { committed: false, supervised: false };
+      }
+    }
+    return {
+      committed: this.store.settleTerminal({
+        runId: observation.runId,
+        generation: observation.generation,
+        expectedStatuses: observation.expectedStatuses ?? ["running", "cancelling", "starting", "awaiting_input"],
+        outcome: observation.outcome,
+        metadata: observation.metadata,
+      }).committed,
+      supervised: false,
+    };
+  }
+
   private async _settleAndCleanup(
     owned: OwnedProcess,
     outcome: PiTerminalOutcome,
@@ -465,27 +849,38 @@ export class PiExecutor {
   ): Promise<void> {
     if (owned.settling) return;
     owned.settling = true;
+    try {
+      const { committed, supervised } = this.settleTerminalObservation({
+        runId: owned.runId,
+        generation: owned.generation,
+        outcome,
+        metadata,
+      });
 
-    const settlement = this.store.settleTerminal({
-      runId: owned.runId,
-      generation: owned.generation,
-      expectedStatuses: ["running", "cancelling", "starting", "awaiting_input"],
-      outcome,
-      metadata,
-    });
-
-    if (settlement.committed) {
-      if (settlement.outcome === "completed") {
-        nerve.fire("card:done", settlement.cardId);
+      if (committed) {
+        // #1638: supervised runs settle through the Worker lane — the W card
+        // and its events are owned there; only standalone Pi cards get a
+        // Pi-lane card event here.
+        if (!supervised) {
+          const cardId = this.store.get(owned.runId)?.cardId ?? 0;
+          if (outcome === "completed") {
+            nerve.fire("card:done", cardId);
+          } else {
+            nerve.fire("card:failed", cardId);
+          }
+        }
+        this._fireTransition(owned.runId, undefined, outcome);
       } else {
-        nerve.fire("card:failed", settlement.cardId);
+        logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome})`);
       }
-      this._fireTransition(owned.runId, undefined, settlement.outcome);
-    } else {
-      logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome}): ${settlement.reason}`);
+    } catch (err) {
+      // Durable settlement is best effort here, but process/slot/C-session
+      // cleanup is mandatory even if a router, emitter, or event subscriber
+      // throws.
+      logWarn(TAG, `Terminal cleanup settlement failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      await this._releaseOwned(owned);
     }
-
-    this._releaseOwned(owned);
   }
 
   private async _settleAndCleanupGen(
@@ -493,29 +888,68 @@ export class PiExecutor {
     outcome: PiTerminalOutcome,
     metadata: { error?: string; changedFilesSummary?: string },
   ): Promise<void> {
-    const settlement = this.store.settleTerminal({
-      runId,
-      generation,
-      expectedStatuses,
-      outcome,
-      metadata,
-    });
-    if (settlement.committed) {
-      nerve.fire("card:failed", settlement.cardId);
-      this._fireTransition(runId, undefined, outcome);
+    try {
+      const { committed, supervised } = this.settleTerminalObservation({
+        runId,
+        generation,
+        outcome,
+        expectedStatuses,
+        metadata,
+      });
+      if (committed) {
+        if (!supervised) {
+          nerve.fire("card:failed", this.store.get(runId)?.cardId ?? 0);
+        }
+        this._fireTransition(runId, undefined, outcome);
+      }
+    } catch (err) {
+      logWarn(TAG, `Pre-live cleanup settlement failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // #1647 — no owned process here (pre-live failure): release the exact
+      // workspace claim and end only this generation's external C session.
+      try { this.store.releaseWorkspaceClaimForGeneration({ runId, generation }); } catch (err) {
+        logWarn(TAG, `Workspace claim cleanup failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const run = this.store.get(runId);
+      if (run?.executionGeneration === generation && run.currentSessionId) {
+        try {
+          this._endExternalSession?.(run.currentSessionId, { runId, generation });
+        } catch (err) {
+          logWarn(TAG, `External session cleanup failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
   }
 
-  private _releaseOwned(owned: OwnedProcess): void {
+  /** #1647 — release every exact-generation resource: timers, subscriptions,
+   * the owned Pi process, the external C session, and the live slot. Every
+   * action is generation-fenced and idempotent. */
+  private async _releaseOwned(owned: OwnedProcess): Promise<void> {
     if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
     if (owned.unsubTermination) { owned.unsubTermination(); owned.unsubTermination = null; }
     if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
     if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
-    owned.client.close().catch(() => {});
+    try {
+      this.store.releaseWorkspaceClaimForGeneration({ runId: owned.runId, generation: owned.generation });
+    } catch (err) {
+      logWarn(TAG, `Workspace claim cleanup failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (owned.client) {
+      try { await owned.client.close(); } catch { /* ignore */ }
+    }
+    if (owned.sessionId) {
+      try {
+        this._endExternalSession?.(owned.sessionId, { runId: owned.runId, generation: owned.generation });
+      } catch (err) {
+        logWarn(TAG, `External session cleanup failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     if (this.live.get(owned.runId) === owned) {
       this.live.delete(owned.runId);
     }
-    this._onCapacityReleased?.();
+    // #1635 — release the shared process slot; the host fires the post-release
+    // wake (queued standalone cards + supervised dispatch).
+    this.host.releaseSlot();
   }
 
   // ── cancellation ─────────────────────────────────────────────────────────
@@ -524,15 +958,15 @@ export class PiExecutor {
     if (owned.settling) return;
     if (!this.store.casTransition(runId, ["running", "awaiting_input", "starting"], "cancelling", {
       pendingRequestId: null, pendingRequestType: null,
-    })) return;
+    }, owned.generation)) return;
     this._fireTransition(runId, undefined, "cancelling");
 
-    owned.client.abort().catch(() => {});
+    owned.client.abort().catch(err => logAndSwallow(TAG, "abort process", err));
 
-    const graceMs = this.config.abortGraceMs;
+    const graceMs = this.config_.abortGraceMs;
     owned.abortTimer = setTimeout(async () => {
       if (this.live.get(runId) !== owned) return;
-      await owned.client.close();
+      try { await owned.client.close(); } catch { /* settlement still owns cleanup */ }
       const afterEvidence = captureGitEvidence(owned.workspacePath);
       const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
       await this._settleAndCleanup(owned, "cancelled", {
@@ -543,13 +977,39 @@ export class PiExecutor {
 
   // ── RPC event handler ─────────────────────────────────────────────────────
 
-  private async _onRpcEvent(runId: string, event: PiAgentEvent): Promise<void> {
+  private async _onRpcEvent(runId: string, expectedGeneration: number, event: PiAgentEvent): Promise<void> {
+    const owned = this.live.get(runId);
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return;
     // Every frame from Pi counts as activity (drives timeout/idle logic).
-    this.store.touchActivity(runId);
+    this.store.touchActivity(runId, expectedGeneration);
+
+    // #1643 — route typed communication tool-start frames BEFORE the generic
+    // projection strips tool-call identity and arguments. Only the live
+    // non-settling owned process reaches here, so the port revalidates
+    // lineage/attempt/bounds and durably posts; every outcome is bounded and
+    // recorded without the message body or raw arguments.
+    if (event.type === "tool_execution_start" && this._communicationPort) {
+      const outcome = this._communicationPort.onToolStart({
+        runId,
+        piGeneration: expectedGeneration,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.args,
+      });
+      // Bounded observable outcome for tell_orc: protocol, result, and a
+      // tool-call ID suffix — never the message body or raw arguments.
+      if (event.toolName === "tell_orc") {
+        this.store.addProgress(runId, "worker_orc", JSON.stringify({
+          protocol: WORKER_ORC_EXTENSION_PROTOCOL,
+          outcome,
+          call: event.toolCallId.slice(-8),
+        }), expectedGeneration);
+      }
+    }
 
     const proj = projectPiEvent(event);
     for (const p of proj.progress) {
-      this.store.addProgress(runId, p.type, p.json);
+      this.store.addProgress(runId, p.type, p.json, expectedGeneration);
       for (const cb of this._progressSubs) {
           try { cb(runId, p.json, p.type); } catch { /* best effort */ }
       }
@@ -558,23 +1018,42 @@ export class PiExecutor {
     else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);
 
     if (proj.settleCompletion) {
-      const owned = this.live.get(runId);
-      if (!owned || owned.settling) return;
       await this._settleCompletion(runId, owned);
     }
   }
 
   /** Handle official extension_ui_request frames. Dialog methods enter awaiting_input;
    *  fire-and-forget methods are bounded progress/display events. */
-  private async _onUiRequest(runId: string, request: RpcExtensionUIRequest): Promise<void> {
-    this.store.touchActivity(runId);
+  private async _onUiRequest(runId: string, expectedGeneration: number, request: RpcExtensionUIRequest): Promise<void> {
+    const owned = this.live.get(runId);
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return;
+    this.store.touchActivity(runId, expectedGeneration);
 
     const method = request.method;
-    const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
 
-    if (dialogMethods.has(method)) {
-      const owned = this.live.get(runId);
-      if (!owned) return;
+    if (DIALOG_METHODS.has(method)) {
+      // #1638: supervised runs suspend for input instead of parking in
+      // awaiting_input — the question becomes structured Worker failure
+      // evidence and Orc answers on the retry.
+      if (this._inputSuspendHook) {
+        // Block termination/progress callbacks while the coordinator proves
+        // the durable session and settles the Worker attempt. Once it has
+        // committed, the Pi process must be closed and removed from `live`;
+        // otherwise it keeps consuming a Pi slot after input_requested.
+        owned.settling = true;
+        let suspended = false;
+        try {
+          suspended = await this._inputSuspendHook(runId, owned.generation, request);
+        } catch (err) {
+          logWarn(TAG, `Input suspension failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (suspended) {
+          await this._releaseOwned(owned);
+          return;
+        }
+        if (this.live.get(runId) !== owned || owned.generation !== expectedGeneration) return;
+        owned.settling = false;
+      }
       // #1358 review — the "ui" progress row is stored BEFORE the
       // awaiting_input transition so the in-transaction event emitter can
       // attach title/prompt/options to the public projection. A stray row on
@@ -588,7 +1067,7 @@ export class PiExecutor {
         options: (request as any).options,
         defaultValue: (request as any).defaultValue,
         filePattern: undefined,
-      }));
+      }), expectedGeneration);
       const result = this.store.setPendingUi({
         runId, generation: owned.generation, requestId: request.id, requestType: method as PiPendingRequestType,
       });
@@ -598,7 +1077,7 @@ export class PiExecutor {
         logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${request.id}): ${result.reason}`);
       }
     } else if (method === "notify") {
-      this.store.addProgress(runId, "ui_notify", JSON.stringify({ message: (request as any).message }));
+      this.store.addProgress(runId, "ui_notify", JSON.stringify({ message: (request as any).message }), expectedGeneration);
     }
   }
 
@@ -648,21 +1127,81 @@ export class PiExecutor {
 
   // ── stop/shutdown ────────────────────────────────────────────────────────
 
+  /**
+   * #1647 — Graceful interruption of every live Pi generation. For each
+   * generation: probe live Pi state with a bounded timeout, derive the
+   * capability from the shared session proof (never optimistic), route the
+   * typed interruption (standalone or supervised), and always release the
+   * exact generation's resources (process, C session, live slot, capacity).
+   * Concurrent RPC callbacks cannot begin a second finalization while
+   * shutdown is evaluating proof (settling ownership). Awaited by the bridge
+   * shutdown step.
+   */
   async interruptAll(): Promise<void> {
-    for (const [runId, owned] of this.live) {
-      if (owned.abortTimer) clearTimeout(owned.abortTimer);
-      try { await owned.client.close(); } catch { /* ignore */ }
-      const interrupted = this.store.casTransition(runId, ["starting", "running", "awaiting_input", "cancelling"], "interrupted", {
-        pendingRequestId: null, pendingRequestType: null,
-      });
-      if (interrupted) this._fireTransition(runId, undefined, "interrupted");
-    }
-    this.live.clear();
+    this._stopped = true;
+    const snapshot = [...this.live.values()];
+    await Promise.all(snapshot.map(async (owned) => {
+      if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
+      owned.settling = true;
+      try {
+        const proof = await this._interruptProof(owned);
+        let interrupted = false;
+        if (this._interruptRouter) {
+          interrupted = this._interruptRouter({ runId: owned.runId, generation: owned.generation, continuity: proof }).interrupted === true;
+        } else {
+          const direct = this.store.interruptGeneration({ runId: owned.runId, generation: owned.generation, continuity: proof });
+          if (direct.committed) {
+            interrupted = true;
+          } else if (direct.reason === "supervised") {
+            // Degraded corner (no coordinator wired): run-row-only
+            // interruption, never touching the W card.
+            interrupted = this.store.casTransition(
+              owned.runId,
+              ["starting", "running", "awaiting_input", "cancelling"],
+              "interrupted",
+              { pendingRequestId: null, pendingRequestType: null },
+              owned.generation,
+            );
+          }
+        }
+        if (interrupted) this._fireTransition(owned.runId, undefined, "interrupted");
+      } catch (err) {
+        logWarn(TAG, `Interruption settlement failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        // Shutdown must not strand a process, external C session, capacity
+        // slot, or workspace claim when durable interruption loses a race or
+        // throws.
+        await this._releaseOwned(owned);
+      }
+    }));
   }
-}
 
-/** Bounded, content-free error text (never raw RPC frame content). */
-function boundedError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  return message.slice(0, 300);
+  /** Bounded live-state probe; a timeout or RPC failure yields a
+   * non-available proof — the interruption still succeeds, but the
+   * generation must not claim resumability. */
+  private async _interruptProof(owned: OwnedProcess): Promise<SessionProof> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let state: { sessionId: string; sessionFile?: string } | null = null;
+    try {
+      state = await Promise.race([
+        owned.client.getState(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), INTERRUPT_PROBE_MS);
+          if (typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
+    } catch {
+      state = null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!state) {
+      return { ok: false, capability: "session_missing", reason: "Pi state unavailable before interruption" };
+    }
+    return validatePersistedSession({
+      sessionStorageRoot: this.config_.sessionStorageRoot,
+      expectedSessionId: state.sessionId,
+      sessionFile: state.sessionFile,
+    });
+  }
 }

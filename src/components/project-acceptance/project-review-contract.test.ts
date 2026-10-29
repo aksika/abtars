@@ -11,27 +11,21 @@ import { getToolDefinitions, getToolSchemas } from "../transport/tool-registry.j
 import { toAnthropicRequest } from "../transport/anthropic-adapter.js";
 import { createPiAgentTools, validatePiSchemaOrThrow } from "../transport/pi-core-tools.js";
 import { createPiExecutionSafetyController } from "../transport/pi-core-safety.js";
-import { FallbackPolicy } from "../transport/fallback-policy.js";
-import { ModelHealthRegistry } from "../transport/model-health-registry.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import type { PiCoreToolContext } from "../transport/pi-core-tools.js";
-import type { ModelCandidate } from "../transport/model-candidates.js";
 
 function reviewToolParams(): Record<string, unknown> {
-  const def = getToolDefinitions().find(t => t.name === "review_project");
-  expect(def).toBeDefined();
-  return def!.parameters as Record<string, unknown>;
+  // #1792: the review_project tool is deleted — the contract constants below
+  // still own the schema, but the registry no longer presents it.
+  return REVIEW_PROJECT_PARAMETERS as unknown as Record<string, unknown>;
 }
 
 function makePiContext(): PiCoreToolContext {
-  const candidate: ModelCandidate = { model: "test-model", provider: "test-provider", endpoint: "https://api.test/v1", maxContext: 128000, apiKey: "k", source: "primary" };
-  const registry = new ModelHealthRegistry();
-  const policy = new FallbackPolicy([candidate], registry);
   return {
     executionId: "exec_1",
     userId: "user_1",
     sandboxPolicy: buildPolicy("owner"),
-    safety: createPiExecutionSafetyController(policy),
+    safety: createPiExecutionSafetyController(),
     memoryToolDeps: { current: null },
   };
 }
@@ -39,7 +33,11 @@ function makePiContext(): PiCoreToolContext {
 const criteriaSchema = (params: Record<string, unknown>) =>
   (params as { properties: Record<string, unknown> }).properties["criteria"] as Record<string, unknown>;
 
-describe("review_project nested schema preservation (#1620)", () => {
+describe("review_project nested schema preservation (#1620; #1792: tool deleted from presentation)", () => {
+  it("#1792: the registry no longer presents the deleted review_project tool", () => {
+    expect(getToolDefinitions().find(t => t.name === "review_project")).toBeUndefined();
+  });
+
   it("registry schema carries nested enums, items, and required fields", () => {
     const params = reviewToolParams();
     const properties = (params as { properties: Record<string, unknown> }).properties as Record<string, unknown>;
@@ -51,11 +49,11 @@ describe("review_project nested schema preservation (#1620)", () => {
     const criteria = properties["criteria"] as Record<string, unknown>;
     expect(criteria.type).toBe("array");
     expect(criteria.items).toBeDefined();
-    const criterionItems = criteria.items as { properties: Record<string, unknown>; required: string[] };
+    const criterionItems = criteria.items as { properties: Record<string, unknown>; required: string[]; additionalProperties?: boolean };
     const verdict = criterionItems.properties["verdict"] as { enum?: unknown[] };
     expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
     expect(criterionItems.required).toEqual(["criterion_id", "verdict", "evidence_ids", "rationale"]);
-    expect((criterionItems as { additionalProperties: boolean }).additionalProperties).toBe(false);
+    expect(criterionItems.additionalProperties).toBe(false);
 
     const outputs = properties["outputs"] as Record<string, unknown>;
     const outputItems = outputs.items as { properties: Record<string, unknown>; required: string[] };
@@ -78,14 +76,9 @@ describe("review_project nested schema preservation (#1620)", () => {
     expect(properties["input_request"]).toBeDefined();
   });
 
-  it("getToolSchemas (OpenAI-compatible) preserves the nested contract", () => {
+  it("#1792: getToolSchemas (OpenAI-compatible) no longer lists review_project", () => {
     const schemas = getToolSchemas();
-    const fn = schemas.find(s => s.function.name === "review_project");
-    expect(fn).toBeDefined();
-    const params = fn!.function.parameters as Record<string, unknown>;
-    const criteria = criteriaSchema(params);
-    const verdict = ((criteria.items as { properties: Record<string, unknown> }).properties["verdict"]) as { enum?: unknown[] };
-    expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
+    expect(schemas.find(s => s.function.name === "review_project")).toBeUndefined();
   });
 
   it("Anthropic adapter preserves input_schema nested enums", () => {
@@ -101,16 +94,9 @@ describe("review_project nested schema preservation (#1620)", () => {
     expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
   });
 
-  it("Pi adapter preserves nested enums and validates the full schema", () => {
+  it("#1792: Pi adapter no longer presents the deleted review_project tool", () => {
     const tools = createPiAgentTools(makePiContext());
-    const review = tools.find(t => t.name === "review_project");
-    expect(review).toBeDefined();
-    // Pi wraps the registry schema without dropping nested keywords; the
-    // parameters object is the adapted registry schema.
-    const params = review!.parameters as unknown as Record<string, unknown>;
-    const criteria = criteriaSchema(params);
-    const verdict = ((criteria.items as { properties: Record<string, unknown> }).properties["verdict"]) as { enum?: unknown[] };
-    expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
+    expect(tools.find(t => t.name === "review_project")).toBeUndefined();
   });
 
   it("Pi schema validation rejects malformed nested array items at registration", () => {
@@ -172,10 +158,20 @@ describe("narrowReviewProjectArgs (#1620)", () => {
     const repair = narrowReviewProjectArgs({
       ...validRaw,
       action: "repair",
-      repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+      repair: { items: [{ id: "r1", source_contract_id: "c_lane1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
     });
     expect(repair.ok).toBe(true);
     if (repair.ok) expect(repair.decision.repair?.items[0]!.budget.max_tokens).toBe(5000);
+
+    // #1686: a repair item without a source contract reference is a structural
+    // payload defect — rejected before any semantic validation.
+    const noSource = narrowReviewProjectArgs({
+      ...validRaw,
+      action: "repair",
+      repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+    });
+    expect(noSource.ok).toBe(false);
+    if (!noSource.ok) expect(noSource.issues.some(i => i.path === "$.repair.items[].source_contract_id")).toBe(true);
 
     const blocked = narrowReviewProjectArgs({
       ...validRaw,

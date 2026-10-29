@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { initBridgeLock } from "./components/transport/bridge-lock-transport.js";
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
+import { logAndSwallow } from "./components/log-and-swallow.js";
 import type { BootCtx } from "./boot/context.js";
 import { clearMemoryToolDependencies, createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
@@ -16,6 +17,7 @@ import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
 import { phaseAgentApi } from "./boot/phase-agent-api.js";
 import { phaseSessionControl } from "./boot/phase-session-control.js";
+import { phaseReconciler } from "./boot/phase-reconciler.js";
 import { phaseShutdown } from "./boot/phase-shutdown.js";
 
 /**
@@ -55,11 +57,26 @@ export class Bridge {
         }, ms);
         timer.unref?.();
       });
-      return Promise.race([Promise.resolve(fn()).catch(() => {}), timeout])
+      return Promise.race([Promise.resolve(fn()).catch(err => logWarn("main", `Shutdown step '${name}' failed: ${err instanceof Error ? err.message : String(err)} — continuing`)), timeout])
         .finally(() => { if (timer) clearTimeout(timer); });
     };
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
+    // #1935: stop the workflow driver generation first: it closes admission,
+    // revokes model-call callback authority and aborts live calls before the
+    // executor/reconciler teardown. Without this an in-process restart would
+    // leave the old driver's wakes and callbacks alive beside the successor.
+    await step("workflow-driver", () => {
+      this.ctx.workflowDriver?.stop();
+      this.ctx.workflowDriver = null;
+    });
+    // #1554: drain the Reconciler while its transport, Pi executor, and
+    // lifecycle scheduler dependencies are still available. New ingress is
+    // already fenced by the agent-api stop above.
+    await step("reconciler", async () => {
+      await this.ctx.reconcilerHandle?.stop();
+    });
+    await step("lifecycle-wake", () => this.ctx.lifecycleWakeScheduler?.stop());
     await step("peer-transport", () => {
       try {
         const { getPeerTransport } = require("./components/peer-transport/index.js") as typeof import("./components/peer-transport/index.js");
@@ -73,19 +90,51 @@ export class Bridge {
     });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
-    await step("pi-executor", () => {
-      this.ctx.piExecutorService?.executor.interruptAll();
+    await step("pi-executor", async () => {
+      // #1647 — graceful interruption must complete (bounded probes, typed
+      // run/card settlement, process + C-session + capacity cleanup) before
+      // the process exits.
+      await this.ctx.piExecutorService?.executor.interruptAll();
+      // #1635 — interactive coding turns are Pi processes too; abort them and
+      // leave the durable sessions interrupted (resumable with a proof).
+      await this.ctx.codingSessionService?.interruptAll();
       // #1357: Withdraw Pi capability registration on shutdown
       this.ctx._piCapDisposer?.();
     });
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
+    // #1706: cancel and drain late memory re-composition BEFORE closing the
+    // memory runtime — a retry that succeeds mid-shutdown is disposed, never
+    // published, so no client can leak past facade close.
+    await step("memory-recomposition", async () => {
+      await this.ctx.memoryRecomposition?.cancel();
+      this.ctx.memoryRecomposition = null;
+    });
     await step("memory-tools", () => clearMemoryToolDependencies(this.ctx));
     await step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
-      await this.ctx.memoryRuntime.close().catch(() => {});
+      await this.ctx.memoryRuntime.close().catch(err => logAndSwallow("main", "close memory runtime during shutdown", err));
     });
+    // #1468: emergency teardown happens after platforms stop accepting new
+    // messages and before normal transport teardown. The service fences
+    // delivery synchronously before awaiting interrupt/process cleanup.
+    await step("emergency", () => this.ctx.emergencyExecution?.shutdown());
     await step("transport", () => this.ctx.transport?.destroy());
-    await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
+    await step("kanban-database", async () => {
+      const [{ closeTaskDatabase }, { closeKanbanChannelDatabase }] = await Promise.all([
+        import("./components/tasks/kanban-board.js"),
+        import("./components/tasks/kanban-channel.js"),
+      ]);
+      closeKanbanChannelDatabase();
+      closeTaskDatabase();
+    });
+    await step("snapshot", () => {
+      // Best effort — a missing/unloadable snapshot module must never abort
+      // the remaining teardown steps (#1706).
+      try {
+        const { removeSnapshot } = require("./components/runtime-health-snapshot.js") as typeof import("./components/runtime-health-snapshot.js");
+        removeSnapshot();
+      } catch { /* best effort */ }
+    });
     this.ctx.sessionManager.clearAll();
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
@@ -124,12 +173,26 @@ export const BOOT_PHASES = [
   phaseSleep,
   phaseDashboard,
   phaseAgentApi,
+  phaseReconciler,
   phaseSessionControl,
   phaseShutdown,
 ] as const;
 
 export async function startBridge(): Promise<number> {
   const ctx = createBootCtx();
+
+  // #1707 Task 8: /kanban nuke preflight — MUST run before the first cached
+  // Kanban connection is opened by any phase. A pending request younger than
+  // five minutes removes exactly the canonical kanban database files and
+  // rebuilds an empty valid board; anything else is ignored unchanged.
+  try {
+    const { runKanbanNukePreflightIfNeeded } = await import("./components/tasks/kanban-nuke.js");
+    const nuke = runKanbanNukePreflightIfNeeded();
+    if (nuke.performed) logInfo("boot", "kanban nuke preflight performed — board rebuilt empty");
+  } catch (err) {
+    logError("boot", "kanban nuke preflight failed — refusing to boot against a half-initialized board", err);
+    throw err;
+  }
 
   // Phase 1: config — own try/catch, falls back to empty defaults (#331)
   {
@@ -142,6 +205,44 @@ export async function startBridge(): Promise<number> {
       ctx.phaseHealth.set(phaseConfig.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
       logError("boot", `✗ ${phaseConfig.name} failed — continuing with empty defaults`, err);
     }
+  }
+
+  // #1935: startup interruption barrier. The watermark is captured before the
+  // boot graph can start any ingress path (peer API, chat platforms, heartbeat
+  // admission), then every unfinished workflow from earlier generations fails
+  // before recovery, drains or new admission can advance it. A barrier failure
+  // aborts boot rather than permitting old work to resume. A missing task
+  // database cannot advance workflow work either; boot stays degraded.
+  {
+    let db: import("./components/tasks/kanban-board.js").TaskDatabase | null = null;
+    try {
+      const { requireTaskDatabase } = await import("./components/tasks/kanban-board.js");
+      db = requireTaskDatabase();
+    } catch (err) {
+      logWarn("boot", `Workflow startup barrier skipped — task database unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (db) {
+      try {
+        const { initWorkflowSchema } = await import("./components/orc-project/workflow-schema.js");
+        const { readWorkflowRowWatermark, failInterruptedWorkflows } = await import("./components/orc-project/orc-workflow-startup.js");
+        initWorkflowSchema(db);
+        const watermark = readWorkflowRowWatermark(db);
+        const interrupted = failInterruptedWorkflows(db, watermark);
+        if (interrupted > 0) {
+          logInfo("boot", `Workflow startup interruption barrier failed ${interrupted} unfinished workflow(s) from an earlier generation`);
+        }
+      } catch (err) {
+        logError("boot", "Workflow startup interruption barrier failed — refusing to boot with old work live", err);
+        throw err;
+      }
+    }
+  }
+
+  // #1935: the in-process restart loop closes the task database. Bind the new
+  // generation's shared scheduled-project runner to the fresh connection.
+  {
+    const { resetScheduledProjectRunner } = await import("./components/tasks/scheduled-project-runner.js");
+    resetScheduledProjectRunner();
   }
 
   // Boot-time doctor fix — chmod secrets, fix dirs (#1180, #1439)
@@ -174,8 +275,21 @@ export async function startBridge(): Promise<number> {
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
   ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
 
+  // Every BRIDGE START (first boot or in-process restart) arms exactly one
+  // automatic boot greeting: the Spin singleton outlives restarts, so a stale
+  // sent-flag would otherwise suppress it silently.
+  {
+    const { spin } = await import("./components/spin.js");
+    spin.resetBootGreeting();
+  }
+
   // Run boot graph — all phases execute in dependency order (#944)
   await bootGraph(BOOT_NODES, ctx);
+
+  // #1706: arm memory re-composition retries only after the graph has copied
+  // its final report into ctx.phaseHealth, so diagnostics callbacks can never
+  // lose an update to graph finalization.
+  ctx.memoryRecomposition?.start();
 
   // phaseShutdown is special (needs Bridge instance) — run after graph
   {
@@ -211,7 +325,7 @@ export async function startBridge(): Promise<number> {
         if (state.completedAt && Date.now() - new Date(state.completedAt).getTime() < 5 * 60_000) {
           deployNote = state.status === "success" ? " (updated)" : ` (update ${state.status})`;
         }
-      } catch {}
+      } catch { /* deploy.state may be absent on first boot or transiently corrupt; a missing note is acceptable */ }
       await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}${deployNote}`);
       logInfo("main", "Startup: Back online notification sent");
       const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");

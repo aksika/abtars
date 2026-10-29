@@ -1,20 +1,15 @@
 /**
  * provider-failure.ts — #1297: provider-neutral terminal failure contract.
  *
- * The Pi transport carries provider failure classification (model health kinds,
- * status/message parsing) at the adapter boundary. When an execution ends with
- * every configured candidate blocked by the SAME provider-neutral cause, the
- * stream boundary reports a structured terminal failure and core transport
- * throws a typed `ProviderExecutionError`. Downstream consumers (scheduled-task
- * runner, failure hook) identify the condition by type + exact code — never by
- * matching an error message.
- *
- * No provider names, provider-specific parsing, or raw provider payloads may
- * appear here or in any downstream consumer.
+ * Pi owns provider calls, retries and overflow recovery (#1940). When Pi's
+ * final verdict for a run is a provider error with no committed answer, the
+ * transport throws a typed `ProviderExecutionError`. Downstream consumers
+ * (scheduled-task runner, self-heal gate) branch on the exact code, never on
+ * error text. The only classification is credit/quota exhaustion, which no
+ * retry or self-heal can fix.
  */
 
-export const TERMINAL_FAILURE_CODES = ["credits_exhausted"] as const;
-export type TerminalFailureCode = (typeof TERMINAL_FAILURE_CODES)[number];
+export type TerminalFailureCode = "credits_exhausted" | "all_candidates_failed";
 
 export interface ProviderTerminalFailure {
   /** Stable machine-readable cause. Consumers branch on this exact code. */
@@ -23,7 +18,7 @@ export interface ProviderTerminalFailure {
   retryable: false;
   /** Number of configured candidates evaluated for this execution. */
   attemptedCandidates: number;
-  /** Stable, non-secret, provider-neutral display text. */
+  /** Non-secret display text (Pi's final provider message). */
   message: string;
 }
 
@@ -41,6 +36,12 @@ export function isProviderExecutionError(err: unknown): err is ProviderExecution
   return err instanceof ProviderExecutionError;
 }
 
-export function isCreditsExhausted(err: unknown): boolean {
-  return isProviderExecutionError(err) && err.failure.code === "credits_exhausted";
+/** #1753: quota/billing exhaustion phrasing (mirrors pi-ai's private
+ *  non-retryable provider-limit pattern) plus credit wording. */
+const CREDITS_EXHAUSTED =
+  /insufficient_quota|quota exceeded|out of budget|billing|available balance|monthly usage limit reached|GoUsageLimitError|FreeUsageLimitError|insufficient credits|credits? exhausted/i;
+
+/** Terminal code for Pi's final provider error message. */
+export function terminalFailureCodeFor(providerMessage: string): TerminalFailureCode {
+  return CREDITS_EXHAUSTED.test(providerMessage) ? "credits_exhausted" : "all_candidates_failed";
 }

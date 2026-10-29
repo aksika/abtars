@@ -59,6 +59,7 @@ import type { OutputObserver } from "../../components/session-output-feed.js";
 import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
+import { revokeSealedSession } from "./sealed-acp-bridge.js";
 
 const TAG = "acp";
 
@@ -73,6 +74,12 @@ export class AcpTransport implements IKiroTransport {
   private agent: ChildProcess | null = null;
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
+  /** #1660: trusted session type per session key, learned from sendPrompt context. */
+  private sessionTypes = new Map<string, import("../spin-types.js").SessionType>();
+  /** #1468: sealed session keys owned by THIS transport instance. Initialize,
+   *  reset, retry invalidation, and destroy revoke only these keys — never the
+   *  tokens of another ACP client (e.g. a dedicated emergency client). */
+  private sealedSessionKeys = new Set<string>();
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
   /** Raw text length already offered as a pre-tool semantic segment. */
   private segmentOffsets = new Map<string, number>();
@@ -80,6 +87,10 @@ export class AcpTransport implements IKiroTransport {
   private updateChains = new Map<string, Promise<void>>();
   /** #1338: acpSessionId → call-local output observer (removed in finally). */
   private outputObservers = new Map<string, OutputObserver | undefined>();
+  /** #1680: host-owned turn control per active prompt session — consumed at
+   *  tool_call_update boundaries so a durable intent completion ends the ACP
+   *  turn instead of waiting for another CLI round. */
+  private orcTurnControls = new Map<string, import("../orc-project/orc-project-contracts.js").OrcTurnControl>();
   private lastContextPercent = -1;
   private static _rawMode = false;
   private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
@@ -162,13 +173,18 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    // #1660/#1468: revoke only the sealed sessions this instance created —
+    // a sibling ACP client (normal transport, subagents, emergency) keeps its
+    // own tokens. The process-wide revoke is reserved for full bridge shutdown.
+    await this.revokeOwnedSealedSessions();
+    this.sessionTypes.clear();
     for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
     this.onReinit?.();
 
     // Kill previous CLI process if dead/disconnected (prevent orphan accumulation)
     if (this._rawClient && !this._rawClient.alive) {
-      try { this._rawClient.destroy(); } catch {}
+      try { this._rawClient.destroy(); } catch (err) { logAndSwallow(this.tag, "destroy dead raw client during reinit", err); }
       this._rawClient = null as any;
     }
 
@@ -226,50 +242,67 @@ export class AcpTransport implements IKiroTransport {
       stdio: ["pipe", "pipe", "pipe"],
       env: cleanEnv,
     });
+    const thisProcess = this.agent;
+
+    // A failed spawn emits `error` instead of (or before) `exit`.  Keep that
+    // event owned by the transport and race it with ACP initialization; an
+    // ENOENT must reject the activation cleanly rather than becoming an
+    // unhandled ChildProcess error or leaving initialization hanging.
+    let rejectChildFailure!: (error: Error) => void;
+    const childFailure = new Promise<never>((_, reject) => {
+      rejectChildFailure = reject;
+    });
+    let childFailureHandled = false;
+    const handleChildFailure = (error: Error): void => {
+      rejectChildFailure(error);
+      if (childFailureHandled || this.agent !== thisProcess) return;
+      childFailureHandled = true;
+      this.agent = null;
+      this.client = null;
+      // #160: reject all in-flight operations immediately.
+      if (this.inFlight.size > 0) {
+        const count = this.inFlight.size;
+        for (const entry of this.inFlight) entry.reject(error);
+        this.inFlight.clear();
+        logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child failure`);
+      }
+      this.sm.childExited();
+      this.toolMeta = null;
+      if (this.sm.state === "reinitializing" && this.autoReinit) {
+        logWarn(this.tag, "Unexpected kiro-cli failure — auto-reinitializing in 5s");
+        setTimeout(() => {
+          this.initialize()
+            .then(() => this.sm.reinitSucceeded())
+            .catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
+        }, 5000);
+      }
+    };
+    thisProcess.once("error", (error) => {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      logWarn(this.tag, `kiro-cli failed to spawn: ${normalized.message}`);
+      handleChildFailure(normalized);
+    });
 
     // Track child PID for cleanup on next boot (#921)
-    if (this.agent.pid) {
-      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(this.agent!.pid!)).catch(() => {});
+    if (thisProcess.pid) {
+      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(thisProcess.pid!)).catch(err => logAndSwallow(this.tag, "track ACP pid in bridge lock", err));
     }
 
-    if (!this.agent.stdin || !this.agent.stdout) {
+    if (!thisProcess.stdin || !thisProcess.stdout) {
       throw new Error("Failed to create ACP stdio pipes");
     }
 
-    this.agent.stderr?.on("data", (chunk: Buffer) => {
+    thisProcess.stderr?.on("data", (chunk: Buffer) => {
       logDebug(this.tag, `[stderr] ${chunk.toString().trim()}`);
     });
 
-    const thisProcess = this.agent;
-    this.agent.on("exit", (code, signal) => {
+    thisProcess.on("exit", (code, signal) => {
       logWarn(this.tag, `kiro-cli exited (code=${code}, signal=${signal})`);
-      if (this.agent === thisProcess) {
-        this.agent = null;
-        this.client = null;
-        // #160: reject all in-flight operations immediately
-        if (this.inFlight.size > 0) {
-          const err = new AcpExitError(code, signal);
-          const count = this.inFlight.size;
-          for (const entry of this.inFlight) entry.reject(err);
-          this.inFlight.clear();
-          logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child exit`);
-        }
-        // #188: state machine handles reinit
-        this.sm.childExited();
-        this.toolMeta = null;
-        if (this.sm.state === "reinitializing" && this.autoReinit) {
-          logWarn(this.tag, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
-          setTimeout(() => {
-            this.initialize()
-              .then(() => this.sm.reinitSucceeded())
-              .catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
-          }, 5000);
-        }
-      }
+      handleChildFailure(new AcpExitError(code, signal));
     });
 
-    const input = Writable.toWeb(this.agent.stdin);
-    const output = Readable.toWeb(this.agent.stdout) as unknown as ReadableStream<Uint8Array>;
+    const input = Writable.toWeb(thisProcess.stdin);
+    const output = Readable.toWeb(thisProcess.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = ndJsonStream(input, output);
 
     // #7554 workaround: kiro-cli interprets idle stdin as EOF. Periodic empty writes keep pipe alive.
@@ -296,7 +329,7 @@ export class AcpTransport implements IKiroTransport {
             const inTok = typeof params["inputTokens"] === "number" ? params["inputTokens"] as number : 0;
             const outTok = typeof params["outputTokens"] === "number" ? params["outputTokens"] as number : 0;
             if (inTok || outTok) {
-              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(() => {});
+              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(err => logAndSwallow(this.tag, "increment budget from token metadata", err));
             }
           }
           if (method === "_kiro.dev/agent/not_found" || method === "_kiro.dev/model/not_found") {
@@ -308,11 +341,13 @@ export class AcpTransport implements IKiroTransport {
     );
 
     logDebug(this.tag, "Initializing ACP connection");
-    const initResult = await this.client.initialize({
+    const client = this.client;
+    if (!client) throw new Error("ACP client unavailable after spawn");
+    const initResult = await Promise.race([client.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "abtars", version: "1.0.0" },
-    });
+    }), childFailure]);
     logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
     this.onReady?.();
   }
@@ -367,6 +402,9 @@ export class AcpTransport implements IKiroTransport {
     }
 
     this._toolCallsSucceeded = 0;
+    // #1660: remember the trusted session type before session creation so
+    // Main sessions get the sealed MCP server definition.
+    if (context?.sessionType) this.sessionTypes.set(sessionKey, context.sessionType);
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
     this.segmentOffsets.set(sessionId, 0);
@@ -374,6 +412,9 @@ export class AcpTransport implements IKiroTransport {
     // agent_message_chunk / tool_call mirrors below actually reach the feed.
     // Cleared in the finally block alongside responseChunks.
     this.outputObservers.set(sessionId, context?.outputObserver);
+    // #1680: bind the host-owned turn control for this prompt; the
+    // tool_call_update handler consumes it when the durable intent completes.
+    if (context?.orcTurnControl) this.orcTurnControls.set(sessionId, context.orcTurnControl);
 
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.replace(/\n/g, " ").slice(0, 80)}…"`);
 
@@ -384,6 +425,24 @@ export class AcpTransport implements IKiroTransport {
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
     this.sm.startPrompt();
+
+    // #1660: activate the Main session's sealed token with the trusted
+    // execution context for the duration of this prompt; the socket endpoint
+    // serves tool calls only while the token is active.
+    const sealedSessionType = context?.sessionType;
+    const sealedUserId = context?.userId ?? "";
+    const sealedExecutionId = context?.executionId ?? `${sessionKey}-${Date.now()}`;
+    if (sealedSessionType === "A" && sealedUserId) {
+      try {
+        const { activateSealedToken } = await import("./sealed-acp-bridge.js");
+        activateSealedToken(sessionKey, {
+          userId: sealedUserId,
+          executionId: sealedExecutionId,
+          sessionType: "A",
+          sandboxed: true,
+        });
+      } catch (err) { logAndSwallow(TAG, "activate sealed token", err); }
+    }
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
@@ -429,6 +488,14 @@ export class AcpTransport implements IKiroTransport {
       this.segmentOffsets.delete(usedSid);
       return chunks.join("") || "(no response)";
     } finally {
+      // #1660: deactivate the sealed token in every success/failure/cancel
+      // finalizer so a stale context can never serve a later tool call.
+      if (sealedSessionType === "A" && sealedUserId) {
+        try {
+          const { deactivateSealedToken } = await import("./sealed-acp-bridge.js");
+          deactivateSealedToken(sessionKey);
+        } catch (err) { logAndSwallow(TAG, "deactivate sealed token", err); }
+      }
       // #1338: drop the observer association so late events from a completed
       // call cannot publish into a newer attachment.
       this.outputObservers.delete(usedSid);
@@ -438,7 +505,7 @@ export class AcpTransport implements IKiroTransport {
       import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
         recordLatency(`llm:${this.modelId ?? "unknown"}`, durationMs);
         recordCall(`llm:${this.modelId ?? "unknown"}`, true);
-      }).catch(() => {});
+      }).catch(err => logAndSwallow(this.tag, "record prompt metrics", err));
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {
@@ -449,7 +516,7 @@ export class AcpTransport implements IKiroTransport {
         }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
-      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(() => {});
+      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(err => logAndSwallow(this.tag, "increment budget for prompt call", err));
 
       // Drain queued concurrent prompt (#671 Layer 2, #930 fix)
       this.drainPending();
@@ -561,7 +628,14 @@ export class AcpTransport implements IKiroTransport {
 
         if (code === -32603 && msg.includes("No session found")) {
           const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
-          if (key) { this.cleanupKiroFiles(sid); this.sessions.delete(key); }
+          if (key) {
+            this.cleanupKiroFiles(sid);
+            this.sessions.delete(key);
+            this.sealedSessionKeys.delete(key);
+            try {
+              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(err => logAndSwallow(this.tag, "revoke sealed session", err));
+            } catch { /* bridge may not be wired */ }
+          }
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
           if (attempt < maxRetries) {
             sid = await this.getOrCreateSession(this.lastSessionKey);
@@ -636,6 +710,11 @@ export class AcpTransport implements IKiroTransport {
   }
 
   destroy(): void {
+    // #1660/#1468: revoke only this instance's sealed session tokens before
+    // dropping the session map. revokeAllSealedSessions() is reserved for the
+    // process-wide sealed bridge close during full shutdown.
+    void this.revokeOwnedSealedSessions();
+    this.sessionTypes.clear();
     // #992: clean kiro session files before clearing the map
     for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear();
@@ -658,7 +737,13 @@ export class AcpTransport implements IKiroTransport {
   private cleanupKiroFiles(kiroSessionId: string): void {
     const dir = join(homedir(), ".kiro", "sessions", "cli");
     for (const ext of [".json", ".jsonl", ".history"]) {
-      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch {}
+      try {
+        unlinkSync(join(dir, kiroSessionId + ext));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          logAndSwallow(this.tag, "remove ACP session file", err);
+        }
+      }
     }
   }
 
@@ -684,7 +769,7 @@ export class AcpTransport implements IKiroTransport {
     const sessionId = params.sessionId;
     const previous = this.updateChains.get(sessionId) ?? Promise.resolve();
     const current = previous
-      .catch(() => {})
+      .catch(() => { /* each queued update is isolated by its own terminal catch below, so a stale rejection can never block this queued update */ })
       .then(() => this.handleSessionUpdate(params))
       .catch((err) => {
         logWarn(this.tag, `ACP session update failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
@@ -692,7 +777,7 @@ export class AcpTransport implements IKiroTransport {
     this.updateChains.set(sessionId, current);
     void current.finally(() => {
       if (this.updateChains.get(sessionId) === current) this.updateChains.delete(sessionId);
-    }).catch(() => {});
+    }).catch(() => { /* current never rejects (terminal catch above); this keeps the map-cleanup chain detached */ });
     return current;
   }
 
@@ -766,6 +851,17 @@ export class AcpTransport implements IKiroTransport {
             this.toolMeta = null;
           }
         }
+        // #1680: when the durable intent postcondition won (e.g. the contract
+        // committed), stop the CLI turn here — the bridge-side tool execution
+        // gate already rejects any later call, and the run CAS rejects late
+        // events. ACP tools execute inside the CLI, so the interrupt is the
+        // only host signal available at this boundary.
+        const control = this.orcTurnControls.get(sessionId);
+        if (control?.completed?.kind === "intent_satisfied") {
+          this.orcTurnControls.delete(sessionId);
+          logInfo(this.tag, `Intent satisfied (${control.completed.code}) — interrupting ACP turn ${sessionId}`);
+          void this.sendInterrupt();
+        }
         break;
       }
     }
@@ -789,13 +885,36 @@ export class AcpTransport implements IKiroTransport {
     return { outcome: { outcome: "cancelled" } };
   }
 
+  /** #1468: revoke exactly the sealed session tokens this instance created. */
+  private revokeOwnedSealedSessions(): void {
+    if (this.sealedSessionKeys.size === 0) return;
+    const keys = [...this.sealedSessionKeys];
+    this.sealedSessionKeys.clear();
+    for (const key of keys) {
+      try { revokeSealedSession(key); } catch { /* bridge may not be wired */ }
+    }
+  }
+
   private async getOrCreateSession(sessionKey: string): Promise<string> {
     const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
+    // #1660: Main ACP sessions carry the sealed-tools stdio MCP server; the
+    // proxy never resolves/executes locally — it forwards to our socket. The
+    // session token travels only in the MCP server's child environment.
+    let mcpServers: unknown[] = [];
+    if (this.sessionTypes.get(sessionKey) === "A") {
+      const { sealedMcpServerDefinition, isSealedBridgeReady } = await import("./sealed-acp-bridge.js");
+      if (isSealedBridgeReady()) {
+        const def = sealedMcpServerDefinition(sessionKey, "A");
+        if (def) mcpServers = [def];
+      }
+    }
+
     if (AcpTransport._rawMode && this._rawClient) {
-      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers: [] });
+      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers });
       this.sessions.set(sessionKey, session.sessionId);
+      this.sealedSessionKeys.add(sessionKey);
       logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey} [raw]`);
       return session.sessionId;
     }
@@ -804,7 +923,7 @@ export class AcpTransport implements IKiroTransport {
 
     const session = await this.client.newSession({
       cwd: this.workingDir,
-      mcpServers: [],
+      mcpServers: mcpServers as unknown as import("@agentclientprotocol/sdk").McpServer[],
     });
 
     if (this.isGemini && this.modelId) {
@@ -813,6 +932,7 @@ export class AcpTransport implements IKiroTransport {
     }
 
     this.sessions.set(sessionKey, session.sessionId);
+    this.sealedSessionKeys.add(sessionKey);
     logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey}`);
     return session.sessionId;
   }

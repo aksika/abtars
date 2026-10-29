@@ -1,11 +1,10 @@
 /**
  * session-control.test.ts — #1406 backend-neutral control plane: exact
- * adapter dispatch, unsupported outcomes, automatic dedupe, telemetry, and
- * the durable adapter's prepare → summarize → commit flow.
+ * adapter dispatch, unsupported outcomes, automatic dedupe, and telemetry.
+ * abmind conversation compaction is retired (#1940 R8).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { SessionControlService } from "./service.js";
-import { DurableConversationCompactionAdapter } from "./durable-adapter.js";
 import type { SessionControlAdapter, SessionControlResult, SessionCompactionTelemetryV1 } from "./types.js";
 
 function makeResult(status: SessionControlResult["status"]): SessionControlResult {
@@ -20,23 +19,6 @@ function makeRecordingAdapter(kind: "durable_conversation" | "local_pi_run"): Se
     supports: () => true,
     async execute() { return makeResult("completed"); },
   } as SessionControlAdapter & { calls: number };
-}
-
-function mockRuntime(overrides: Record<string, unknown> = {}): any {
-  return {
-    supports: () => true,
-    prepareConversationCompaction: vi.fn().mockResolvedValue({
-      status: "ready",
-      candidate: {
-        version: 1, expectedGeneration: 0, previousCheckpointId: null,
-        sourceMessageStart: 1, sourceMessageEnd: 2, firstKeptMessageId: 3,
-        sourceDigest: "digest", sourceTokenCount: 100, serializedTurns: "u: hi\na: hi",
-        priorCheckpoint: "", summaryTokenBudget: 2000,
-      },
-    }),
-    commitConversationCompaction: vi.fn().mockResolvedValue({ status: "committed", checkpointId: 7, generation: 1 }),
-    ...overrides,
-  };
 }
 
 describe("SessionControlService #1406", () => {
@@ -123,96 +105,3 @@ describe("SessionControlService #1406", () => {
   });
 });
 
-describe("DurableConversationCompactionAdapter #1406", () => {
-  const summarizer = {
-    summarize: vi.fn().mockResolvedValue({ text: "a compact summary", provider: "p", model: "m" }),
-  };
-
-  beforeEach(() => {
-    summarizer.summarize.mockReset();
-    summarizer.summarize.mockResolvedValue({ text: "a compact summary", provider: "p", model: "m" });
-  });
-
-  it("runs prepare → summarize → commit and reports completed with generation", async () => {
-    const runtime = mockRuntime();
-    const adapter = new DurableConversationCompactionAdapter({ runtime, summarizer });
-    const result = await adapter.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s", beforeMessageId: 10 },
-      { kind: "compact", reason: "manual" },
-    );
-    expect(result.status).toBe("completed");
-    expect(result.generation).toBe(1);
-    expect(result.tokensBefore).toBe(100);
-    expect(runtime.prepareConversationCompaction).toHaveBeenCalledWith(expect.objectContaining({
-      userId: "u", sessionId: "s", beforeMessageId: 10, reason: "manual",
-    }));
-    expect(runtime.commitConversationCompaction).toHaveBeenCalledTimes(1);
-    expect(summarizer.summarize).toHaveBeenCalledTimes(1);
-  });
-
-  it("maps nothing_to_compact and busy truthfully without calling the summarizer", async () => {
-    const adapter = new DurableConversationCompactionAdapter({
-      runtime: mockRuntime({ prepareConversationCompaction: vi.fn().mockResolvedValue({ status: "nothing_to_compact" }) }),
-      summarizer,
-    });
-    const none = await adapter.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "automatic" },
-    );
-    expect(none.status).toBe("nothing_to_compact");
-    expect(summarizer.summarize).not.toHaveBeenCalled();
-
-    const busyAdapter = new DurableConversationCompactionAdapter({
-      runtime: mockRuntime({ prepareConversationCompaction: vi.fn().mockResolvedValue({ status: "busy" }) }),
-      summarizer,
-    });
-    const busy = await busyAdapter.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "automatic" },
-    );
-    expect(busy.status).toBe("busy");
-  });
-
-  it("performs no commit when the summarizer fails", async () => {
-    const runtime = mockRuntime();
-    const failing = { summarize: vi.fn().mockRejectedValue(new Error("provider down")) };
-    const adapter = new DurableConversationCompactionAdapter({ runtime, summarizer: failing });
-    await expect(adapter.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "manual" },
-    )).rejects.toThrow("provider down");
-    expect(runtime.commitConversationCompaction).not.toHaveBeenCalled();
-  });
-
-  it("reports stale on generation CAS loss and rejected as failed", async () => {
-    const stale = new DurableConversationCompactionAdapter({
-      runtime: mockRuntime({ commitConversationCompaction: vi.fn().mockResolvedValue({ status: "stale" }) }),
-      summarizer,
-    });
-    const staleResult = await stale.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "manual" },
-    );
-    expect(staleResult.status).toBe("stale");
-
-    const rejected = new DurableConversationCompactionAdapter({
-      runtime: mockRuntime({ commitConversationCompaction: vi.fn().mockResolvedValue({ status: "rejected" }) }),
-      summarizer,
-    });
-    const rejectedResult = await rejected.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "manual" },
-    );
-    expect(rejectedResult.status).toBe("failed");
-  });
-
-  it("reports unsupported when the runtime lacks the compaction capability", async () => {
-    const runtime = mockRuntime({ supports: () => false });
-    const adapter = new DurableConversationCompactionAdapter({ runtime, summarizer });
-    const result = await adapter.execute(
-      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
-      { kind: "compact", reason: "manual" },
-    );
-    expect(result.status).toBe("unsupported");
-  });
-});

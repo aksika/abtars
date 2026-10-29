@@ -3,7 +3,6 @@
  */
 
 export { SessionControlService } from "./service.js";
-export { DurableConversationCompactionAdapter } from "./durable-adapter.js";
 export { LocalPiRunCompactionAdapter } from "./pi-adapter.js";
 export type {
   SessionControlTarget, SessionControlRequest, SessionControlStatus,

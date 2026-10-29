@@ -23,7 +23,7 @@ vi.mock("../utils/crypto.js", async (importOriginal) => {
   };
 });
 
-const { readSecret, loadSecretForBoot, writeSecret, writeSecretCompatible, compareSecret, initSecretsKey, clearSecretCache, ensureSecretDir, secretFilePath } = await import("./secrets.js");
+const { readSecret, readSecretResult, loadSecretForBoot, writeSecret, writeSecretCompatible, compareSecret, initSecretsKey, clearSecretCache, ensureSecretDir, secretFilePath } = await import("./secrets.js");
 
 describe("secrets.ts — encryption (#598)", () => {
   beforeEach(() => {
@@ -74,6 +74,69 @@ describe("secrets.ts — encryption (#598)", () => {
     // Mutate the file on disk; the cached value should still be returned.
     writeFileSync(join(SECRETS_DIR, "CACHED"), "ENC:bogus");
     expect(readSecret("CACHED")).toBe("first-read");
+  });
+});
+
+describe("secrets.ts — readSecretResult policy states (#1258)", () => {
+  beforeEach(() => {
+    mkdirSync(SECRETS_DIR, { recursive: true, mode: 0o700 });
+    clearSecretCache();
+    initSecretsKey();
+  });
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("distinguishes missing and empty entries from existing ones", () => {
+    expect(readSecretResult("NOPE_RES").status).toBe("missing");
+    writeFileSync(join(SECRETS_DIR, "EMPTY_RES"), " \n");
+    expect(readSecretResult("EMPTY_RES").status).toBe("missing");
+  });
+
+  it("reports available with the value for plaintext entries", () => {
+    writeFileSync(join(SECRETS_DIR, "PLAIN_RES"), "plain-result-value");
+    const r = readSecretResult("PLAIN_RES");
+    expect(r.status).toBe("available");
+    if (r.status === "available") expect(r.value).toBe("plain-result-value");
+  });
+
+  it("reports available for encrypted entries", () => {
+    writeSecret("ENC_RES", "enc-result-value");
+    clearSecretCache();
+    const r = readSecretResult("ENC_RES");
+    expect(r.status).toBe("available");
+    if (r.status === "available") expect(r.value).toBe("enc-result-value");
+  });
+
+  it("reports unsafe entries as unreadable without exposing content", () => {
+    writeFileSync(join(TEST_DIR, "target.txt"), "through-link");
+    try {
+      symlinkSync(join(TEST_DIR, "target.txt"), join(SECRETS_DIR, "LINKED_RES"));
+    } catch {
+      return; // symlinks unavailable (e.g. windows) — skip
+    }
+    const r = readSecretResult("LINKED_RES");
+    expect(r.status).toBe("unreadable");
+    expect(JSON.stringify(r)).not.toContain("through-link");
+  });
+
+  it("reports undecryptable entries as unreadable without exposing content", () => {
+    writeFileSync(join(SECRETS_DIR, "BAD_ENC_RES"), "ENC:" + Buffer.from("undecryptable-result-sentinel").toString("base64"));
+    const r = readSecretResult("BAD_ENC_RES");
+    expect(r.status).toBe("unreadable");
+    expect(JSON.stringify(r)).not.toContain("undecryptable-result-sentinel");
+  });
+
+  it("readSecret remains behaviorally compatible with the three-state result", () => {
+    expect(readSecretResult("MISSING_WRAP").status).toBe("missing");
+    expect(readSecret("MISSING_WRAP")).toBeUndefined();
+    writeFileSync(join(SECRETS_DIR, "WRAP_RES"), "wrap-value");
+    expect(readSecretResult("WRAP_RES").status).toBe("available");
+    expect(readSecret("WRAP_RES")).toBe("wrap-value");
+    writeFileSync(join(SECRETS_DIR, "WRAP_BAD"), "ENC:broken");
+    expect(readSecretResult("WRAP_BAD").status).toBe("unreadable");
+    expect(readSecret("WRAP_BAD")).toBeUndefined();
   });
 });
 

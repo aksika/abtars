@@ -8,7 +8,7 @@
  * before the bridge is spawned.
  */
 
-import { mkdirSync, writeFileSync, copyFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, copyFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -43,6 +43,27 @@ export const FIXTURE_MODEL_B = "fixture-model-b";
 export const FIXTURE_PROVIDER = "fixture";
 export const FIXTURE_API_KEY_ENV = "PI_FIXTURE_API_KEY";
 export const MASTER_USER_ID = "e2e-user-a";
+
+/**
+ * Fixture unix-socket link name and length ceiling (#1841 follow-up). The
+ * bridge connects through `<configDir>/<name>`, which must fit the macOS
+ * 104-char sun_path limit under ~50-char $TMPDIRs — the previous
+ * 20-char name put local-unix lanes at ~113 chars (connect EINVAL,
+ * misreported as a negotiation failure).
+ */
+export const FIXTURE_SOCKET_LINK_NAME = "fx.sock";
+export const FIXTURE_SOCKET_LINK_LIMIT = 100;
+
+export function fixtureSocketLinkPath(configDir: string): string {
+  const p = join(configDir, FIXTURE_SOCKET_LINK_NAME);
+  if (p.length > FIXTURE_SOCKET_LINK_LIMIT) {
+    throw new Error(
+      `Fixture abmind socket link exceeds ${FIXTURE_SOCKET_LINK_LIMIT} chars (${p.length}): ${p} — ` +
+      `shorten TMPDIR or the fixture prefix (macOS sun_path limit 104)`,
+    );
+  }
+  return p;
+}
 
 export interface BridgeConfigResult {
   abtarsHome: string;
@@ -98,8 +119,8 @@ export function buildBridgeConfig(
     maxToolRounds: 3,
     // #1531: the steer-followup run needs three consecutive provider turns on
     // the primary candidate (initial generation + two steered generations).
-    // The candidate-rotation limit must not force a fallback switch mid-run.
-    maxFallbackToolRounds: 3,
+    // #1932: maxFallbackToolRounds is retired and inert; the single
+    // configured candidate serves every turn.
   }, null, 2));
 
   // ── models.json — catalog consumed by /model quick and context resolution ─
@@ -143,13 +164,13 @@ export function buildBridgeConfig(
     // The production resolver requires the socket path to resolve inside the
     // config directory; the daemon socket lives in the controller fixture, so
     // a symlink keeps the endpoint config isolated and contained.
-    const link = join(configDir, "fixture-abmind.sock");
+    const link = fixtureSocketLinkPath(configDir);
     rmSync(link, { force: true });
     symlinkSync(descriptor.connection.socketPath, link);
     writeRestricted(join(configDir, "abmind.json"), JSON.stringify({
       version: 1,
       mode: "local",
-      socketPath: "fixture-abmind.sock",
+      socketPath: FIXTURE_SOCKET_LINK_NAME,
     }, null, 2));
   } else {
     const keyTarget = join(configDir, "abtars-user-a.pem");
@@ -191,19 +212,10 @@ const OS_ENV_ALLOWLIST = [
   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "CI", "TERM",
 ] as const;
 
-/**
- * True when the abmind package build carries the durable-context projection
- * capability required by the local lane (#1527). A stale dist silently
- * degrades the local route; the harness must block on it, never skip.
- */
-export function abmindPackageHasDurableContext(packageDir: string): boolean {
-  try {
-    const clientJs = join(packageDir, "dist", "src", "abmind-client.js");
-    if (!existsSync(clientJs)) return false;
-    return readFileSync(clientJs, "utf-8").includes("projectConversationContext");
-  } catch {
-    return false;
-  }
+/** True when the abmind package directory carries a built client. */
+function abmindPackageIsBuilt(packageDir: string): boolean {
+  return existsSync(join(packageDir, "package.json"))
+    && existsSync(join(packageDir, "dist", "src", "abmind-client.js"));
 }
 
 /**
@@ -211,13 +223,12 @@ export function abmindPackageHasDurableContext(packageDir: string): boolean {
  * would (ABMIND_PATH, npm global root, legacy location). The bridge child has
  * a sandboxed HOME, so the production strategies that depend on the real home
  * (npm root config, ~/.abmind/src, ~/.local) need the explicit ABMIND_PATH
- * override. Only packages carrying the durable-context client capability are
- * acceptable; anything else is treated as missing. Returns null when no
- * usable install exists.
+ * override. The preferred (workspace) root wins; an unbuilt package is
+ * treated as missing. Returns null when no usable install exists.
  */
 export function resolveAbmindPackageDir(preferredRoot?: string): string | null {
   const explicit = process.env["ABMIND_PATH"]?.trim();
-  if (explicit && existsSync(join(explicit, "package.json")) && abmindPackageHasDurableContext(explicit)) {
+  if (explicit && abmindPackageIsBuilt(explicit)) {
     return realpathSync(explicit);
   }
   const candidates = [
@@ -230,8 +241,7 @@ export function resolveAbmindPackageDir(preferredRoot?: string): string | null {
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
-      const pkg = join(candidate, "package.json");
-      if (existsSync(pkg) && abmindPackageHasDurableContext(candidate)) {
+      if (abmindPackageIsBuilt(candidate)) {
         return realpathSync(candidate);
       }
     } catch {
@@ -295,7 +305,6 @@ function buildBridgeEnv(
   env.LOG_FORMAT = "text";
   env.MEMORY = "abmind";
   env.ACTIVE_MEMORY = "false";
-  env.PRIMING_MODEL_TOPICS = "false";
   env.TUI_ENABLED = "true";
   env.TELEGRAM_ENABLED = "false";
   env.DISCORD_ENABLED = "false";
@@ -303,8 +312,7 @@ function buildBridgeEnv(
   env.ENABLE_AGENT_API = "false";
   env.ENABLE_ASYNC_DELEGATION = "true";
   env.SECURITY_MODE = "off";
-  env.TRUST_MODE = "true";
-  env.SELFHEAL_ENABLED = "false";
+  env.SELFHEAL_MODE = "off";
   env.SUPERVISION = "pi-e2e";
   env.MAX_AGENT_CALL_PER_HOUR = "10000";
   env.MAX_AGENT_CALL_PER_DAY = "100000";

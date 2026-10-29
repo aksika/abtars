@@ -4,15 +4,17 @@ Self-contained subsystems that register themselves at startup. Add features with
 
 ## How it works
 
-On boot, `discoverCapabilities()` scans `src/capabilities/` for directories with a `capability.json` manifest. Each is dynamically imported and its `register(api)` function called.
+On boot, capabilities register from a generated registry (built at bundle
+time from each capability's `capability.json` manifest plus its
+`register(api)` entrypoint). The parallel boot graph starts them once
+their dependencies resolve.
 
 ## Built-in capabilities
 
 | Capability | What it provides |
 |------------|-----------------|
-| **Browser** | Browsie subagent, B-type Kanban delivery, SSRF guard |
-| **Hotskills** | Live-reload skill files, eligibility gating via `requires` frontmatter |
-| **Sleep** | Dreamy spawn + retry, progress protocol |
+| **Hotskills** | Live-reload skill files, dependency preparation, and eligibility gating via `requires` frontmatter |
+| **Sleep** | Sleep-cycle dispatch + resume, daemon progress protocol |
 
 ## Adding a capability
 
@@ -39,7 +41,7 @@ What a capability can register:
 
 | Method | Purpose |
 |--------|---------|
-| `registerHeartbeatTask(name, fn)` | Runs every heartbeat tick (5 min) |
+| `registerHeartbeatTask(name, fn)` | Runs every heartbeat tick (60s) |
 | `registerCommand(name, handler)` | Chat command |
 | `registerService(name, service)` | Background service with start/stop lifecycle |
 | `runtime` | Access to SubagentRuntime for spawning agents |
@@ -48,13 +50,7 @@ What a capability can register:
 
 ```bash
 # ~/.abtars/config/.env
-DISABLED_CAPABILITIES=browser,hotskills
+DISABLED_CAPABILITIES=hotskills
 ```
 
 Comma-separated names. Disabled capabilities are skipped at discovery — zero overhead.
-
-## Replacing a capability
-
-1. Drop a new capability directory (e.g. `browser-v2/`)
-2. Disable the old one: `DISABLED_CAPABILITIES=browser`
-3. Restart — old one skipped, new one loads

@@ -1,10 +1,11 @@
-import { existsSync, lstatSync, accessSync, mkdirSync, readFileSync, constants as fsConstants } from "node:fs";
+import { existsSync, lstatSync, accessSync, mkdirSync, readFileSync, openSync, readSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve, join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { localDate } from "../../utils/date.js";
 import { logTaskTrace } from "./task-log-ctx.js";
+import { resolveTaskContractPath } from "./task-paths.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ToolExecutionScope } from "./task-package.js";
 
@@ -45,15 +46,6 @@ function substituteToday(raw: string): string {
   return raw.replace(/\{today\}/g, localDate());
 }
 
-function resolvePath(raw: string, taskId: string): string {
-  let p = raw.replace(/^~/, homedir());
-  p = substituteToday(p);
-  if (!p.startsWith("/")) {
-    p = join(abtarsHome(), "workspace", taskId, p);
-  }
-  return resolve(p);
-}
-
 function isBeneathApprovedRoot(resolved: string): boolean {
   for (const root of ALLOWED_ROOTS) {
     if (resolved.startsWith(root + "/") || resolved === root) return true;
@@ -75,7 +67,7 @@ export function preflightTask(
     return { ok: true };
   }
 
-  const resolvedArtifact = resolvePath(contract.artifact, taskId);
+  const resolvedArtifact = resolveTaskContractPath(contract.artifact, taskId);
   if (!isBeneathApprovedRoot(resolvedArtifact)) {
     return { ok: false, category: "definition_failed", code: "artifact_path_invalid", safeDetail: `artifact path escapes approved workspace: ${resolvedArtifact}` };
   }
@@ -90,7 +82,7 @@ export function preflightTask(
 
   const requiredFiles: Array<{ configured: string; resolved: string }> = [];
   for (const f of contract.requires.files) {
-    const resolved = resolvePath(f, taskId);
+    const resolved = resolveTaskContractPath(f, taskId);
     if (!existsSync(resolved)) {
       return { ok: false, category: "definition_failed", code: "required_file_missing", safeDetail: `required file not found: ${f}` };
     }
@@ -246,6 +238,33 @@ export function validateReportArtifact(
   if (content === undefined) {
     return { ok: false, code: "artifact_unreadable", reason: `cannot read artifact content` };
   }
+  return evaluateReportObservation(
+    { sizeBytes: stat.size, mtimeMs: stat.mtimeMs },
+    content,
+    baseline,
+    { minBytes: contract.minBytes, requiredSections: contract.requiredSections },
+    reservedAt,
+  );
+}
+
+/**
+ * #1791: the shared mechanical evaluator — metadata plus content checks with
+ * the exact codes, reasons, and precedence of `validateReportArtifact`
+ * (min-size → headings → baseline-unchanged → stale). Both the admission
+ * path (which stats + reads the file itself) and the review-capture path
+ * (which reads through a held descriptor) evaluate through here, so the two
+ * layers cannot disagree on what "valid" means.
+ */
+function evaluateReportObservation(
+  meta: { sizeBytes: number; mtimeMs: number },
+  content: string,
+  baseline: ArtifactBaseline | undefined,
+  contract: { minBytes: number; requiredSections: string[] },
+  reservedAt: number,
+): { ok: true; size: number } | { ok: false; code: string; reason: string } {
+  if (meta.sizeBytes < contract.minBytes) {
+    return { ok: false, code: "artifact_too_small", reason: `artifact too small: ${meta.sizeBytes} bytes (minimum ${contract.minBytes})` };
+  }
   for (const heading of contract.requiredSections) {
     if (!content.includes(heading)) {
       return { ok: false, code: "required_heading_missing", reason: `required heading not found: "${heading}"` };
@@ -254,18 +273,165 @@ export function validateReportArtifact(
 
   if (baseline) {
     if (baseline.existed) {
-      if (stat.size === baseline.size && stat.mtimeMs === baseline.mtimeMs) {
+      if (meta.sizeBytes === baseline.size && meta.mtimeMs === baseline.mtimeMs) {
         return { ok: false, code: "artifact_unchanged_baseline", reason: `artifact unchanged from baseline (same size and mtime)` };
       }
     }
   }
 
   const fsTolerance = 2000;
-  if (stat.mtimeMs < reservedAt - fsTolerance) {
-    return { ok: false, code: "artifact_stale_mtime", reason: `artifact mtime (${new Date(stat.mtimeMs).toISOString()}) is before reservation (${new Date(reservedAt).toISOString()})` };
+  if (meta.mtimeMs < reservedAt - fsTolerance) {
+    return { ok: false, code: "artifact_stale_mtime", reason: `artifact mtime (${new Date(meta.mtimeMs).toISOString()}) is before reservation (${new Date(reservedAt).toISOString()})` };
   }
 
-  return { ok: true, size: stat.size };
+  return { ok: true, size: meta.sizeBytes };
+}
+
+/**
+ * #1791: review-only capture bound. Larger than any legitimate briefing, far
+ * below the 1MB tool-result ceiling. Applies to review capture only — the
+ * admission validator keeps its unbounded behavior.
+ */
+export const REPORT_CAPTURE_MAX_BYTES = 65_536;
+
+export type ReportCaptureUnavailableCode =
+  | "report_read_failed"
+  | "report_changed_during_capture"
+  | "report_too_large"
+  | "report_encoding_invalid";
+
+export type ReportCaptureResult =
+  | { ok: true; content: string; digest: string; sizeBytes: number; mtimeMs: number }
+  | { ok: false; kind: "invalid"; code: string; reason: string }
+  | { ok: false; kind: "unavailable"; code: ReportCaptureUnavailableCode; reason: string };
+
+/**
+ * #1791: bounded, consistent capture of a declared report artifact for review
+ * evidence. Opens with no-follow/nonblocking flags so a raced FIFO cannot
+ * block the bridge, verifies a regular file on the descriptor, reads at most
+ * limit + 1 bytes, and re-inspects descriptor/path metadata afterward —
+ * detected replacement or modification refuses with an unavailable
+ * observation, never positive evidence from inconsistent reads. Content,
+ * digest, size, and validation always describe the same captured bytes: the
+ * mechanical evaluator runs over the captured buffer, never a reread.
+ */
+export function captureReportArtifact(
+  artifactPath: string,
+  contract: { minBytes: number; requiredSections: string[]; baseline?: ArtifactBaseline },
+  reservedAt: number,
+): ReportCaptureResult {
+  let preStat;
+  try {
+    preStat = lstatSync(artifactPath);
+  } catch {
+    return { ok: false, kind: "invalid", code: "artifact_not_found", reason: `artifact not found: ${artifactPath}` };
+  }
+  if (!preStat.isFile() || preStat.isSymbolicLink()) {
+    return { ok: false, kind: "invalid", code: "artifact_not_regular_file", reason: `artifact is not a regular file` };
+  }
+
+  let fd: number | undefined;
+  const closeQuiet = (): void => {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed — nothing to report */ }
+      fd = undefined;
+    }
+  };
+  try {
+    try {
+      fd = openSync(artifactPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ELOOP") {
+        return { ok: false, kind: "invalid", code: "artifact_not_regular_file", reason: `artifact is not a regular file` };
+      }
+      if (code === "ENOENT") {
+        return { ok: false, kind: "invalid", code: "artifact_not_found", reason: `artifact not found: ${artifactPath}` };
+      }
+      return { ok: false, kind: "unavailable", code: "report_read_failed", reason: `cannot open artifact: ${code ?? "unknown"}` };
+    }
+    const snap = fstatSync(fd);
+    if (!snap.isFile()) {
+      return { ok: false, kind: "invalid", code: "artifact_not_regular_file", reason: `artifact is not a regular file` };
+    }
+    if (snap.dev !== preStat.dev || snap.ino !== preStat.ino) {
+      return { ok: false, kind: "unavailable", code: "report_changed_during_capture", reason: `artifact replaced between stat and open` };
+    }
+    if (snap.size > REPORT_CAPTURE_MAX_BYTES) {
+      return { ok: false, kind: "unavailable", code: "report_too_large", reason: `artifact size ${snap.size} exceeds capture bound ${REPORT_CAPTURE_MAX_BYTES}` };
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const buf = Buffer.alloc(8192);
+    for (;;) {
+      // Never buffer more than limit + 1 bytes: the +1 distinguishes an
+      // exactly-at-limit report (accepted) from overflow (rejected).
+      const want = Math.min(buf.length, REPORT_CAPTURE_MAX_BYTES + 1 - total);
+      let n: number;
+      try {
+        n = readSync(fd, buf, 0, want, null);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        return { ok: false, kind: "unavailable", code: "report_read_failed", reason: `cannot read artifact: ${code ?? "unknown"}` };
+      }
+      if (n === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+      total += n;
+      if (total > REPORT_CAPTURE_MAX_BYTES) {
+        return { ok: false, kind: "unavailable", code: "report_too_large", reason: `artifact exceeds capture bound ${REPORT_CAPTURE_MAX_BYTES}` };
+      }
+    }
+    const data = Buffer.concat(chunks, total);
+
+    let postFd;
+    try {
+      postFd = fstatSync(fd);
+    } catch {
+      return { ok: false, kind: "unavailable", code: "report_read_failed", reason: `cannot restat artifact` };
+    }
+    let postPath;
+    try {
+      postPath = lstatSync(artifactPath);
+    } catch {
+      return { ok: false, kind: "unavailable", code: "report_changed_during_capture", reason: `artifact removed during capture` };
+    }
+    const consistent =
+      postFd.dev === snap.dev && postFd.ino === snap.ino &&
+      postFd.size === snap.size && postFd.mtimeMs === snap.mtimeMs && postFd.ctimeMs === snap.ctimeMs &&
+      postPath.dev === snap.dev && postPath.ino === snap.ino &&
+      postPath.size === snap.size && postPath.mtimeMs === snap.mtimeMs && postPath.ctimeMs === snap.ctimeMs;
+    if (!consistent) {
+      return { ok: false, kind: "unavailable", code: "report_changed_during_capture", reason: `artifact modified during capture` };
+    }
+
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(data);
+    } catch {
+      return { ok: false, kind: "unavailable", code: "report_encoding_invalid", reason: `artifact is not valid UTF-8` };
+    }
+
+    const evaluated = evaluateReportObservation(
+      { sizeBytes: data.length, mtimeMs: postFd.mtimeMs },
+      content,
+      contract.baseline,
+      { minBytes: contract.minBytes, requiredSections: contract.requiredSections },
+      reservedAt,
+    );
+    if (!evaluated.ok) {
+      return { ok: false, kind: "invalid", code: evaluated.code, reason: evaluated.reason };
+    }
+    return {
+      ok: true,
+      content,
+      digest: createHash("sha256").update(data).digest("hex"),
+      sizeBytes: data.length,
+      mtimeMs: postFd.mtimeMs,
+    };
+  } finally {
+    closeQuiet();
+  }
 }
 
 function readFileSyncSafe(p: string): string | undefined {

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 export type ToolBehaviorReason =
   | "exact_repeat"
   | "repeated_failure"
-  | "candidate_round_limit"
   | "prompt_round_limit";
 
 export class ToolBehaviorError extends Error {
@@ -16,9 +15,7 @@ export class ToolBehaviorError extends Error {
       ? `Tool loop: ${toolName} repeated 3x with identical arguments`
       : reason === "repeated_failure"
         ? `Tool loop: ${toolName} failed 3x consecutively`
-        : reason === "candidate_round_limit"
-          ? `Candidate round limit reached (${roundsUsed})`
-          : `Prompt round limit reached (${roundsUsed})`;
+        : `Prompt round limit reached (${roundsUsed})`;
     super(msg);
     this.reason = reason;
     this.toolName = toolName;

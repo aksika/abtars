@@ -1,23 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // #1629: mutable classify result — the boundary test needs an auth-required
 // command; every other test keeps the default "allow".
 const guardrailMocks = vi.hoisted(() => ({
-  classifyImpl: "allow" as "allow" | "auth-required",
+  classifyImpl: "allow" as "allow" | "auth-required" | "block",
 }));
 vi.mock("../guardrails.js", () => ({
-  checkCommand: () => null,
   classifyCommand: () => guardrailMocks.classifyImpl,
+  isRootScopeAllow: () => false,
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate } from "./tool-registry.js";
+import { getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setSendDocument, setHostToolService } from "./tool-registry.js";
+import { HostToolService } from "../host-tool-service.js";
+import { SealedSecretHandles } from "../sealed-secret-handles.js";
+import { _resetEnv } from "../env-schema.js";
+import type { ActionGate } from "../action-gate.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
-import { setUserRegistryOverride } from "../user-registry.js";
+import { setUserRegistryOverride, type UserEntry } from "../user-registry.js";
 
 function mockAbmindClient(caps: { methods: string[]; features: Record<string, string> }) {
   const { AbmindClient } = {} as any;
@@ -25,9 +29,18 @@ function mockAbmindClient(caps: { methods: string[]; features: Record<string, st
     capabilities: { version: 1, methods: caps.methods, domains: ["system", "private"], features: caps.features },
     privateMemory: {
       recordMessage: vi.fn().mockResolvedValue({ id: 42 }),
-      recall: vi.fn().mockResolvedValue({ results: [] }),
+      recall: vi.fn().mockResolvedValue({
+        contract: "owned-v1",
+        profile: "recall_normal",
+        packetId: "test",
+        status: "evidence",
+        items: [],
+        text: "",
+        effective: { maxItems: 15, maxOutputBytes: 12000, deadlineMs: 1500, policyVersion: "owned-v1" },
+        stageOutcomes: {},
+        omissionReasons: [],
+      }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
-      editMemory: vi.fn().mockResolvedValue({ ok: true }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       assembleSessionContext: vi.fn().mockResolvedValue({ wakeUp: "", recall: "", coreKnowledge: "", soulBundle: { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" } }),
       getRecentConversation: vi.fn().mockResolvedValue([]),
@@ -40,7 +53,42 @@ function mockAbmindClient(caps: { methods: string[]; features: Record<string, st
   return client;
 }
 
-describe("isBridgeSpawnCommand", () => {
+/** Structural protocol failure in the shape both clients now throw (#1659). */
+function structuredStoreError(code: string, message: string, stage: string): Error {
+  const action = code === "validation_error" ? "fix_input"
+    : code === "outcome_unknown" ? "reconcile"
+    : code === "conflict" ? "re_recall"
+    : code === "unavailable" ? "retry"
+    : "stop";
+  return Object.assign(new Error(message), {
+    name: "AbmindClientError",
+    code,
+    requestId: "test-request-id",
+    retryable: code === "unavailable",
+    action,
+    stage,
+  });
+}
+
+/** #1797: wire a real HostToolService — the registry no longer owns any
+ * Bash policy path, so execute_bash tests must go through the service. */
+function wireRealService(gate: ActionGate | null): void {
+  setHostToolService(new HostToolService({
+    handles: new SealedSecretHandles(),
+    actionGate: gate,
+    resolveHandle: (async () => null) as never,
+  }));
+}
+
+describe("bridge self-protection through wired execute_bash", () => {
+  beforeEach(() => {
+    wireRealService(null);
+  });
+
+  afterEach(() => {
+    setHostToolService(null);
+  });
+
   it.each([
     "node current/dist/main.js --all --web --agent",
     "node /Users/akos/.abtars/current/dist/main.js",
@@ -52,22 +100,17 @@ describe("isBridgeSpawnCommand", () => {
     "launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.abtars.watchdog.plist",
     "launchctl kickstart -k gui/501/com.abtars.watchdog",
     "launchctl start com.abtars.watchdog",
-  ])("blocks bridge-spawn command: %s", (cmd) => {
-    expect(isBridgeSpawnCommand(cmd)).toBe(true);
+  ])("rejects bridge-spawn command without executing: %s", async (cmd) => {
+    const result = await executeToolCall("execute_bash", { command: cmd }, { userId: "test", executionId: "e1" });
+    expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
   });
 
-  it.each([
-    "ls ~/.abtars/",
-    "cat bridge.lock",
-    "ps aux | grep node",
-    "tail -f logs/bridge.log",
-    "launchctl list | grep abtars",
-    "launchctl unload ~/Library/LaunchAgents/com.abtars.my-agent.plist",
-    "launchctl print gui/501/com.abtars.watchdog",
-    "git log --oneline",
-    "echo main is the branch",
-  ])("allows safe command: %s", (cmd) => {
-    expect(isBridgeSpawnCommand(cmd)).toBe(false);
+  it("still runs a safe command containing a blocked substring", async () => {
+    // The other former predicate-allow cases (tail -f, launchctl unload,
+    // …) cannot be executed safely, so only the over-block property that is
+    // provable without side effects is kept here.
+    const result = await executeToolCall("execute_bash", { command: "echo main is the branch" }, { userId: "test", executionId: "e1" });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0 });
   });
 });
 
@@ -132,8 +175,9 @@ describe("executeToolCall", () => {
   });
 
   it("runs bash inside an explicit task scope without mutating the parent environment (#1502 Task 10)", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "abtars-task-scope-"));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "abtars-task-scope-")));
     const before = process.env["WORKSPACE"];
+    wireRealService(null);
     try {
       delete process.env["WORKSPACE"];
       const result = await executeToolCall("execute_bash", {
@@ -147,6 +191,7 @@ describe("executeToolCall", () => {
       expect(parsed.stdout.trim().split("\n")).toEqual([cwd, cwd]);
       expect(process.env["WORKSPACE"]).toBeUndefined();
     } finally {
+      setHostToolService(null);
       if (before === undefined) delete process.env["WORKSPACE"];
       else process.env["WORKSPACE"] = before;
       rmSync(cwd, { recursive: true, force: true });
@@ -154,78 +199,8 @@ describe("executeToolCall", () => {
   });
 });
 
-describe("shell syntax pre-validation (#1595)", () => {
-  it("rejects a malformed trailing 2>& without executing, with a correction hint and untouched audit fields", async () => {
-    const result = await executeToolCall("execute_bash", { command: "tail -f /var/log/x 2>&" }, { userId: "test" });
-    const parsed = JSON.parse(result) as {
-      error?: string; exit_code?: number; syntax_hint?: string;
-      command_fingerprint?: string; command_preview?: string; stderr?: string;
-    };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.exit_code).toBe(2);
-    expect(parsed.syntax_hint).toContain("2>&1");
-    expect(parsed.command_preview).toBe("tail -f /var/log/x 2>&");
-    expect(parsed.command_fingerprint).toMatch(/^[0-9a-f]{16}$/);
-    expect(parsed.stderr).toContain("syntax error");
-  });
-
-  it("does not run side effects from a syntactically invalid command", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "abtars-syntax-side-effect-"));
-    const marker = join(cwd, "must-not-exist");
-    try {
-      const result = await executeToolCall("execute_bash", {
-        command: `printf touched > ${JSON.stringify(marker)} 2>&`,
-      }, { userId: "test", executionScope: { cwd, env: Object.freeze({}) } });
-      expect(JSON.parse(result)).toMatchObject({ error: "shell_syntax_error" });
-      expect(existsSync(marker)).toBe(false);
-    } finally {
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects other malformed syntax with a structured error and no execution side effect", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo 'unterminated" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-  });
-
-  it("does not emit the 2>&1 hint for truncations that are not stderr redirects", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo hi >" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.syntax_hint).toBeUndefined();
-  });
-
-  it("does not guess a correction for the out-of-scope 1>& family", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo hi 1>&" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.syntax_hint).toBeUndefined();
-  });
-
-  it("still executes valid redirects unchanged (2>&1, 2>&2, 2>&-)", async () => {
-    for (const suffix of ["2>&1", "2>&2", "2>&-"]) {
-      const result = await executeToolCall("execute_bash", { command: `echo ok ${suffix} >/dev/null` }, { userId: "test" });
-      const parsed = JSON.parse(result) as { error?: string; exit_code?: number };
-      expect(parsed.error).toBeUndefined();
-      expect(parsed.exit_code).toBe(0);
-    }
-  });
-
-  it("does not rewrite quoted or heredoc content", async () => {
-    const result = await executeToolCall("execute_bash", { command: "cat << 'EOF'\n2>& is literal text here\nEOF" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
-    expect(parsed.exit_code).toBe(0);
-    expect(parsed.stdout).toContain("2>& is literal text here");
-  });
-
-  it("does not rewrite commands whose syntax is valid even with redirects mid-command", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo a > /tmp/x 2>&1; echo done" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
-    expect(parsed.exit_code).toBe(0);
-    expect(parsed.stdout).toContain("done");
-  });
-});
+// #1797: syntax pre-validation now lives in HostToolService — its cases moved
+// to host-tool-service.test.ts and run through service.runBash.
 
 // #1266/#1507: when no memory runtime is wired, memory_* tools return
 // clear non-retryable results rather than shelling out to a CLI on PATH.
@@ -255,15 +230,6 @@ describe("memory tools with no runtime wired (#1266 / #1507)", () => {
     expect(parsed.code).toBe("private_write_unavailable");
     expect(parsed.retryable).toBe(false);
     expect(parsed.stored).toBe(false);
-  });
-
-  it("memory_edit returns private_write_unavailable, no RPC", async () => {
-    const tool = getToolDefinitions().find(t => t.name === "memory_edit");
-    expect(tool).toBeDefined();
-    const result = await tool!.execute({ memory_id: "1" }, storeContext());
-    const parsed = JSON.parse(result);
-    expect(parsed.code).toBe("private_write_unavailable");
-    expect(parsed.retryable).toBe(false);
   });
 
   it("executeToolCall routes to the same null-runtime path", async () => {
@@ -318,7 +284,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     };
     const db = new Database(join(quotaDir, "quota.db"));
     try {
-      return db.prepare("SELECT COUNT(*) AS n FROM memory_store_quota_reservations").get().n as number;
+      return db.prepare("SELECT COUNT(*) AS n FROM memory_store_quota_reservations").get()!.n as number;
     } finally {
       db.close();
     }
@@ -328,7 +294,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     const client = mockAbmindClient({
       methods: [
         "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+        "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
       ],
       features: { private_read: "true", private_write: "false" },
     });
@@ -357,14 +323,6 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(countQuotaRows()).toBe(0);
     });
 
-    it("memory_edit returns private_write_unavailable, no RPC", async () => {
-      const result = await executeToolCall("memory_edit", { memory_id: "1", translated: "updated" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.code).toBe("private_write_unavailable");
-      expect(parsed.retryable).toBe(false);
-      expect(client.privateMemory.editMemory).not.toHaveBeenCalled();
-    });
-
     it("memory_recall still dispatches", async () => {
       const result = await executeToolCall("memory_recall", { query: "apples" }, storeContext());
       const parsed = JSON.parse(result);
@@ -384,7 +342,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     const client = mockAbmindClient({
       methods: [
         "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+        "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
       ],
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
     });
@@ -401,25 +359,13 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(1);
     });
 
-    it("memory_edit dispatches normally", async () => {
-      const result = await executeToolCall("memory_edit", { memory_id: "1", expected_revision: "1", translated: "updated" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.ok).toBe(true);
-      expect(client.privateMemory.editMemory).toHaveBeenCalledTimes(1);
-    });
-
-    it("genuine store error still produces generic error result", async () => {
+    it("genuine store error surfaces as a structured failure, never a bare error string", async () => {
       client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
       const result = await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext());
       const parsed = JSON.parse(result);
-      expect(parsed.error).toMatch(/disk full/);
-    });
-
-    it("genuine edit error still produces generic error result", async () => {
-      client.privateMemory.editMemory = vi.fn().mockRejectedValue(new Error("not found"));
-      const result = await executeToolCall("memory_edit", { memory_id: "999", expected_revision: "1" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.error).toMatch(/not found/);
+      expect(parsed.stored).toBe(false);
+      expect(parsed.code).toBe("unknown");
+      expect(parsed.message).toMatch(/disk full/);
     });
   });
 
@@ -432,7 +378,7 @@ describe("memory tools with runtime wired (#1507)", () => {
       client = mockAbmindClient({
         methods: [
           "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-          "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+          "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
         ],
         features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
       });
@@ -456,34 +402,83 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(countQuotaRows()).toBe(20);
     });
 
-    it("A: a stored:false result releases the reservation so it does not count", async () => {
+    it("A: a definitive validation rejection releases the reservation so it does not count", async () => {
       client.privateMemory.instantStore = vi.fn()
-        .mockResolvedValueOnce({ stored: false, error: "rejected by backend" })
+        .mockRejectedValueOnce(structuredStoreError("validation_error", "rejected by backend", "pre_dispatch"))
         .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
       const first = JSON.parse(await executeToolCall("memory_store", { translated: "rejected", type: "fact" }, storeContext()));
       expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_validation");
+      expect(first.stage).toBe("pre_dispatch");
+      expect(first.retryable).toBe(false);
       expect(countQuotaRows()).toBe(0);
       const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
       expect(second.stored).toBe(true);
       expect(countQuotaRows()).toBe(1);
     });
 
-    it("A: a known thrown failure after retry handling releases the reservation", async () => {
+    it("A: an unclassified thrown error after invoking the client commits conservatively", async () => {
       client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
       const result = JSON.parse(await executeToolCall("memory_store", { translated: "boom", type: "fact" }, storeContext()));
-      expect(result.error).toMatch(/disk full/);
-      expect(countQuotaRows()).toBe(0);
+      expect(result.stored).toBe(false);
+      expect(result.code).toBe("unknown");
+      expect(result.message).toMatch(/disk full/);
+      expect(result.stage).toBe("response");
+      // The mutation may have been accepted — the slot is committed, never
+      // released on the assumption it failed (#1659).
+      expect(countQuotaRows()).toBe(1);
     });
 
-    it("A: FTS corruption rebuild/retry stays inside one reservation and commits once", async () => {
+    it("A: a proven pre-dispatch unavailable releases the reservation", async () => {
       client.privateMemory.instantStore = vi.fn()
-        .mockRejectedValueOnce(new Error("fts5: disk I/O error"))
+        .mockRejectedValueOnce(structuredStoreError("unavailable", "could not connect to daemon", "pre_dispatch"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      const first = JSON.parse(await executeToolCall("memory_store", { translated: "pre", type: "fact" }, storeContext()));
+      expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_unavailable");
+      expect(first.retryable).toBe(true);
+      expect(countQuotaRows()).toBe(0);
+      const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
+      expect(second.stored).toBe(true);
+      expect(countQuotaRows()).toBe(1);
+    });
+
+    it("A: an outcome-unknown store commits the reservation conservatively", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("outcome_unknown", "dispatch outcome unknown", "response"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      const first = JSON.parse(await executeToolCall("memory_store", { translated: "uncertain", type: "fact" }, storeContext()));
+      expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_outcome_unknown");
+      expect(first.action).toBe("reconcile");
+      expect(countQuotaRows()).toBe(1);
+      const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
+      expect(second.stored).toBe(true);
+      expect(countQuotaRows()).toBe(2);
+    });
+
+    it("A: FTS corruption rebuild/retry runs only for a definitive typed pre-dispatch FTS failure", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("unavailable", "fts5: disk I/O error", "pre_dispatch"))
         .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
       client.privateMemory.rebuildFtsIndexes = vi.fn().mockResolvedValue({ rebuilt: ["memories"] });
       const result = JSON.parse(await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext()));
       expect(result.stored).toBe(true);
       expect(client.privateMemory.rebuildFtsIndexes).toHaveBeenCalledTimes(1);
       expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(2);
+      expect(countQuotaRows()).toBe(1);
+    });
+
+    it("A: an unknown post-dispatch message never triggers the FTS rebuild retry", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("outcome_unknown", "fts5 corruption possible after timeout", "response"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      client.privateMemory.rebuildFtsIndexes = vi.fn().mockResolvedValue({ rebuilt: ["memories"] });
+      const result = JSON.parse(await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext()));
+      expect(result.stored).toBe(false);
+      expect(result.code).toBe("memory_outcome_unknown");
+      expect(client.privateMemory.rebuildFtsIndexes).not.toHaveBeenCalled();
+      expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(1);
       expect(countQuotaRows()).toBe(1);
     });
 
@@ -574,14 +569,22 @@ describe("memory tools with runtime wired (#1507)", () => {
 describe("execute_bash — #1629 trusted authorization mode", () => {
   beforeEach(() => {
     guardrailMocks.classifyImpl = "allow";
-    setActionGate(null);
+    process.env["SECURITY_MODE"] = "guardrails";
+    _resetEnv();
+    wireRealService(null);
+  });
+
+  afterEach(() => {
+    setHostToolService(null);
+    delete process.env["SECURITY_MODE"];
+    _resetEnv();
   });
 
   function fakeGate() {
     const calls: Array<{ category: string; detail: string; options: { mode?: string } }> = [];
     const requestAuth = vi.fn(async (category: string, detail: string, options: { mode?: string }) => {
       calls.push({ category, detail, options });
-      return true;
+      return { granted: true, by: "once" };
     });
     return { requestAuth, calls };
   }
@@ -589,7 +592,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("carries the trusted mode from the execution context to ActionGate and executes", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     const result = await executeToolCall("execute_bash", { command: "echo boundary-out" }, {
       userId: "test",
       authorizationMode: "unattended-task",
@@ -605,7 +608,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("a missing context mode fails closed to interactive (no unattended grant)", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     await executeToolCall("execute_bash", { command: "echo boundary-out" }, { userId: "test" });
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
   });
@@ -613,7 +616,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("tool arguments cannot set or override the authorization mode", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     // A forged extra argument named authorizationMode must be ignored: the
     // mode is read only from the trusted ToolExecutionContext.
     await executeToolCall("execute_bash", {
@@ -622,5 +625,331 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
     }, { userId: "test" });
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
   });
+
+  it("unrestricted sleep bypasses classifier blocks, bridge protection, and ActionGate", async () => {
+    guardrailMocks.classifyImpl = "block";
+    const result = await executeToolCall("execute_bash", { command: "printf '%s' main.js" }, {
+      userId: "test",
+      authorizationMode: "unattended-sleep",
+    });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0, stdout: "main.js" });
+  });
+
+  it("unrestricted sleep does not invoke ActionGate for an auth-required command", async () => {
+    guardrailMocks.classifyImpl = "auth-required";
+    const gate = fakeGate();
+    wireRealService(gate as unknown as ActionGate);
+    const result = await executeToolCall("execute_bash", { command: "printf '%s' sleep-unrestricted" }, {
+      userId: "test",
+      authorizationMode: "unattended-sleep",
+    });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0, stdout: "sleep-unrestricted" });
+    expect(gate.calls).toHaveLength(0);
+  });
 });
 
+// ── #1663 send_document denial at the shared execution boundary ───────────
+
+describe("send_document — #1663 unattended scheduled execution denial", () => {
+  let sendSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    sendSpy = vi.fn().mockResolvedValue(12345);
+    setSendDocument(sendSpy as never);
+  });
+
+  afterEach(() => {
+    setSendDocument(null);
+    vi.clearAllMocks();
+  });
+
+  it("denies send_document before the platform callback for unattended-task executions", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md", caption: "Daily Briefing" }, {
+      userId: "test",
+      authorizationMode: "unattended-task",
+    });
+    const parsed = JSON.parse(result) as { error?: string; reason?: string };
+    expect(parsed.error).toContain("send_document");
+    expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("repeated unattended attempts stay side-effect free", async () => {
+    for (let i = 0; i < 3; i++) {
+      const result = await executeToolCall("send_document", { path: `/tmp/report-${i}.md` }, {
+        userId: "test",
+        authorizationMode: "unattended-task",
+      });
+      const parsed = JSON.parse(result) as { reason?: string };
+      expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    }
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("denies delivery when scheduled provenance is unverified", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md" }, {
+      userId: "test",
+      authorizationMode: "unverified",
+    });
+    const parsed = JSON.parse(result) as { reason?: string };
+    expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("a forged authorizationMode tool argument cannot override the trusted context", async () => {
+    const result = await executeToolCall("send_document", {
+      path: "/tmp/report.md",
+      authorizationMode: "interactive",
+    }, {
+      userId: "test",
+      authorizationMode: "unattended-task",
+    });
+    expect(JSON.parse(result).reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("interactive executions still reach the injected platform callback", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md", caption: "hi" }, {
+      userId: "test",
+      authorizationMode: "interactive",
+    });
+    expect(JSON.parse(result)).toEqual({ ok: true, message_id: 12345 });
+    expect(sendSpy).toHaveBeenCalledOnce();
+    expect(sendSpy).toHaveBeenCalledWith("/tmp/report.md", "hi");
+  });
+
+  it("a missing authorization mode preserves interactive compatibility", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md" }, {
+      userId: "test",
+    });
+    expect(JSON.parse(result).ok).toBe(true);
+    expect(sendSpy).toHaveBeenCalledOnce();
+  });
+});
+
+// ── #1790 peer recall cap: real handler + real temporary peer config ────────
+// Only the memory client boundary is mocked; the cap is captured from the
+// outgoing recall request. Proves abtars policy wiring, not backend filtering.
+
+describe("memory_recall peer clearance cap (#1790)", () => {
+  let homeDir: string;
+  let savedHome: string | undefined;
+  let quotaDir: string;
+  let quota: MemoryStoreQuota;
+  let holder: MemoryToolDependenciesHolder;
+  let client: ReturnType<typeof mockAbmindClient>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    savedHome = process.env.ABTARS_HOME;
+    homeDir = mkdtempSync(join(tmpdir(), "abtars-peer-cap-"));
+    mkdirSync(join(homeDir, "config"), { recursive: true });
+    writeFileSync(join(homeDir, "config", "peers.json"), JSON.stringify({
+      self: { name: "kp-test", signingKey: "k", tribeToken: "t" },
+      peers: {
+        plain: { host: "10.0.0.1", port: 7100, verifyKey: "k1" },
+        low: { host: "10.0.0.2", port: 7100, verifyKey: "k2", maxClass: 1 },
+        conf: { host: "10.0.0.3", port: 7100, verifyKey: "k3", maxClass: 2 },
+        sealed: { host: "10.0.0.4", port: 7100, verifyKey: "k4", maxClass: 3 },
+        molty: { host: "10.0.0.5", port: 7100, verifyKey: "k5", maxClass: 1 },
+        Molty: { host: "10.0.0.6", port: 7100, verifyKey: "k6", maxClass: 2 },
+      },
+    }));
+    process.env.ABTARS_HOME = homeDir;
+    const { clearPeerConfigCache } = await import("../peer-config.js");
+    clearPeerConfigCache();
+    quotaDir = mkdtempSync(join(tmpdir(), "abtars-tool-quota-"));
+    quota = new MemoryStoreQuota({ dbPath: join(quotaDir, "quota.db") });
+    holder = { current: null as unknown as NonNullable<MemoryToolDependenciesHolder["current"]> };
+    client = mockAbmindClient({
+      methods: ["private.recall"],
+      features: { private_read: "true", private_write: "false" },
+    });
+    holder.current = { runtime: createClientRuntime(client as never), quota };
+    // A colliding users.json entry must lose to the peer lookup; the human
+    // entries pin the unchanged non-peer behavior.
+    const colliding: UserEntry = { userId: "peer:molty", role: "user", maxClass: 0, tools: [], platforms: {} };
+    const master: UserEntry = { userId: "master-1", role: "master", maxClass: 1, tools: [], platforms: {} };
+    setUserRegistryOverride({
+      users: [colliding, master],
+      byPlatformId: new Map(),
+      byUserId: new Map([["peer:molty", colliding], ["master-1", master]]),
+    });
+  });
+
+  afterEach(async () => {
+    const { clearPeerConfigCache } = await import("../peer-config.js");
+    clearPeerConfigCache();
+    if (savedHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = savedHome;
+    quota.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
+    holder.current = null;
+    setUserRegistryOverride(null);
+  });
+
+  function lastRecallRequest(): unknown {
+    const calls = vi.mocked(client.privateMemory.recall).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1]![0];
+  }
+
+  async function recallAs(userId: string, args: Record<string, unknown> = { query: "q" }) {
+    const raw = await executeToolCall("memory_recall", args, { userId, sessionType: "A", memoryToolDeps: holder });
+    const parsed = JSON.parse(raw) as { hits?: unknown };
+    expect(parsed.hits).toBeDefined();
+  }
+
+  it("absent maxClass recalls at 0, not the old fixed-1 fallback", async () => {
+    await recallAs("peer:plain");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:plain" }, filters: { classificationCeiling: 0 } });
+  });
+
+  it("unknown peer recalls at 0", async () => {
+    await recallAs("peer:nobody");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:nobody" }, filters: { classificationCeiling: 0 } });
+  });
+
+  it("explicit maxClass 1 and 2 forward unchanged", async () => {
+    await recallAs("peer:low");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:low" }, filters: { classificationCeiling: 1 } });
+    await recallAs("peer:conf");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:conf" }, filters: { classificationCeiling: 2 } });
+  });
+
+  it("declared maxClass 3 recalls at 2 — SECRET never leaves", async () => {
+    await recallAs("peer:sealed");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:sealed" }, filters: { classificationCeiling: 2 } });
+  });
+
+  it("peer lookup is case-sensitive and wins over a colliding user-registry ID", async () => {
+    await recallAs("peer:molty");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:molty" }, filters: { classificationCeiling: 1 } });
+    await recallAs("peer:Molty");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:Molty" }, filters: { classificationCeiling: 2 } });
+  });
+
+  it("configured-human and unknown-human behavior is unchanged", async () => {
+    await recallAs("master-1");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "master-1" }, filters: { classificationCeiling: 1 } });
+    await recallAs("stranger");
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "stranger" }, filters: { classificationCeiling: 1 } });
+  });
+
+  it("model-supplied maxClass/userId arguments cannot override context/config", async () => {
+    await recallAs("peer:low", { query: "q", maxClassification: 3, userId: "peer:conf" });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:low" }, filters: { classificationCeiling: 1 } });
+  });
+});
+
+describe("memory_recall keyword contract (#1928)", () => {
+  let quotaDir: string;
+  let quota: MemoryStoreQuota;
+  let holder: MemoryToolDependenciesHolder;
+  let client: { privateMemory: { recall: ReturnType<typeof vi.fn> } };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    quotaDir = mkdtempSync(join(tmpdir(), "abtars-tool-keywords-"));
+    quota = new MemoryStoreQuota({ dbPath: join(quotaDir, "quota.db") });
+    holder = { current: null as unknown as NonNullable<MemoryToolDependenciesHolder["current"]> };
+    const mock = mockAbmindClient({
+      methods: ["private.recall"],
+      features: { private_read: "true", private_write: "false" },
+    });
+    client = mock as unknown as { privateMemory: { recall: ReturnType<typeof vi.fn> } };
+    holder.current = { runtime: createClientRuntime(mock as never), quota };
+    setUserRegistryOverride({
+      users: [{ userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }],
+      byPlatformId: new Map(),
+      byUserId: new Map([["master-1", { userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }]]),
+    });
+  });
+
+  afterEach(() => {
+    quota.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+    holder.current = null;
+    setUserRegistryOverride(null);
+  });
+
+  function ctx() {
+    return { userId: "master-1", sessionType: "A" as const, memoryToolDeps: holder };
+  }
+
+  function lastRecallRequest(): unknown {
+    const calls = client.privateMemory.recall.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1]![0];
+  }
+
+  it("keyword-only calls work without query and cross verbatim as the explicit anchor", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["Migration", "AND", "rollback", "rollback"] }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    // Case, order, duplicates, and literal boolean words survive; no cap.
+    expect(lastRecallRequest()).toMatchObject({
+      contract: "owned-v1",
+      profile: "recall_normal",
+      query: { keywords: ["Migration", "AND", "rollback", "rollback"] },
+    });
+  });
+
+  it("explicit tools default to normal and accept full", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["x"], profile: "recall_full" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ profile: "recall_full" });
+    const bad = await executeToolCall("memory_recall", { keywords: ["x"], profile: "recall_fast" }, ctx());
+    expect(JSON.parse(bad).error).toMatch(/recall_normal or recall_full/);
+  });
+
+  it("query-only calls take the deprecated split path", async () => {
+    const raw = await executeToolCall("memory_recall", { query: "Which staging rollback?" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    // Unicode word runs, no stoplist/ASCII filter, short tokens preserved.
+    expect(lastRecallRequest()).toMatchObject({
+      query: { keywords: ["Which", "staging", "rollback"] },
+    });
+  });
+
+  it("present keywords win over query", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["zebra"], query: "apples" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ query: { keywords: ["zebra"] } });
+  });
+
+  it("invalid keywords are an argument error, never a fallback to query", async () => {
+    for (const args of [
+      { keywords: [], query: "apples" },
+      { keywords: ["ok", "  "], query: "apples" },
+      { keywords: "apples", query: "apples" },
+    ]) {
+      const raw = await executeToolCall("memory_recall", args, ctx());
+      expect(JSON.parse(raw).error).toMatch(/keywords must be a non-empty array/);
+    }
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("missing and empty queries are argument errors", async () => {
+    for (const args of [{}, { query: "  !!!  " }, { query: 42 }]) {
+      const raw = await executeToolCall("memory_recall", args, ctx());
+      expect(JSON.parse(raw).error).toMatch(/keywords or query|no keywords/);
+    }
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("oversize keyword arrays are never silently capped", async () => {
+    const keywords = Array.from({ length: 24 }, (_, i) => `term${i}`);
+    const raw = await executeToolCall("memory_recall", { keywords }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ query: { keywords } });
+  });
+
+  it("schema presents keywords preferred and query no longer universally required", () => {
+    const tool = getToolDefinitions().find((t) => t.name === "memory_recall");
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as { required?: string[]; properties?: Record<string, unknown> };
+    expect(params.required ?? []).not.toContain("query");
+    expect(params.properties?.["keywords"]).toBeDefined();
+  });
+});

@@ -10,11 +10,15 @@ import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn, logDebug, redactSecrets } from "../logger.js";
+import { logSwarmTrace } from "../swarm-trace.js";
 import { isValidSessionType } from "../spin-profiles.js";
 import { initTaskStateSchema } from "./task-state-schema.js";
+import { initTaskHistorySchema } from "./task-history-schema.js";
+import { initWorkflowSchema } from "../orc-project/workflow-schema.js";
+import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T; close(): void };
 
 /** #1393 — Typed capability for components that need durable SQLite access alongside kanban. */
 export interface TaskDatabase {
@@ -25,6 +29,9 @@ export interface TaskDatabase {
   };
   exec(sql: string): void;
   transaction<T>(fn: () => T): T;
+  /** #1688: IMMEDIATE transaction that composes with the caller's transaction
+   * via savepoints (better-sqlite3). Used by the SHA store for admission. */
+  transactionImmediate<T>(fn: () => T): T;
 }
 
 /** #1393 — Get the canonical task database. Throws if unavailable (fail-explicit for Pi). */
@@ -42,6 +49,10 @@ export function requireTaskDatabase(): TaskDatabase {
     },
     exec(sql: string) { d.exec(sql); },
     transaction<T>(fn: () => T): T { return d.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T {
+      const tx = d.transaction(fn) as unknown as { immediate(): T };
+      return tx.immediate();
+    },
   };
 }
 
@@ -82,12 +93,23 @@ export interface KanbanCard {
   delivery_ready: number;
   /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
   max_agents: number | null;
+  /** #1539: durable retry counter; written by kanbanRetryOrFail, preserved by kanbanPromoteDueRetry. */
+  retry_count: number;
   /** #1539: durable retry backoff marker; only cleared by the promotion helper. */
   next_retry_at: string | null;
+  /** #907: debounced worker-progress snapshot (JSON string); written by kanbanProgress, read by nobody. */
+  progress: string | null;
 }
 
 let _db: SqliteDb | null = null;
 let _dbAttempted = false;
+
+/** Close the cached board handle so an in-process restart can reopen or nuke it safely. */
+export function closeTaskDatabase(): void {
+  _db?.close();
+  _db = null;
+  _dbAttempted = false;
+}
 
 /**
  * #1631: the production kanban_board bootstrap, extracted so test fixtures can
@@ -123,24 +145,24 @@ export function ensureKanbanBoardSchema(database: { exec(sql: string): void }): 
       completed_at TEXT,
       delivered_at TEXT
     )`);
-    // Migrations — safe to re-run (silently skip if column exists)
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
+    // Migrations — safe to re-run (duplicate-column failures are expected)
+    addColumnIfMissing(database, "kanban_board", "max_tokens INTEGER");
+    addColumnIfMissing(database, "kanban_board", "max_cost REAL");
+    addColumnIfMissing(database, "kanban_board", "tokens_used INTEGER DEFAULT 0");
+    addColumnIfMissing(database, "kanban_board", "progress TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_mode TEXT DEFAULT 'deliver'");
+    addColumnIfMissing(database, "kanban_board", "retry_count INTEGER DEFAULT 0");
+    addColumnIfMissing(database, "kanban_board", "next_retry_at TEXT");
+    addColumnIfMissing(database, "kanban_board", "chat_id TEXT");
+    addColumnIfMissing(database, "kanban_board", "source_peer TEXT");
+    addColumnIfMissing(database, "kanban_board", "goal TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_claimed_at TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))");
+    addColumnIfMissing(database, "kanban_board", "delivery_receipt TEXT");
     // #1516: durable per-project agent cap (scheduled orchestration policy)
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
+    addColumnIfMissing(database, "kanban_board", "max_agents INTEGER");
     // #1516: project acceptance happens before scheduled artifact validation.
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
+    addColumnIfMissing(database, "kanban_board", "delivery_ready INTEGER NOT NULL DEFAULT 1");
 }
 
 function db(): SqliteDb | null {
@@ -169,9 +191,18 @@ function db(): SqliteDb | null {
     )`);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
       ON kanban_card_transitions(card_id, id)`);
+    // #1778: durable peer-callback outbox — intents commit atomically with
+    // the card terminal they report.
+    ensurePeerCallbackOutboxSchema(wrapTaskDatabase(_db));
     // #1601: durable scheduled-run state lives in the same shared database.
     // Idempotent DDL + one-time JSON migration, inside the same open path.
     initTaskStateSchema(wrapTaskDatabase(_db));
+    // #1568: bounded, indexed run-history table. After task-state init because
+    // the retention exclusion queries task_runs.
+    initTaskHistorySchema(wrapTaskDatabase(_db));
+    // #1792: durable workflow-runner sibling tables (same shared database,
+    // same open path; task_runs/worker_attempts ownership unchanged).
+    initWorkflowSchema(wrapTaskDatabase(_db));
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -212,10 +243,13 @@ export type TransitionActor =
   | "pi_run_settle"         // pi-run-store 317/322
   | "pi_run_dispatch"       // pi-run-store 518
   | "pi_resume_generation"  // pi-run-store 574 (queueResumeGeneration)
+  | "pi_interrupt"          // pi-run-store 590 (interruptGeneration)
   | "restart_recovery"      // pi-run-store 626
   | "pi_origin_projection"  // boot/phase-pi-executor 105
   | "budget_enforcement"    // reconciler 1015
-  | "stale_repair";         // doctor-fixes 166
+  | "stale_repair"          // doctor-fixes 166
+  | "retry_requeue"         // retry-store successor allocation (#1644)
+  | "workflow-runner";      // orc-workflow-runner terminal projections (#1792)
 
 export interface TransitionRequest {
   readonly cardId: number;
@@ -228,6 +262,12 @@ export interface TransitionRequest {
   /** Correlates to worker_attempts when the mover is a supervised attempt. */
   readonly attemptId?: string;
   readonly claimGeneration?: number;
+  /**
+   * #1778: peer delivery obligation queued atomically with a won terminal.
+   * Only an applied transition queues — reasserted or lost CAS queue
+   * nothing, so duplicate terminal observations never duplicate delivery.
+   */
+  readonly outboxCallback?: PeerCallbackIntent;
   /**
    * Columns co-written in the SAME statement as the status change. Keys are
    * restricted to the whitelist; values are bound parameters, never
@@ -321,6 +361,33 @@ const MAX_TRANSITIONS_PER_CARD = 200;
 const MAX_JOURNAL_REASON = 300;
 
 /**
+ * #1799 — runner-root promotion predicate. Pins the exact live workflow run
+ * (identity, nonterminal state, scheduled-run authority) and the exact
+ * supervision generation/state at the card CAS, so a cancellation, a
+ * supervision generation change, or a scheduled-run completion committed
+ * before the CAS wins the race instead. Bound parameters, in order:
+ * [supervision generation, workflow run id, scheduled run id or null].
+ *
+ * The scheduled/non-scheduled split mirrors the existing #1644 identity
+ * rule: `source = 'task'` marks a scheduled root ONLY together with a
+ * durable source_id; a plain supervised project whose source string is
+ * 'task' but which carries no scheduled run identity takes the
+ * non-scheduled branch (which additionally requires wr.scheduled_run_id
+ * IS NULL).
+ */
+export const RUNNER_ROOT_RUNNING_PREDICATE =
+  "type = 'O'" +
+  " AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id" +
+  " AND ps.generation = ? AND ps.state IN ('executing', 'repairing'))" +
+  " AND EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.run_id = ? AND wr.root_card_id = kanban_board.id" +
+  " AND wr.scheduled_run_id IS ? AND wr.state NOT IN ('succeeded', 'failed', 'cancelled')" +
+  " AND ((kanban_board.source = 'task' AND kanban_board.source_id IS NOT NULL" +
+  " AND length(kanban_board.source_id) > 0 AND wr.scheduled_run_id = kanban_board.source_id" +
+  " AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = wr.scheduled_run_id AND tr.finished_at IS NULL))" +
+  " OR ((kanban_board.source IS NULL OR kanban_board.source != 'task'" +
+  " OR kanban_board.source_id IS NULL OR kanban_board.source_id = '') AND wr.scheduled_run_id IS NULL)))";
+
+/**
  * #1590 — allowlisted extra CAS predicates. Callers reference these fixed
  * internal strings only; caller-supplied SQL text is rejected in
  * kanbanTransition.
@@ -329,7 +396,46 @@ const EXTRA_PREDICATES = new Set<string>([
   "COALESCE(delivery_attempts, 0) < 5",                    // kanbanClaimDelivery
   "next_retry_at IS NOT NULL AND unixepoch(next_retry_at) <= ?", // kanbanPromoteDueRetry
   "delivery_result IS NULL",                                // kanban-delivery markUnknown
+  // #1644: scheduled-project delivery claim — exact root/run/generation,
+  // accepted supervision, terminal successful task run, delivery released.
+  "type = 'O' AND source = 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')",
+  // #1644: non-scheduled project delivery claim — accepted supervision at the
+  // exact generation, delivery released.
+  "type = 'O' AND source != 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+  // #1644: project-root completion — exact accepted generation and, for a
+  // scheduled root, the terminal task run that owns the callback. This is
+  // distinct from delivery: noop/skipped runs may complete an accepted root,
+  // while artifact attach/release still require outcome='success'.
+  "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL)",
+  "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+  // #1778: project-root failure — exact supervision generation and, for a
+  // scheduled root, the owning run identity. Unlike completion this does not
+  // require an accepted state: failing an accepted-but-stale root (stale
+  // artifact detected after acceptance) and failing a live executing root
+  // owned by this run are both legitimate, but a late failure from a
+  // superseded generation or a foreign run must mutate nothing.
+  "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+  "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+  RUNNER_ROOT_RUNNING_PREDICATE,
 ]);
+
+/** #1644: trace a project-aware CAS rejection with only bounded authority
+ * context. Duplicate terminal observations are left quiet by callers. */
+function traceProjectMutationRejected(
+  operation: string,
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  logSwarmTrace({
+    event: "project_mutation_rejected",
+    operation: operation.slice(0, 120),
+    project: cardId,
+    card: cardId,
+    generation: authority.projectGeneration,
+    run: authority.scheduledRunId,
+    reason: "authority_lost",
+  });
+}
 
 /** SQLite datetime('now')-compatible UTC timestamp for co-written columns. */
 export function sqliteNow(): string {
@@ -357,7 +463,81 @@ export function wrapTaskDatabase(db: {
     },
     exec(sql: string) { db.exec(sql); },
     transaction<T>(fn: () => T): T { return (db.transaction(fn) as () => T)(); },
+    transactionImmediate<T>(fn: () => T): T {
+      const tx = db.transaction(fn) as unknown as { immediate(): T };
+      return tx.immediate();
+    },
   };
+}
+
+/**
+ * #1778: peer delivery intent queued atomically with a card terminal. One
+ * row per card terminal state (`pc_<cardId>_<done|failed>`): a terminal
+ * storm or a duplicate settlement can never queue a second obligation for
+ * the same verdict. Payload bounds mirror the settlement evidence bounds —
+ * result/error text is already sliced by callers; artifacts are capped here.
+ */
+export interface PeerCallbackIntent {
+  peer: string;
+  status: "done" | "failed";
+  resultSummary?: string;
+  error?: string;
+  tokensUsed?: number;
+  artifacts?: Array<{ name: string; content: string }>;
+}
+
+const PEER_CALLBACK_ARTIFACT_MAX = 20;
+const PEER_CALLBACK_ARTIFACT_CONTENT_MAX = 2000;
+
+export function peerCallbackOutboxId(cardId: number, to: CardStatus): string {
+  return `pc_${cardId}_${to}`;
+}
+
+/** #1778: idempotent DDL for the callback outbox (safe to re-run). */
+export function ensurePeerCallbackOutboxSchema(database: { exec(sql: string): void }): void {
+  database.exec(`CREATE TABLE IF NOT EXISTS peer_callback_outbox (
+    id TEXT PRIMARY KEY,
+    card_id INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('done','failed')),
+    payload_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT
+  )`);
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_peer_callback_outbox_pending
+    ON peer_callback_outbox(card_id) WHERE sent_at IS NULL`);
+}
+
+/**
+ * #1778: record a peer delivery obligation inside the caller's transaction —
+ * the single writer path is kanbanTransition on an applied terminal. Runs on
+ * the caller's TaskDatabase handle so out-of-process callers stay on their
+ * own connection.
+ */
+export function queuePeerCallbackInTx(
+  tx: TaskDatabase,
+  cardId: number,
+  to: CardStatus,
+  intent: PeerCallbackIntent,
+): void {
+  const artifacts = (intent.artifacts ?? []).slice(0, PEER_CALLBACK_ARTIFACT_MAX).map(a => ({
+    name: String(a.name).slice(0, 200),
+    content: String(a.content).slice(0, PEER_CALLBACK_ARTIFACT_CONTENT_MAX),
+  }));
+  const payload = {
+    action: "callback",
+    task_id: cardId,
+    status: intent.status,
+    ...(intent.resultSummary !== undefined ? { result_summary: intent.resultSummary } : {}),
+    ...(intent.error !== undefined ? { error: intent.error } : {}),
+    tokens_used: intent.tokensUsed ?? 0,
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+  };
+  tx.prepare(
+    `INSERT OR IGNORE INTO peer_callback_outbox (id, card_id, peer, status, payload_json) VALUES (?, ?, ?, ?, ?)`,
+  ).run(peerCallbackOutboxId(cardId, to), cardId, intent.peer, intent.status, JSON.stringify(payload));
 }
 
 /** #1590 — the single permitted writer of kanban_board.status. */
@@ -403,6 +583,7 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
     )`);
     tx.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
       ON kanban_card_transitions(card_id, id)`);
+    ensurePeerCallbackOutboxSchema(tx);
   }
 
   const reason = redactSecrets(req.reason).slice(0, MAX_JOURNAL_REASON);
@@ -456,6 +637,13 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
         req.cardId, observed, req.to, req.actor, reason,
         req.attemptId ?? null, req.claimGeneration ?? null,
       );
+      // #1778: a queued peer callback commits atomically with the card
+      // terminal it reports — a crash between settlement and delivery can no
+      // longer lose the callback. Reasserted/lost CAS queues nothing: only a
+      // won terminal commits a delivery obligation.
+      if (req.outboxCallback) {
+        queuePeerCallbackInTx(tx, req.cardId, req.to, req.outboxCallback);
+      }
       // Bounded growth without a timer: prune the oldest rows per card.
       tx.prepare(
         `DELETE FROM kanban_card_transitions
@@ -490,25 +678,29 @@ export function normalizePriority(raw: string | undefined | null): KanbanPriorit
   return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean; /** #1688: suppress the nerve card:queued event (pre-commit provisioning). */ fireEvent?: boolean }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
   const priority = normalizePriority(opts?.priority);
-  // #1516: validate the durable agent cap at the write boundary.
+  // #1516: clamp the durable agent cap at the write boundary. An over-configured
+  // cap is scaled to the runtime ceiling instead of rejecting the card — the
+  // daily-ai Aug 18 quarantine was caused by config saying 5 while the runtime
+  // capped at 4.
   const maxAgents = opts?.maxAgents;
-  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS)) {
-    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be an integer 1..${MAX_SCHEDULED_AGENTS})`);
+  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1)) {
+    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be a positive integer)`);
     return 0;
   }
+  const cappedMaxAgents = maxAgents === undefined ? undefined : Math.min(maxAgents, MAX_SCHEDULED_AGENTS);
   const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents, delivery_ready)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, cappedMaxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
   const id = Number(result.lastInsertRowid);
-  nerve.fire("card:queued", id);
+  if (opts?.fireEvent !== false) nerve.fire("card:queued", id);
   return id;
 }
 
@@ -597,7 +789,7 @@ function notifyKanbanDueChanged(): void {
   } catch { /* hook failures must never break board writes */ }
 }
 
-export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true): void {
+export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true, callback?: PeerCallbackIntent): void {
   // #1590: from includes `queued` because task-run-settler completes one-shot
   // K/T cards that were enqueued but never dispatched (system-task runner
   // path) — verified against production callers, not just the matrix.
@@ -610,6 +802,7 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
       completed_at: sqliteNow(),
     },
     emit,
+    ...(callback ? { outboxCallback: callback } : {}),
   });
   // #1590: preserve the pre-CAS debug log for the already-settled case.
   if (outcome.kind === "no_op" && (outcome.observed === "done" || outcome.observed === "delivering" || outcome.observed === "delivered")) {
@@ -617,7 +810,45 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
   }
 }
 
-export function kanbanFail(id: number, error: string, emit = true): void {
+/**
+ * #1644: complete a supervised project root only while its exact accepted
+ * generation still owns the callback. Scheduled roots additionally require
+ * the matching task run to be terminal; this prevents a late success/noop
+ * callback from completing a root left live by an older or terminal owner.
+ */
+export function kanbanCompleteProject(
+  cardId: number,
+  resultPath: string | null,
+  summary: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+  emit = true,
+): boolean {
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["running", "queued"],
+    to: "done",
+    actor: "settle_done",
+    reason: "project settlement complete",
+    fields: {
+      result_path: resultPath,
+      result_summary: summary.slice(0, 4000),
+      completed_at: sqliteNow(),
+    },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL)"
+      : "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId]
+      : [authority.projectGeneration],
+    emit,
+  });
+  if (outcome.kind === "no_op" && outcome.observed !== "done" && outcome.observed !== "delivering" && outcome.observed !== "delivered") {
+    traceProjectMutationRejected("project_completion", cardId, authority);
+  }
+  return outcome.kind === "applied";
+}
+
+export function kanbanFail(id: number, error: string, emit = true, callback?: PeerCallbackIntent): void {
   // #1590: `done` is included because task-run-settler fails an accepted
   // project card when artifact validation later detects a stale artifact
   // (verified against the scheduled-project integration flow).
@@ -626,19 +857,54 @@ export function kanbanFail(id: number, error: string, emit = true): void {
     reason: "settlement failed",
     fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
     emit,
+    ...(callback ? { outboxCallback: callback } : {}),
   });
+}
+
+/**
+ * #1778: fail a supervised project root only while the exact supervision
+ * generation still owns the callback. Scheduled roots additionally require
+ * the owning run identity. A late failure from a superseded generation or a
+ * foreign run loses its predicate and mutates nothing — the duplicate is
+ * traced, never applied.
+ */
+export function kanbanFailProject(
+  cardId: number,
+  error: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+  emit = true,
+): boolean {
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["queued", "running", "done"],
+    to: "failed",
+    actor: "settle_failed",
+    reason: "project settlement failed",
+    fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)"
+      : "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration]
+      : [authority.projectGeneration],
+    emit,
+  });
+  if (outcome.kind === "no_op" && outcome.observed !== "failed") {
+    traceProjectMutationRejected("project_failure", cardId, authority);
+  }
+  return outcome.kind === "applied";
 }
 
 const MAX_RETRIES = 3;
 
 /** Fail with retry logic — exponential backoff (10s→20s→40s, cap 5min). After MAX_RETRIES → permanent fail. */
-export function kanbanRetryOrFail(id: number, error: string): "retrying" | "failed" {
+export function kanbanRetryOrFail(id: number, error: string, callback?: PeerCallbackIntent): "retrying" | "failed" {
   const d = dbOrNull();
   if (!d) return "failed";
   const card = d.prepare("SELECT retry_count FROM kanban_board WHERE id = ?").get(id) as { retry_count: number } | undefined;
   const retryCount = (card?.retry_count ?? 0) + 1;
   if (retryCount > MAX_RETRIES) {
-    kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`);
+    kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`, true, callback);
     return "failed";
   }
   const backoffMs = Math.min(10_000 * Math.pow(2, retryCount - 1), 300_000);
@@ -687,6 +953,46 @@ export function kanbanClaimDelivery(id: number): boolean {
   });
   if (outcome.kind !== "applied") {
     logDebug("kanban-delivery", `delivery_skipped_duplicate card=${id}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * #1644: project-aware delivery claim. Atomically performs `done ->
+ * delivering` and increments `delivery_attempts` only while the exact root
+ * card/run/project-generation authority holds inside the claim transaction:
+ * accepted supervision at the supplied generation, delivery released, and —
+ * for a scheduled root — `source_id` matching the run and a terminal
+ * successful `task_runs` row. A claim for run N can never authorize run N+1.
+ */
+export function kanbanClaimProjectDelivery(
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): boolean {
+  const d = dbOrNull();
+  if (!d) return false;
+  const row = d.prepare("SELECT COALESCE(delivery_attempts, 0) AS attempts FROM kanban_board WHERE id = ?").get(cardId) as { attempts: number } | undefined;
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["done"],
+    to: "delivering",
+    actor: "delivery_claim",
+    reason: "project delivery claim",
+    fields: { delivery_attempts: (row?.attempts ?? 0) + 1 },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "type = 'O' AND source = 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')"
+      : "type = 'O' AND source != 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId]
+      : [authority.projectGeneration],
+    emit: false,
+  });
+  if (outcome.kind !== "applied") {
+    logDebug("kanban-delivery", `project_delivery_skipped_duplicate card=${cardId}`);
+    if (outcome.observed !== "done" && outcome.observed !== "delivering" && outcome.observed !== "delivered") {
+      traceProjectMutationRejected("project_delivery_claim", cardId, authority);
+    }
     return false;
   }
   return true;
@@ -792,8 +1098,48 @@ export function kanbanCleanup(olderThanDays = 7): number {
     const ids = doomed.map(r => r.id);
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => "?").join(", ");
-    d.prepare(`DELETE FROM kanban_card_transitions WHERE card_id IN (${placeholders})`).run(...ids);
-    return d.prepare(`DELETE FROM kanban_board WHERE id IN (${placeholders})`).run(...ids).changes;
+    // #1918: production enforces PRAGMA foreign_keys = ON (phase-pi-executor),
+    // so a single-statement purge aborts with FOREIGN KEY constraint failed
+    // while any doomed row is still referenced. pi_runs rows are never pruned
+    // (only outbox commands/approvals are) and a doomed parent with live
+    // children must keep its link — retain both, purge the rest leaf-first
+    // so immediate self-FK checks on parent_id pass.
+    const piRunsExists = d.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pi_runs'`
+    ).get() !== undefined;
+    const referenced = new Set(
+      (piRunsExists
+        ? (d.prepare(
+            `SELECT DISTINCT card_id AS id FROM pi_runs WHERE card_id IN (${placeholders})`
+          ).all(...ids) as Array<{ id: number }>)
+        : []
+      ).map(r => r.id),
+    );
+    const liveChildParents = new Set(
+      (d.prepare(
+        `SELECT DISTINCT parent_id AS id FROM kanban_board
+         WHERE parent_id IN (${placeholders}) AND id NOT IN (${placeholders})`
+      ).all(...ids, ...ids) as Array<{ id: number }>).map(r => r.id),
+    );
+    const purgable = ids.filter(id => !referenced.has(id) && !liveChildParents.has(id));
+    let purged = 0;
+    if (purgable.length > 0) {
+      const ph = purgable.map(() => "?").join(", ");
+      d.prepare(`DELETE FROM kanban_card_transitions WHERE card_id IN (${ph})`).run(...purgable);
+      for (;;) {
+        const res = d.prepare(
+          `DELETE FROM kanban_board WHERE id IN (${ph})
+           AND id NOT IN (SELECT parent_id FROM kanban_board WHERE parent_id IS NOT NULL)`
+        ).run(...purgable) as { changes: number };
+        purged += res.changes;
+        if (res.changes === 0) break;
+      }
+    }
+    const retained = ids.length - purged;
+    if (retained > 0) {
+      logDebug("kanban", `cleanup retains ${retained} of ${ids.length} terminal cards (pi_runs-linked or live-child parents)`);
+    }
+    return purged;
   })();
 }
 
@@ -882,6 +1228,88 @@ export function kanbanSetDeliveryReady(cardId: number): void {
      WHERE id = ? AND status = 'done' AND delivery_ready = 0`
   ).run(cardId) as { changes?: number };
   if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
+}
+
+/**
+ * #1644: project-aware artifact attach. The single winning successful
+ * scheduled settlement may attach the validated result path only while the
+ * exact root/run/project-generation authority holds inside this statement:
+ * accepted supervision at the supplied generation and, for a scheduled root,
+ * `source_id` matching the run with a terminal successful `task_runs` row. A
+ * stale result path from a failed or older run is never attached — it may
+ * remain on disk but is not product output.
+ */
+export function kanbanAttachProjectResult(
+  cardId: number,
+  resultPath: string,
+  summary: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  const d = dbOrNull();
+  if (!d) return;
+  let result: { changes?: number };
+  if (authority.scheduledRunId !== undefined) {
+    result = d.prepare(
+      `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+       WHERE id = ? AND type = 'O' AND source = 'task' AND status = 'done' AND result_path IS NULL
+         AND source_id = ?
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
+         AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
+    ).run(resultPath, summary.slice(0, 4000), cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId) as { changes?: number };
+  } else {
+    result = d.prepare(
+      `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+       WHERE id = ? AND type = 'O' AND source != 'task' AND status = 'done' AND result_path IS NULL
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
+    ).run(resultPath, summary.slice(0, 4000), cardId, authority.projectGeneration) as { changes?: number };
+  }
+  if ((result.changes ?? 0) !== 1) {
+    // A callback that already attached its result is an idempotent duplicate;
+    // a missing result on a non-done/unauthorized root is a real rejection.
+    const current = d.prepare("SELECT status, result_path FROM kanban_board WHERE id = ?").get(cardId) as { status?: string; result_path?: string | null } | undefined;
+    if (current?.status !== "done" || current.result_path == null) {
+      traceProjectMutationRejected("project_artifact_attach", cardId, authority);
+    }
+  }
+}
+
+/**
+ * #1644: project-aware delivery release. Sets `delivery_ready = 1` only while
+ * the exact root/run/project-generation authority holds inside this statement.
+ * A late promise from a failed or older run loses this CAS and never releases
+ * delivery.
+ */
+export function kanbanSetProjectDeliveryReady(
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  const d = dbOrNull();
+  if (!d) return;
+  let result: { changes?: number };
+  if (authority.scheduledRunId !== undefined) {
+    result = d.prepare(
+      `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+       WHERE id = ? AND type = 'O' AND source = 'task' AND status = 'done' AND delivery_ready = 0
+         AND source_id = ?
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
+         AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
+    ).run(cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId) as { changes?: number };
+  } else {
+    result = d.prepare(
+      `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+       WHERE id = ? AND type = 'O' AND source != 'task' AND status = 'done' AND delivery_ready = 0
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
+    ).run(cardId, authority.projectGeneration) as { changes?: number };
+  }
+  if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
+  else {
+    // A ready card is an idempotent duplicate; every other failed CAS means
+    // the callback lost project terminal/generation/run authority.
+    const current = d.prepare("SELECT status, delivery_ready FROM kanban_board WHERE id = ?").get(cardId) as { status?: string; delivery_ready?: number } | undefined;
+    if (current?.status !== "done" || current.delivery_ready !== 1) {
+      traceProjectMutationRejected("project_delivery_release", cardId, authority);
+    }
+  }
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {

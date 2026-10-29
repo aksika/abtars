@@ -1,12 +1,13 @@
-import { describe, it, expect } from "vitest";
-import type {
-  Api, ThinkingLevel, Model, AssistantMessage, AssistantMessageEvent,
-  ProviderStreams, CreateProviderOptions, Provider,
-} from "@earendil-works/pi-ai";
+import { describe, it, expect, vi, beforeAll } from "vitest";
+import type { Api, ThinkingLevel, Model } from "@earendil-works/pi-ai";
+// #1746: pi's authoritative clamp, captured into the runtime slot under test.
+// Test files are exempt from the production import boundary.
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 
 import {
-  pickPiApi, buildPiModel, buildPiContext, resolveReasoning, resolveCandidateModel,
-  type PiAiCandidate, type PiAiConversation,
+  pickPiApi, buildPiModel, resolveReasoning, resolveCandidateModel,
+  ensurePiThinkingClamp,
+  type PiAiCandidate,
 } from "./pi-ai-adapter.js";
 
 // ── pickPiApi ────────────────────────────────────────────────────────────────
@@ -32,7 +33,10 @@ describe("resolveReasoning", () => {
     expect(resolveReasoning({ ...base, thinking: { style: "effort", default: "medium" } })).toEqual({ reasoning: true, level: "medium" });
   });
   it("clamps an unknown effort string to medium", () => {
-    expect(resolveReasoning({ ...base, thinking: { style: "effort", default: "bogus" } })).toEqual({ reasoning: true, level: "medium" });
+    // "bogus" arrives via config JSON, not typed code: mapEffortLevel takes a
+    // plain string, so build the fixture through the JSON boundary it travels.
+    const bogusEffort = JSON.parse('{"style":"effort","default":"bogus"}') as PiAiCandidate["thinking"];
+    expect(resolveReasoning({ ...base, thinking: bogusEffort })).toEqual({ reasoning: true, level: "medium" });
   });
   it("does not enable reasoning for extended-budget style (deferred to bake)", () => {
     expect(resolveReasoning({ ...base, thinking: { style: "extended", default: 4096 } })).toEqual({ reasoning: false, level: undefined });
@@ -93,63 +97,6 @@ describe("buildPiModel", () => {
 
 // ── buildPiContext ───────────────────────────────────────────────────────────
 
-describe("buildPiContext", () => {
-  it("collapses system messages into systemPrompt and translates the rest", () => {
-    const conv: PiAiConversation = {
-      messages: [
-        { role: "system", content: "be brief" },
-        { role: "user", content: "hi" },
-        { role: "assistant", content: "hello", tool_calls: [{ id: "t1", type: "function", function: { name: "run", arguments: '{"cmd":"ls"}' } }] },
-        { role: "tool", content: "ok", tool_call_id: "t1", name: "run" },
-      ],
-      tools: [],
-    };
-    const ctx = buildPiContext(conv, "openai-completions", "test-provider");
-    expect(ctx.systemPrompt).toBe("be brief");
-    expect(ctx.messages).toHaveLength(3);
-    expect(ctx.messages[0]!.role).toBe("user");
-    const a = ctx.messages[1]!;
-    expect(a.role).toBe("assistant");
-    if (a.role === "assistant") {
-      expect(a.content[0]).toEqual({ type: "text", text: "hello" });
-      expect(a.content[1]).toEqual({ type: "toolCall", id: "t1", name: "run", arguments: { cmd: "ls" } });
-    }
-    const t = ctx.messages[2]!;
-    expect(t.role).toBe("toolResult");
-    expect(t).toMatchObject({ toolCallId: "t1", toolName: "run", isError: false });
-  });
-
-  it("parses data-URL image parts into pi image content", () => {
-    const conv: PiAiConversation = {
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: "data:image/png;base64,QUJDRA==" } },
-          { type: "text", text: "what is this" },
-        ],
-      }],
-      tools: [],
-    };
-    const ctx = buildPiContext(conv);
-    const u = ctx.messages[0]!;
-    expect(u.role).toBe("user");
-    expect(Array.isArray(u.content)).toBe(true);
-    expect((u.content as [{ type: string }])[0]).toEqual({ type: "image", data: "QUJDRA==", mimeType: "image/png" });
-  });
-
-  it("maps OpenAI tool schemas to pi Tool shape", () => {
-    const conv: PiAiConversation = {
-      messages: [{ role: "user", content: "hi" }],
-      tools: [{ type: "function", function: { name: "bash", description: "run", parameters: { type: "object" } } }],
-    };
-    expect(buildPiContext(conv).tools).toEqual([{ name: "bash", description: "run", parameters: { type: "object" } }]);
-  });
-});
-
-
-
-// ── resolveCandidateModel (#1619) ──────────────────────────────────────────
-
 describe("resolveCandidateModel", () => {
   const candidate = {
     model: "test-model",
@@ -157,6 +104,14 @@ describe("resolveCandidateModel", () => {
     endpoint: "https://api.test/v1",
     maxContext: 128000,
   };
+
+  // #1746: resolveCandidateModel reads the clamp from the runtime slot now,
+  // not from a static import. In production the boot warm populates it with
+  // pi's real function; these tests do the same so the #1619 clamping
+  // behaviour is exercised as shipped.
+  beforeAll(async () => {
+    await ensurePiThinkingClamp({ clampThinkingLevel });
+  });
 
   it("threads the requested effort into the model and reports it", () => {
     const resolved = resolveCandidateModel(candidate, "high", false);
@@ -187,5 +142,80 @@ describe("resolveCandidateModel", () => {
   it("carries the candidate context window", () => {
     const resolved = resolveCandidateModel(candidate, "high", false);
     expect(resolved.model.contextWindow).toBe(128000);
+  });
+
+  it("carries the threaded maxOutput instead of a hardcoded cap (#1770)", () => {
+    const resolved = resolveCandidateModel({ ...candidate, maxOutput: 384000 }, "off", false);
+    expect(resolved.model.maxTokens).toBe(384000);
+  });
+
+  it("falls to the models.json-miss floor when no maxOutput resolves (#1770)", () => {
+    const resolved = resolveCandidateModel(candidate, "off", false);
+    expect(resolved.model.maxTokens).toBe(8192);
+  });
+});
+
+// ── #1746 runtime clamp slot ────────────────────────────────────────────────
+
+describe("resolveCandidateModel — #1746 runtime clamp slot", () => {
+  const candidate = {
+    model: "test-model",
+    provider: "test-provider",
+    endpoint: "https://api.test/v1",
+    maxContext: 128000,
+  };
+
+  it("passes the requested effort through when the slot is unpopulated (no throw)", async () => {
+    vi.resetModules();
+    const mod = await import("./pi-ai-adapter.js");
+    const resolved = mod.resolveCandidateModel(candidate, "xhigh", false);
+    expect(resolved.effective).toBe("xhigh");
+    expect(resolved.model.reasoning).toBe(true);
+  });
+
+  it('"off" still forces model.reasoning false when the slot is unpopulated', async () => {
+    vi.resetModules();
+    const mod = await import("./pi-ai-adapter.js");
+    const resolved = mod.resolveCandidateModel(candidate, "off", false);
+    expect(resolved.effective).toBe("off");
+    expect(resolved.model.reasoning).toBe(false);
+  });
+
+  it("clamp equivalence — slot-populated resolution matches pi's real clamp", async () => {
+    vi.resetModules();
+    const mod = await import("./pi-ai-adapter.js");
+    await mod.ensurePiThinkingClamp({ clampThinkingLevel });
+    for (const level of ["low", "medium", "high", "xhigh"] as const) {
+      const resolved = mod.resolveCandidateModel(candidate, level, false);
+      const equivalentModel = buildPiModel(
+        { model: candidate.model, endpoint: candidate.endpoint, maxOutput: 4096, contextWindow: candidate.maxContext, reasoningEffort: level },
+        "openai-completions", false, candidate.provider,
+      );
+      const direct = clampThinkingLevel(equivalentModel, level);
+      const expected = direct === "minimal" || direct === "max" ? "high" : direct;
+      expect(resolved.effective).toBe(expected);
+    }
+  });
+
+  it("clamp equivalence — with and without a non-null thinkingLevelMap.xhigh, the effective matches the pre-#1746 static import", async () => {
+    // buildPiModel never emits a thinkingLevelMap today (pi catalog adoption is
+    // a later task), so every resolveCandidateModel model is the "without"
+    // shape and the pre-change static call produced the same value the slot
+    // now produces for it. The "with" shape is pinned at the pi-function level:
+    // the slot holds pi's real function, which keeps xhigh for a model that
+    // claims the level.
+    vi.resetModules();
+    const mod = await import("./pi-ai-adapter.js");
+    await mod.ensurePiThinkingClamp({ clampThinkingLevel });
+    const resolved = mod.resolveCandidateModel(candidate, "xhigh", false);
+    expect(resolved.effective).toBe("high");
+    const withXhighMap: Model<Api> = {
+      ...buildPiModel(
+        { model: candidate.model, endpoint: candidate.endpoint, maxOutput: 4096, contextWindow: candidate.maxContext, reasoningEffort: "xhigh" },
+        "openai-completions", false, candidate.provider,
+      ),
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: "xhigh" },
+    };
+    expect(clampThinkingLevel(withXhighMap, "xhigh")).toBe("xhigh");
   });
 });

@@ -29,7 +29,7 @@ const TEST_ENVELOPE: WorkerResultEnvelopeV1 = {
     ordinal: 1,
     contract_id: "c_test_001",
     contract_digest: TEST_CONTRACT.digest,
-    executor_kind: "local_worker",
+    executor_kind: "agent",
     executor_id: "spin-01",
     started_at: "2026-07-12T00:00:00.000Z",
     finished_at: "2026-07-12T00:01:00.000Z",
@@ -110,7 +110,7 @@ describe("WorkerSupervisionStore", () => {
       card_id: 101,
       contract_id: "c_test_001",
       ordinal: 1,
-      executor_kind: "local_worker",
+      executor_kind: "agent",
       executor_id: "spin-01",
       status: "pending",
       started_at: "2026-07-12T00:00:00.000Z",
@@ -126,12 +126,12 @@ describe("WorkerSupervisionStore", () => {
     store.insertContract(TEST_CONTRACT, 101);
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(() => store.insertAttempt({
       id: "a_test_002", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     })).toThrow();
   });
@@ -141,12 +141,12 @@ describe("WorkerSupervisionStore", () => {
     store.insertContract(TEST_CONTRACT, 101);
     store.insertAttempt({
       id: "a_002", card_id: 101, contract_id: "c_test_001",
-      ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 2, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.insertAttempt({
       id: "a_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     const attempts = store.getAttemptsForCard(101);
@@ -161,7 +161,7 @@ describe("WorkerSupervisionStore", () => {
     expect(store.nextOrdinal(101)).toBe(1);
     store.insertAttempt({
       id: "a_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(store.nextOrdinal(101)).toBe(2);
@@ -171,7 +171,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.insertResult("a_test_001", TEST_ENVELOPE);
@@ -184,7 +184,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     const result = store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -261,7 +261,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_pending_cancel", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(store.cancelPendingAttempt("a_pending_cancel", "project_abort")).toBe(true);
@@ -315,7 +315,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -327,7 +327,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -342,7 +342,7 @@ describe("WorkerSupervisionStore", () => {
     expect(store.cardHasSettledAttempts(101)).toBe(false);
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -356,12 +356,12 @@ describe("WorkerSupervisionStore", () => {
       store.db.transaction(() => {
         store.insertAttempt({
           id: "a_001", card_id: 101, contract_id: "c_test_001",
-          ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+          ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
           status: "pending", started_at: "now",
         });
         store.insertAttempt({
           id: "a_002", card_id: 101, contract_id: "c_test_001",
-          ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+          ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
           status: "pending", started_at: "now",
         });
       });
@@ -377,7 +377,7 @@ describe("WorkerSupervisionStore", () => {
       store.insertContract(TEST_CONTRACT, 101);
       store.insertAttempt({
         id: "a_lc_001", card_id: 101, contract_id: "c_test_001",
-        ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+        ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
         status: "pending", started_at: "2026-07-12T00:00:00.000Z",
       });
     });
@@ -453,7 +453,7 @@ describe("WorkerSupervisionStore", () => {
       store.completeAttempt("a_lc_001");
       store.insertAttempt({
         id: "a_lc_002", card_id: 101, contract_id: "c_test_001",
-        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        ordinal: 2, executor_kind: "agent", executor_id: "spin-01",
         status: "pending", started_at: "2026-07-12T00:00:00.000Z",
       });
       const claim2 = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 2);
@@ -489,8 +489,12 @@ describe("WorkerSupervisionStore", () => {
         executorMax: 3, projectId, reservedTokens: 0,
       });
       expect(result.kind).toBe("claimed");
-      if (result.kind === "claimed") {
+      // `in` guard: the failure member types kind as plain string, so the
+      // literal comparison alone does not narrow.
+      if (result.kind === "claimed" && "claim" in result) {
         expect(result.claim.attemptId).toBe(attemptId);
+      } else {
+        throw new Error("expected claimed result");
       }
     });
 
@@ -569,6 +573,21 @@ describe("WorkerSupervisionStore", () => {
       });
       expect(result.kind).toBe("budget_wait");
     });
+
+    it("refuses executor_mismatch when the requested pair differs from the stored pending pair", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "pi", executorId: "pi-coding", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).toBe("executor_mismatch");
+      const unchanged = s.getAttempt(attemptId);
+      expect(unchanged?.lifecycle).toBe("pending");
+      expect(unchanged?.executor_kind).toBe("agent");
+      expect(unchanged?.executor_id).toBe("spin-local");
+    });
   });
 
   // ── #1510: getActiveAttemptCountForExecutor ──────────────────────────────
@@ -640,6 +659,105 @@ describe("WorkerSupervisionStore", () => {
       }
     });
 
+    // ── #1720: bounded completion grace window ──────────────────────────────
+
+    describe("#1720 completion grace window", () => {
+      const DEADLINE_ISO = "2026-08-24T07:32:36.749Z";
+      const DEADLINE_MS = Date.parse(DEADLINE_ISO);
+
+      let graceSeq = 0;
+
+      function graceAttempt(s: InstanceType<typeof Store>, limits: WorkerAcceptanceContractV1["limits"]): { aid: string; cid: string } {
+        graceSeq += 1;
+        const nowIso = "2026-08-24T07:00:00.000Z";
+        const cid = `c_grace_${graceSeq}`;
+        const aid = `a_grace_${graceSeq}`;
+        const digest = `d_grace_${graceSeq}`;
+        s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, 'O', ?, ?)`).run(9199, "proj", "t", "running", nowIso, nowIso);
+        s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?)`).run(9199 + graceSeq, "lane", "t", 9199, nowIso, nowIso);
+        s.insertContract({ schema_version: 1, id: cid, digest, goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits, provenance: { root_card_id: 9199, card_id: 9199 + graceSeq, authored_by: "test", created_at: nowIso } }, 9199 + graceSeq);
+        s.insertAttempt({ id: aid, card_id: 9199 + graceSeq, contract_id: cid, ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: nowIso });
+        s.lifecycleTransition(aid, ["pending"], "running");
+        s.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?").run(DEADLINE_ISO, aid);
+        return { aid, cid };
+      }
+
+      function envelopeFor(aid: string, cid: string): WorkerResultEnvelopeV1 {
+        return { ...TEST_ENVELOPE, attempt: { ...TEST_ENVELOPE.attempt, id: aid, contract_id: cid } };
+      }
+
+      function settleLate(s: InstanceType<typeof Store>, aid: string, latenessMs: number, envelope?: WorkerResultEnvelopeV1) {
+        return s.terminalSettlement({
+          attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+          stableReason: "worker_completed", envelope, now: DEADLINE_MS + latenessMs,
+        });
+      }
+
+      it("accepts an evidenced completion 14ms past the deadline (#1720 incident shape)", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 14, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("completed");
+        const row = s.getAttempt(aid)!;
+        expect(row.lifecycle).toBe("completed");
+        expect(row.cancel_reason).toBe("worker_completed");
+        expect(s.getResultByAttempt(aid)!.envelope.outcome).toBe("completed");
+      });
+
+      it("rejects at deadline+1201ms for a 120s lane — proportional boundary, not flat", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 1_201, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+        expect(s.getResultByAttempt(aid)).toBeDefined();
+      });
+
+      it("caps grace at 5000ms for a 600s lane (deadline+5001ms rejects)", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 600_000 });
+        const result = settleLate(s, aid, 5_001, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+      });
+
+      it("gives no grace without an envelope, even 14ms late", () => {
+        const s = new Store();
+        const { aid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 14);
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+        expect(s.getResultByAttempt(aid)!.envelope.outcome).toBe("timed_out");
+      });
+
+      it("falls back to 1000ms when the attempt's contract carries no usable duration", () => {
+        const variants: Array<{ name: string; limits: WorkerAcceptanceContractV1["limits"]; corruptJson?: boolean }> = [
+          { name: "missing limits", limits: {} },
+          { name: "invalid duration", limits: { max_duration_ms: -5 } },
+          { name: "malformed JSON", limits: {}, corruptJson: true },
+        ];
+        for (const v of variants) {
+          const sOk = new Store();
+          const ok = graceAttempt(sOk, v.limits);
+          if (v.corruptJson) sOk.db.prepare("UPDATE worker_contracts SET contract_json = '{broken' WHERE id = ?").run(ok.cid);
+          const accepted = settleLate(sOk, ok.aid, 1_000, envelopeFor(ok.aid, ok.cid));
+          expect(accepted.kind).toBe("settled");
+          if (accepted.kind === "settled") expect(accepted.lifecycle).toBe("completed");
+
+          const sLate = new Store();
+          const late = graceAttempt(sLate, v.limits);
+          if (v.corruptJson) sLate.db.prepare("UPDATE worker_contracts SET contract_json = '{broken' WHERE id = ?").run(late.cid);
+          const rejected = settleLate(sLate, late.aid, 1_001, envelopeFor(late.aid, late.cid));
+          expect(rejected.kind).toBe("settled");
+          if (rejected.kind === "settled") expect(rejected.lifecycle).toBe("timed_out");
+        }
+      });
+    });
+
     it("replays identical terminal state", () => {
       const s = new Store();
       const aid = setupAttempt(s, "pending");
@@ -667,6 +785,31 @@ describe("WorkerSupervisionStore", () => {
       if (result.kind === "settled") {
         expect(result.chargedTokens).toBe(5000);
       }
+    });
+
+    it("#1638: input_requested charges zero and releases the reservation", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending", 5000);
+      expect(s.insertReservation({
+        source_attempt_id: "a_source_input",
+        target_attempt_id: aid,
+        reserved_tokens: 5000,
+        reserved_cost: 0,
+        reserved_switches: 0,
+      })).toBe(true);
+      expect(s.updateReservationStatus("a_source_input", "claimed")).toBe(true);
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "failed",
+        stableReason: "input_requested", terminalCause: "input_requested",
+      });
+      expect(result.kind).toBe("settled");
+      if (result.kind === "settled") {
+        expect(result.chargedTokens).toBe(0);
+      }
+      const attempt = s.getAttempt(aid);
+      expect(attempt?.charged_tokens).toBe(0);
+      expect(s.getReservation("a_source_input")?.status).toBe("released");
     });
 
     it("returns stale for generation mismatch", () => {
@@ -697,6 +840,63 @@ describe("WorkerSupervisionStore", () => {
       const chargedAfter = s.db.prepare("SELECT charged_tokens FROM worker_attempts WHERE id = ?").get(aid) as { charged_tokens: number };
       expect(chargedBefore.charged_tokens).toBe(150);
       expect(chargedAfter.charged_tokens).toBe(150);
+    });
+
+    // #1638 Task 1 characterization → Task 6 behavior: a supplied envelope
+    // on a non-completed outcome is now PERSISTED (genuine failure evidence);
+    // the absence envelope remains the fallback when none is supplied.
+    it("non-completed settlement persists a supplied envelope (Task 6)", () => {
+      const s = new Store();
+      s.insertContract(TEST_CONTRACT, 101);
+      const aid = setupAttempt(s, "pending");
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const supplied: WorkerResultEnvelopeV1 = {
+        schema_version: 1,
+        attempt: {
+          id: aid, ordinal: 1, contract_id: TEST_CONTRACT.id,
+          contract_digest: TEST_CONTRACT.digest,
+          executor_kind: "pi", executor_id: "pi-coding",
+          started_at: "2026-01-01T00:00:00.000Z", finished_at: "2026-01-01T00:01:00.000Z",
+        },
+        outcome: "failed",
+        criteria: [],
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "real failure evidence", claims: [], unresolved_risks: [] },
+        error: { code: "INPUT_REQUESTED", message: "question pending" },
+      };
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "failed",
+        stableReason: "input_requested", envelope: supplied,
+      });
+      expect(result.kind).toBe("settled");
+      const stored = s.getResultByAttempt(aid);
+      expect(stored?.envelope.worker_report.summary).toBe("real failure evidence");
+      expect(stored?.envelope.outcome).toBe("failed");
+      expect(stored?.envelope.attempt.executor_kind).toBe("pi");
+      expect(stored?.envelope.error?.code).toBe("INPUT_REQUESTED");
+    });
+
+    // #1638 Task 1 characterization: no-alias contract settles a failed
+    // attempt with the absence envelope whose criteria are derived not_run.
+    it("CHARACTERIZATION: no-alias failed attempt stores absence envelope with not_run criteria", () => {
+      const s = new Store();
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(501, "proj", "t", "running", "O", now, now);
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(502, "child", "t", "queued", "W", 501, now, now);
+      s.insertContract(TEST_CONTRACT, 502);
+      s.insertAttempt({
+        id: "a_noalias", card_id: 502, contract_id: TEST_CONTRACT.id, ordinal: 1,
+        executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now,
+      });
+      s.lifecycleTransition("a_noalias", ["pending"], "running");
+      s.terminalSettlement({
+        attemptId: "a_noalias", expectedGeneration: 1, desiredState: "failed",
+        stableReason: "executor_unavailable",
+      });
+      const stored = s.getResultByAttempt("a_noalias");
+      expect(stored?.envelope.attempt.executor_kind).toBe("agent");
+      expect(stored?.envelope.criteria).toEqual([{ criterion_id: "c1", status: "not_run", evidence_ids: [] }]);
     });
   });
 
@@ -789,6 +989,274 @@ describe("WorkerSupervisionStore", () => {
       // The reservation is still active (claimed by a live retry attempt) —
       // age alone must not delete it even though its source attempt is gone.
       expect(store.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = 'a_old'`).get()).toBeDefined();
+    });
+  });
+
+  describe("executor identity migration (#1637)", () => {
+    it("normalizes legacy attempt kinds and built-in Spin ID, and recomputes envelope digests", async () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      // Simulate a pre-#1637 database: the migration marker table does not
+      // exist yet (a legacy deployment never had it), and legacy rows exist.
+      store.db.exec(`DROP TABLE worker_supervision_migrations`);
+      // Legacy rows as they existed before #1637: local_worker/spin attempt
+      // plus an envelope whose embedded kind uses the old vocabulary.
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_legacy', 101, ?, 1, 'local_worker', 'spin', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_remote_legacy', 101, ?, 2, 'remote_worker', 'molty-x', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+      const legacyEnvelope = {
+        schema_version: 1,
+        attempt: {
+          id: "a_legacy",
+          ordinal: 1,
+          contract_id: TEST_CONTRACT.id,
+          contract_digest: TEST_CONTRACT.digest,
+          executor_kind: "local_worker",
+          executor_id: "spin",
+          started_at: "2026-01-01T00:00:00.000Z",
+          finished_at: "2026-01-01T00:01:00.000Z",
+        },
+        outcome: "failed",
+        criteria: [],
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "legacy", claims: [], unresolved_risks: [] },
+      };
+      const legacyJson = JSON.stringify(legacyEnvelope);
+      store.db.prepare(`
+        INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
+        VALUES ('a_legacy', ?, 'stale-digest', '2026-01-01T00:00:00.000Z')
+      `).run(legacyJson);
+
+      // A second constructor run is the migration trigger — same as a restart.
+      const store2 = new Store();
+
+      const local = store2.getAttempt("a_legacy");
+      expect(local?.executor_kind).toBe("agent");
+      expect(local?.executor_id).toBe("spin-local");
+      const remote = store2.getAttempt("a_remote_legacy");
+      expect(remote?.executor_kind).toBe("remote");
+      expect(remote?.executor_id).toBe("molty-x");
+
+      const result = store2.getResult("a_legacy");
+      expect(result).toBeDefined();
+      const migratedEnvelope = JSON.parse(result!.envelope_json) as WorkerResultEnvelopeV1;
+      expect(migratedEnvelope.attempt.executor_kind).toBe("agent");
+      expect(migratedEnvelope.attempt.executor_id).toBe("spin-local");
+      // digest recomputed from the exact updated JSON, not the stale value
+      // (the store hashes the raw envelope JSON string, sha256)
+      const { createHash } = await import("node:crypto") as typeof import("node:crypto");
+      const expectedDigest = createHash("sha256").update(result!.envelope_json, "utf-8").digest("hex");
+      expect(result!.envelope_digest).toBe(expectedDigest);
+      expect(result!.envelope_digest).not.toBe("stale-digest");
+
+      // A second migration pass is a no-op: no legacy values remain.
+      const store3 = new Store();
+      const again = store3.getAttempt("a_legacy");
+      expect(again?.executor_kind).toBe("agent");
+      expect(store3.db.prepare(`SELECT COUNT(*) AS cnt FROM worker_attempts WHERE executor_kind IN ('local_worker','remote_worker') OR executor_id = 'spin'`).get()).toEqual({ cnt: 0 });
+    });
+
+    it("a pending pre-upgrade local_worker/spin attempt dispatches and its claim validates the stored pair", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_legacy2', 101, ?, 1, 'local_worker', 'spin', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+
+      const store2 = new Store();
+      const migrated = store2.getAttempt("a_legacy2");
+      expect(migrated?.executor_kind).toBe("agent");
+      expect(migrated?.executor_id).toBe("spin-local");
+
+      // Claiming with the canonical pair succeeds and does NOT rewrite the identity columns.
+      const claim = store2.claimAttempt(101, TEST_CONTRACT.id, "agent", "spin-local", 1);
+      expect(claim).not.toBeNull();
+      const claimed = store2.getAttempt("a_legacy2");
+      expect(claimed?.lifecycle).toBe("claimed");
+      expect(claimed?.executor_kind).toBe("agent");
+      expect(claimed?.executor_id).toBe("spin-local");
+    });
+
+    it("claim rejects a requested executor pair different from the stored pending pair", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.insertAttempt({
+        id: "a_pair", card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "agent", executor_id: "spin-local",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      expect(store.claimAttempt(101, TEST_CONTRACT.id, "agent", "other-id", 1)).toBeNull();
+      expect(store.claimAttempt(101, TEST_CONTRACT.id, "pi", "pi-coding", 1)).toBeNull();
+      const unchanged = store.getAttempt("a_pair");
+      expect(unchanged?.lifecycle).toBe("pending");
+      expect(unchanged?.executor_kind).toBe("agent");
+      expect(unchanged?.executor_id).toBe("spin-local");
+    });
+
+    it("a canonical pi attempt's absence envelope reports executor_kind pi", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.insertAttempt({
+        id: "a_pi", card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "pi", executor_id: "pi-coding",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      store.db.prepare(`
+        UPDATE worker_attempts SET lifecycle = 'running', status = 'running' WHERE id = 'a_pi'
+      `).run();
+      const settlement = store.terminalSettlement({
+        attemptId: "a_pi",
+        expectedGeneration: 1,
+        desiredState: "failed",
+        stableReason: "test",
+      });
+      expect(settlement.kind).toBe("settled");
+      const result = store.getResultByAttempt("a_pi");
+      expect(result?.envelope.attempt.executor_kind).toBe("pi");
+      expect(result?.envelope.attempt.executor_id).toBe("pi-coding");
+    });
+  });
+
+  describe("executor resource binding (#1638)", () => {
+    function setupPiAttempt(s: InstanceType<typeof Store>, id = "a_bind"): void {
+      s.insertContract(TEST_CONTRACT, 101);
+      s.insertAttempt({
+        id, card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "pi", executor_id: "pi-coding",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+    }
+
+    it("binds the first (attempt, generation) -> run tuple", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      const outcome = s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      });
+      expect(outcome).toBe("bound");
+      const binding = s.getExecutorResourceBinding("a_bind");
+      expect(binding).toEqual({ resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial" });
+      const reverse = s.getAttemptForExecutorResource("pi", "pirun_sup_1", 1);
+      expect(reverse?.id).toBe("a_bind");
+    });
+
+    it("an exact repeated bind is idempotent; a different tuple conflicts", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      });
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("idempotent");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_2", resourceGeneration: 1, continuity: "initial",
+      })).toBe("conflict");
+    });
+
+    it("rejects binding for a stale attempt generation or lifecycle", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 99, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("stale");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("bound");
+      s.lifecycleTransition("a_bind", ["claimed"], "running");
+      // idempotency holds only in claimed|starting; a running attempt is stale
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("stale");
+    });
+
+    it("rejects binding across executor kinds and wrong resource generation lookup", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "agent",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("conflict");
+      expect(s.getAttemptForExecutorResource("pi", "pirun_sup_1", 5)).toBeUndefined();
+    });
+  });
+
+  describe("proven-no-start deferral (#1638)", () => {
+    function setupStartingAttempt(s: InstanceType<typeof Store>, reservedTokens = 100): string {
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?)`).run(800, "proj", "t", now, now);
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?)`).run(801, "child", "t", 800, now, now);
+      s.insertContract({ schema_version: 1, id: "c_def", digest: "d", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: 800, card_id: 801, authored_by: "test", created_at: now } }, 801);
+      s.insertAttempt({ id: "a_def", card_id: 801, contract_id: "c_def", ordinal: 1, executor_kind: "pi", executor_id: "pi-coding", status: "pending", started_at: now });
+      s.lifecycleTransition("a_def", ["pending"], "claimed");
+      s.lifecycleTransition("a_def", ["claimed"], "starting");
+      if (reservedTokens > 0) s.db.prepare("UPDATE worker_attempts SET reserved_tokens = ? WHERE id = ?").run(reservedTokens, "a_def");
+      s.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?").run(new Date(Date.now() + 60000).toISOString(), "a_def");
+      return "a_def";
+    }
+
+    it("returns a starting attempt to pending without settling or charging", () => {
+      const s = new Store();
+      const aid = setupStartingAttempt(s);
+      const outcome = s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "resource_busy" });
+      expect(outcome).toBe("deferred");
+      const attempt = s.getAttempt(aid);
+      expect(attempt?.lifecycle).toBe("pending");
+      expect(attempt?.status).toBe("pending");
+      expect(attempt?.claimed_at).toBeNull();
+      expect(attempt?.hard_deadline_at).toBeNull();
+      expect(attempt?.reserved_tokens).toBe(0);
+      expect(s.getResultByAttempt(aid)).toBeUndefined();
+    });
+
+    it("restores a claimed retry reservation to active", () => {
+      const s = new Store();
+      s.insertContract(TEST_CONTRACT, 101);
+      s.insertAttempt({
+        id: "a_src", card_id: 101, contract_id: TEST_CONTRACT.id, ordinal: 1,
+        executor_kind: "pi", executor_id: "pi-coding", status: "failed", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      s.db.prepare(`
+        INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at, source_attempt_id, earliest_claim_at)
+        VALUES ('a_retry_def', 101, ?, 2, 'pi', 'pi-coding', 'pending', 'pending', ?, 'a_src', ?)
+      `).run(TEST_CONTRACT.id, "2026-01-01T00:01:00.000Z", "2026-01-01T00:01:00.000Z");
+      s.db.prepare(`
+        INSERT INTO retry_budget_reservations (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES ('a_src', 'a_retry_def', 1, 100, 0, 0, 'claimed', ?, ?)
+      `).run("2026-01-01T00:01:00.000Z", "2026-01-01T00:01:00.000Z");
+      s.lifecycleTransition("a_retry_def", ["pending"], "claimed");
+      s.lifecycleTransition("a_retry_def", ["claimed"], "starting");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: "a_retry_def", expectedGeneration: 1, reason: "capacity" })).toBe("deferred");
+      expect(s.getReservation("a_src")?.status).toBe("active");
+    });
+
+    it("rejects deferral for a stale generation or a running attempt", () => {
+      const s = new Store();
+      const aid = setupStartingAttempt(s);
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 99, reason: "capacity" })).toBe("stale");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "capacity" })).toBe("deferred");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "capacity" })).toBe("stale");
     });
   });
 });

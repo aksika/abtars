@@ -4,7 +4,7 @@ import { deriveVerifyKey } from "../peer-config.js";
 import {
   DOORBELL_PORT, MAX_QUERY_BYTES, MAX_RESPONSE_BYTES, TIMESTAMP_WINDOW_SEC,
   peerSelector, buildSelectorMap, timingSafeSelectorEq, findPeerBySelector,
-  buildQueryCanonical, buildAckCanonical,
+  buildQueryCanonical,
   signDoorbellQuery, verifyDoorbellQuery,
   signDoorbellAck, verifyDoorbellAck,
   encodeQuery, encodeResponse, parseQuery, parseResponse,

@@ -18,6 +18,7 @@ export interface SupervisorState {
   backoffAttempt: number;
   recentDeaths: number[];
   lastDeathAt: string | null;
+  ownershipEpisode?: OwnershipEpisode | null;
 }
 
 export interface PendingCommand {
@@ -49,6 +50,18 @@ export interface LockOwner {
 export interface DeathObservation {
   readonly at: number;
   readonly reason: string;
+}
+
+/**
+ * Durable, ADDITIVE ownership-inconclusive marker (#1711 R5/P7). Absent or
+ * null means no active episode. Never carries a candidate PID, process-start
+ * identity, heartbeat sample, or signal authorization — operator visibility
+ * only. Compatible with schemaVersion 1: no version bump.
+ */
+export interface OwnershipEpisode {
+  readonly kind: "ownership-inconclusive";
+  readonly reason: string;
+  readonly since: number;
 }
 
 const STATE_FILE = "supervisor.state";
@@ -112,6 +125,18 @@ export function readSupervisorState(home: string): StateReadResult {
     typeof (pending as Record<string, unknown>).reason === "string" &&
     typeof (pending as Record<string, unknown>).createdAt === "string"
   );
+  // #1711 R5: the optional episode marker is strictly validated when present;
+  // absence (old state files) and explicit null are both accepted without a
+  // schema-version bump.
+  const rawEpisode = raw.ownershipEpisode;
+  const episodeValid = rawEpisode === undefined || rawEpisode === null || (
+    typeof rawEpisode === "object" && rawEpisode !== null &&
+    (rawEpisode as Record<string, unknown>).kind === "ownership-inconclusive" &&
+    typeof (rawEpisode as Record<string, unknown>).reason === "string" &&
+    ((rawEpisode as Record<string, unknown>).reason as string).length > 0 &&
+    Number.isInteger((rawEpisode as Record<string, unknown>).since) &&
+    ((rawEpisode as Record<string, unknown>).since as number) > 0
+  );
   if (
     raw.schemaVersion !== 1 ||
     (raw.desiredState !== "running" && raw.desiredState !== "stopped") ||
@@ -121,7 +146,8 @@ export function readSupervisorState(home: string): StateReadResult {
     typeof restartCount !== "number" || !Number.isInteger(restartCount) || restartCount < 0 ||
     typeof backoffAttempt !== "number" || !Number.isInteger(backoffAttempt) || backoffAttempt < 0 || backoffAttempt > 5 ||
     !Array.isArray(raw.recentDeaths) || raw.recentDeaths.some((t) => typeof t !== "number" || !Number.isFinite(t)) ||
-    !(raw.lastDeathAt === null || typeof raw.lastDeathAt === "string")
+    !(raw.lastDeathAt === null || typeof raw.lastDeathAt === "string") ||
+    !episodeValid
   ) {
     return { ok: false, reason: "invalid-schema" };
   }
@@ -341,6 +367,22 @@ export function getBackoffDelayMs(state: SupervisorState): number {
   const delays = [0, 2000, 5000, 15000, 30000, 60000];
   const idx = Math.min(state.backoffAttempt, delays.length - 1);
   return delays[idx]!;
+}
+
+/** Open (or replace) the ownership-inconclusive episode marker (#1711 R5). */
+export function setOwnershipEpisode(home: string, episode: OwnershipEpisode): SupervisorState {
+  return withStateLock(home, "setOwnershipEpisode", (state) => {
+    state.ownershipEpisode = episode;
+    return state;
+  });
+}
+
+/** Clear the ownership episode marker once ownership is resolved (#1711 R5). */
+export function clearOwnershipEpisode(home: string): SupervisorState {
+  return withStateLock(home, "clearOwnershipEpisode", (state) => {
+    state.ownershipEpisode = null;
+    return state;
+  });
 }
 
 export function migrateSupervisorState(home: string): MigrationResult {

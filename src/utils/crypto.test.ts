@@ -24,6 +24,7 @@ describe("crypto", () => {
     writeFileSync(keyPath, hex + "\n");
     const key = loadKey(keyPath);
     expect(key).toBeInstanceOf(Buffer);
+    if (!key) throw new Error("expected key");
     expect(key.length).toBe(32);
     expect(key.toString("hex")).toBe(hex);
   });
@@ -93,7 +94,7 @@ describe("crypto", () => {
     const blob = encrypt("secret", key);
     // Flip a byte in the ciphertext portion
     const buf = Buffer.from(blob, "base64");
-    if (buf.length > 2) buf[2] ^= 0xff;
+    if (buf.length > 2) buf[2] = (buf[2] ?? 0) ^ 0xff;
     expect(decrypt(buf.toString("base64"), key)).toBeNull();
   });
 

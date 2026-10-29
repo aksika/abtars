@@ -69,7 +69,7 @@ describe("pausedGuardMiddleware (#1347)", () => {
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
         log: [], shortIndex: 1,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
         ...sessionOverrides,
       },
     } as any;

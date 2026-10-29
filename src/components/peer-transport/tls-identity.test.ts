@@ -83,7 +83,7 @@ describe("validateAgentApiTlsIdentity", () => {
 
   it("throws incomplete_pair when only key exists", () => {
     const keyPath = join(env.path, "identity.tls.key");
-    writeFileSync(keyPath, "dummy", "utf-8", { mode: 0o600 });
+    writeFileSync(keyPath, "dummy", { encoding: "utf-8", mode: 0o600 });
     try {
       validateAgentApiTlsIdentity(env.path, TEST_SIGNING_KEY);
     } catch (err) {

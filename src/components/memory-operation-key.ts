@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type MemoryMutationFamily = "inbound" | "assistant" | "feedback" | "compact";
+export type MemoryMutationFamily = "inbound" | "assistant" | "compact";
 
 const KEY_PREFIX = "abtars-mem-v1";
 const MAX_KEY_LENGTH = 128;
@@ -119,33 +119,3 @@ export function assistantMessageKey(
   ]);
 }
 
-/**
- * Build a feedback-record operation key.
- *
- * Identity tuple: [platform, channelId, userId, messageId, memoryId, feedbackType]
- *
- * Includes feedbackType so independent cite/reject events on the same message
- * do not collide, but replaying the identical reaction safely replays.
- */
-export function feedbackKey(
-  platform: string,
-  channelId: string,
-  userId: string,
-  messageId: string,
-  memoryId: number,
-  feedbackType: string,
-): string {
-  requireNonEmpty(platform, "platform");
-  requireNonEmpty(channelId, "channelId");
-  requireNonEmpty(userId, "userId");
-  requireNonEmpty(messageId, "messageId");
-  requireNonEmpty(feedbackType, "feedbackType");
-  return memoryOperationKey("feedback", [
-    platform,
-    channelId,
-    userId,
-    messageId,
-    String(memoryId),
-    feedbackType,
-  ]);
-}

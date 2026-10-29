@@ -14,14 +14,14 @@
  * K lifecycle/continuity stays in #1432; cross-session memory is outside.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 
 let TEST_HOME: string;
 
-vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test") }));
+vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test"), abtarsRoot: () => join(TEST_HOME, "live-checkout") }));
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
@@ -29,8 +29,23 @@ vi.mock("node:child_process", async () => {
 });
 import * as child_process from "node:child_process";
 
+// #1644: record bounded swarm-trace rejection evidence without changing log
+// behavior — the mock is a passthrough that also captures swarm-trace lines.
+const swarmTrace = vi.hoisted(() => ({ lines: [] as Array<{ tag: string; msg: string }> }));
+vi.mock("../../components/logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../../components/logger.js")>("../../components/logger.js");
+  return {
+    ...actual,
+    logTrace: (tag: string, msg: string) => {
+      if (tag === "swarm-trace") swarmTrace.lines.push({ tag, msg });
+      return actual.logTrace(tag, msg);
+    },
+  };
+});
+
 import type { ScheduledTask } from "../../components/tasks/task-types.js";
 import type { TaskFailureDiagnosticV1 } from "../../components/tasks/task-failure.js";
+import type { ProjectReviewDecisionV1 } from "../../components/project-acceptance/project-review-validator.js";
 
 
 // ── State store / module handles (real modules, loaded per test) ────────────
@@ -57,6 +72,7 @@ let reviewStoreMod: typeof import("../../components/project-acceptance/project-r
 let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
 let nerveMod: typeof import("../../components/nerve.js");
 let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+let WorkerSupervisionServiceClass: typeof import("../../components/worker-supervision-service.js").WorkerSupervisionService;
 let orcRunStoreMod: typeof import("../../components/orc-project/orc-project-run-store.js");
 let taskTypesMod: typeof import("../../components/tasks/task-types.js");
 
@@ -106,6 +122,11 @@ const FIXTURES: ScheduledTask[] = [
     schedule: "* * * * *", enabled: true, priority: "medium", delivery: "announce", chatId: "42424242",
   },
   {
+    id: "sha-agent-task", kind: "agent", prompt: "SHA E2E failing agent task", agent: "task",
+    interaction: { mode: "oneshot" }, orchestration: { maxAgents: 1 },
+    schedule: "* * * * *", enabled: true, priority: "medium", delivery: "silent", chatId: "42424242",
+  },
+  {
     id: "daily-reminder", kind: "reminder", text: "Take a break", schedule: "0 9 * * *",
     enabled: true, priority: "medium", delivery: "announce", chatId: "42424242",
   },
@@ -123,11 +144,14 @@ interface SchedulerDoubles {
   pausedNotifications: string[];
   spawnedCommands: string[];
   dispatchedGoals: string[];
+  /** #1724: Main-owned announcement handoffs from the delivery boundary. */
+  mainAnnouncements: Array<{ eventId: string; cardId: number; title: string; result: string }>;
+  mainAnnouncementOutcome: "sent" | "not_sent" | "unknown";
 }
 
 let doubles: SchedulerDoubles;
 
-function fakeAgentRunner(request: import("../../components/spin-types.js").SpinRequest): Promise<{ cardId: number; result: string }> {
+function fakeAgentRunner(request: import("../../components/spin-types.js").SpinRequest): Promise<{ cardId: number; result: string; outcome: "text" }> {
   const entryId = (request.title ?? "").toLowerCase().replace(/\s+/g, "-");
   doubles.dispatchedGoals.push(request.goal ?? "");
   if (entryId === "flaky-task" && doubles.providerFailures > 0) {
@@ -143,7 +167,20 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
     return import("../../components/spin-types.js").then(({ SpinDispatchAdmissionError }) =>
       Promise.reject(new SpinDispatchAdmissionError("session_capacity", "max sessions reached", undefined)));
   }
-  const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80));
+  // #1688: the SHA E2E agent task fails with a structured execution error so
+  // the real settler fires the typed failure cascade.
+  if (entryId === "sha-agent-task") {
+    const err = new Error("provider model error: sha-incident-boom") as Error & { code?: string };
+    err.code = "model_error";
+    return Promise.reject(err);
+  }
+  // Production shape: spin.dispatch pre-creates the card with the request's
+  // type/delivery/chat identity (#1724 makes those fields route delivery).
+  const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80), {
+    type: request.type,
+    delivery: request.delivery,
+    chatId: request.chatId,
+  });
   // Report tasks: the provider writes the declared artifact before settling.
   if (entryId === "report-task") {
     const dir = join(TEST_HOME, "workspace", "report-task");
@@ -153,9 +190,9 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
   // #1610: the announce task's model result is a multi-paragraph greeting
   // longer than 200 characters — the exact escaped production shape.
   if (entryId === "announce-task") {
-    return Promise.resolve({ cardId, result: ANNOUNCE_GREETING });
+    return Promise.resolve({ cardId, result: ANNOUNCE_GREETING, outcome: "text" });
   }
-  return Promise.resolve({ cardId, result: `result for ${entryId}` });
+  return Promise.resolve({ cardId, result: `result for ${entryId}`, outcome: "text" });
 }
 
 function makeDeliveryDeps() {
@@ -170,6 +207,17 @@ function makeDeliveryDeps() {
     },
     announce: async () => {},
     chatIdFor: () => "42424242",
+    // #1724: boot-composed Main-owned announcement route (boundary double —
+    // the real closure resolves the target and submits through Main).
+    announceToMain: async (card: { id: number; title: string; result_summary: string | null }): Promise<"sent" | "not_sent" | "unknown"> => {
+      doubles.mainAnnouncements.push({
+        eventId: `scheduled-card:${card.id}`,
+        cardId: card.id,
+        title: card.title,
+        result: card.result_summary ?? "",
+      });
+      return doubles.mainAnnouncementOutcome;
+    },
   };
 }
 
@@ -185,7 +233,7 @@ function makeFakeChild() {
 // ── Harness ─────────────────────────────────────────────────────────────────
 async function loadModules(): Promise<void> {
   vi.resetModules();
-  vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test") }));
+  vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test"), abtarsRoot: () => join(TEST_HOME, "live-checkout") }));
   stateStore = await import("../../components/tasks/task-state-store.js");
   historyStore = await import("../../components/tasks/task-history-store.js");
   board = await import("../../components/tasks/kanban-board.js");
@@ -210,6 +258,7 @@ async function loadModules(): Promise<void> {
   leaseStoreMod = await import("../../components/executor-lease-store.js");
   nerveMod = await import("../../components/nerve.js");
   WorkerSupervisionStoreClass = (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore;
+  WorkerSupervisionServiceClass = (await import("../../components/worker-supervision-service.js")).WorkerSupervisionService;
   orcRunStoreMod = await import("../../components/orc-project/orc-project-run-store.js");
   taskTypesMod = await import("../../components/tasks/task-types.js");
 }
@@ -239,7 +288,7 @@ async function makeQueue(): Promise<import("../../components/tasks/task-queue.js
 }
 
 /** #1539: coordinator + queue pair so journeys can drive deadlines/cancel. */
-async function makeQueueWithCoordinator(): Promise<{ queue: import("../../components/tasks/task-queue.js").CronQueue; coordinator: CoordinatorClass }> {
+async function makeQueueWithCoordinator(): Promise<{ queue: import("../../components/tasks/task-queue.js").CronQueue; coordinator: InstanceType<typeof CoordinatorClass> }> {
   const { CronQueue } = await import("../../components/tasks/task-queue.js");
   const coordinator = new CoordinatorClass({
     onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
@@ -251,6 +300,40 @@ async function makeQueueWithCoordinator(): Promise<{ queue: import("../../compon
 }
 
 /** #1548: per-test scripted Orc boundary wired into the real reconciler. */
+
+let activeTestHandle: import("../../components/reconciler.js").ReconcilerHandle | null = null;
+
+/** #1554: start a real generation over the fixture coordinator (real stores).
+ * The worker adapter is a pass-through: the fixture owns worker completion
+ * (completeWorkers), so the dispatch pump must keep claims running instead of
+ * executing real Spin sessions against an unset runtime. */
+async function startGeneration(coordinator: unknown): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
+  const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
+  const scheduler = new LifecycleWakeScheduler();
+  activeTestHandle = await reconcilerModule.startReconciler({
+    generationId: `scheduler-journey-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    coordinator: coordinator as never,
+    wakeScheduler: scheduler,
+    workerAdapter: {
+      kind: "agent",
+      schedulingPolicy: { recovery: "process_bound" },
+      capacity: async () => ({ available: 8, max: 8 }),
+      start: async () => ({ kind: "started", attemptId: "", generation: 1, executorId: "spin-local" }),
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async () => ({ kind: "running", lifecycle: "running" }),
+    } as never,
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+    subscribeCapacityReleased: () => () => {},
+  } as never);
+  await scheduler.start();
+}
+
 async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
   const { fixture, orc } = makeFixtureFactory({
     OrcProjectCoordinator: (await import("../../components/orc-project/orc-project-coordinator.js")).OrcProjectCoordinator,
@@ -260,7 +343,9 @@ async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
     WorkerSupervisionService: (await import("../../components/worker-supervision-service.js")).WorkerSupervisionService,
     WorkerSupervisionStore: (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore,
   }, opts);
-  reconcilerModule.setOrcCoordinator(orc);
+  // #1554: the fixture's Orc coordinator becomes the generation's own — no
+  // module setter wiring.
+  await startGeneration(orc);
   return { fixture, orc };
 }
 
@@ -299,7 +384,7 @@ function advanceAdmissionDeferral(taskId: string): void {
   }
 }
 
-function events(taskId: string): Array<{ outcome: string; runId?: string; groupId?: string; detail?: string; deliveryText?: string; kanbanCardId?: number; diagnostic?: { category: string; code: string } }> {
+function events(taskId: string): import("../../components/tasks/task-history-store.js").TaskRunEvent[] {
   return historyStore.recentRuns(taskId, 50);
 }
 
@@ -319,7 +404,9 @@ beforeEach(async () => {
     providerFailures: 0, providerErrors: [], admissionRejections: 0,
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
     pausedNotifications: [], spawnedCommands: [], dispatchedGoals: [],
+    mainAnnouncements: [], mainAnnouncementOutcome: "sent",
   };
+  swarmTrace.lines = [];
   vi.mocked(child_process.spawn).mockImplementation(((
     _file: string,
     args: readonly string[],
@@ -348,9 +435,11 @@ beforeEach(async () => {
     }
     return { status: "ok", detail: "cycle handled" };
   });
-});
+}, 60_000);
 
-afterEach(() => {
+afterEach(async () => {
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
@@ -389,7 +478,7 @@ describe("#1520 scheduler E2E — journey 1: system/Dreamy sleep-cycle", () => {
     const failureNotices: Array<{ entryId: string; code: string }> = [];
     const { CronQueue } = await import("../../components/tasks/task-queue.js");
     const coordinator = new CoordinatorClass({
-      onFailure: (entryId, diagnostic) => { failureNotices.push({ entryId, code: diagnostic.code }); },
+      onFailure: (event) => { failureNotices.push({ entryId: event.entryId, code: event.diagnostic.code }); },
       agentRunner: fakeAgentRunner,
       projectRunner: realProjectRunner,
     });
@@ -466,7 +555,7 @@ describe("#1520 scheduler E2E — journey 3: one-shot T report with validation a
 });
 
 describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
-  it("delivers the actual one-shot result after settlement, not a completion summary (#1610)", async () => {
+  it("hands the settled one-shot result to Main instead of sending it directly (#1724)", async () => {
     const queue = await makeQueue();
     forceDue("announce-task");
     await runTick(queue);
@@ -474,11 +563,12 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     expect(ev).toHaveLength(1);
     expect(ev[0]!.outcome).toBe("success");
 
-    // #1610: the dispatched prompt carries the delivery contract — the model
-    // is told its final response is the automatically delivered payload.
+    // #1610/#1724: the dispatched prompt carries the delivery contract — the
+    // model is told its final response is handed to Main, which announces it.
     expect(doubles.dispatchedGoals).toHaveLength(1);
     expect(doubles.dispatchedGoals[0]).toContain("[DELIVERY CONTRACT]");
-    expect(doubles.dispatchedGoals[0]).toContain("automatically delivered");
+    expect(doubles.dispatchedGoals[0]).toContain("handed to Main");
+    expect(doubles.dispatchedGoals[0]).toContain("you must not claim that you announced or sent it");
 
     // #1610: durable history separates the user payload from operational detail.
     expect(ev[0]!.deliveryText).toBe(ANNOUNCE_GREETING);
@@ -489,17 +579,295 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     expect(card.result_summary).toBe(ANNOUNCE_GREETING);
     expect(card.result_summary!.length).toBeGreaterThan(200);
 
+    // #1724: the delivery boundary hands the card to Main — the raw platform
+    // sender never sees the announcement text.
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
-    expect(doubles.sentMessages).toHaveLength(1);
-    // The greeting text itself is delivered — not a status summary.
-    expect(doubles.sentMessages[0]).toContain(ANNOUNCE_GREETING);
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.mainAnnouncements[0]!.eventId).toBe(`scheduled-card:${card.id}`);
+    expect(doubles.mainAnnouncements[0]!.result).toBe(ANNOUNCE_GREETING);
+    expect(doubles.sentMessages).toHaveLength(0);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+
+  it("keeps a not_sent Main handoff on the bounded retry path with no direct fallback (#1724)", async () => {
+    const queue = await makeQueue();
+    forceDue("announce-task");
+    await runTick(queue);
+    const ev = events("announce-task");
+    expect(ev[0]!.outcome).toBe("success");
+    const cardId = ev[0]!.kanbanCardId!;
+
+    doubles.mainAnnouncementOutcome = "not_sent";
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.sentMessages).toHaveLength(0);
+    expect(board.kanbanGetCard(cardId)!.delivery_result).toBe("definitely_not_sent");
+
+    // Retry succeeds → delivered; exactly two handoffs total.
+    doubles.mainAnnouncementOutcome = "sent";
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(2);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+
+    // Delivered cards are never re-handed to Main.
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(2);
   });
 });
 
+describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement journey", () => {
+  interface MemRow { role: "user" | "assistant"; content: string; sessionId: string; timestamp: number; id: number }
+
+  /** Memory boundary double: durable conversation rows + the #1527
+   *  projection contract the Pi transports consume for context assembly. */
+  function makeMemoryRuntime() {
+    const rows: MemRow[] = [];
+    let nextId = 1;
+    const runtime = {
+      state: "ready",
+      capabilities: new Set<string>(["durableContext"]),
+      recordMessage: vi.fn(async (m: { role: "user" | "assistant"; content: string; sessionId: string; timestamp: number }) => {
+        const id = nextId++;
+        rows.push({ ...m, id });
+        return { id };
+      }),
+      recall: vi.fn(async () => ({ hits: [] as unknown[] })),
+      recordFeedback: vi.fn(async () => ({})),
+      assembleSessionContext: vi.fn(async () => ({ coreKnowledge: "", recall: "", wakeUp: "" })),
+      // #1940: continuity comes from the recorded archive (hydration), not a
+      // durable-context projection — the projection contract is retired.
+      getRecentConversation: vi.fn(async ({ userId: _userId, since, limit }: { userId: string; since: number; limit: number }) =>
+        rows.filter(r => r.timestamp >= since).slice(-limit).map(r => ({ role: r.role, content: r.content, timestamp: r.timestamp }))),
+    };
+    return { runtime, rows };
+  }
+
+  function makeTransportDouble(reply: string): Record<string, unknown> {
+    return {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      sendPrompt: vi.fn().mockResolvedValue(reply),
+      resetSession: vi.fn().mockResolvedValue(undefined),
+      sendInterrupt: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+      transportCommands: [],
+      get isReady() { return true; },
+      contextPercent: -1,
+      toolCallsSucceeded: 0,
+      get answerOnly() { return reply; },
+    };
+  }
+
+  function makeAdapterDouble() {
+    return {
+      name: "telegram",
+      capabilities: { voice: false, reactions: false, typing: false, threads: false },
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+      authorize: () => true,
+      sendMessage: vi.fn().mockResolvedValue(1),
+      chunkResponse: (t: string) => [t],
+    };
+  }
+
+  async function makeJourney(opts: { mainReply?: string } = {}) {
+    const { MainConversationIngress } = await import("../../components/main-conversation-ingress.js");
+    const mpMod = await import("../../components/message-pipeline.js");
+    const spinMod = await import("../../components/spin.js");
+
+    const CHAT_ID = "1111111111";
+    const mem = makeMemoryRuntime();
+    const adapter = makeAdapterDouble();
+    const mainReply = opts.mainReply ?? `${ANNOUNCE_GREETING.slice(0, 60)}… — here is your morning briefing.`;
+    const transport = makeTransportDouble(mainReply);
+
+    // Real Spin singleton: allocate the master general A session.
+    const session = spinMod.spin.getActiveSession("master", "telegram");
+    session.chatId = parseInt(CHAT_ID, 10);
+    session.platform = "telegram";
+    session.userId = "master";
+    session.status = "ready";
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (s) => { s.transport = transport as never; });
+
+    // The pipeline's model-turn boundary is doubled (like every external
+    // boundary in this harness): the stub mirrors the production contract —
+    // the provider's own string plus its classified outcome.
+    const sessionManager = {
+      spin: async (spec: { sessionId?: string; prompt: string }) => {
+        const result = await (transport as { sendPrompt: (id: string, p: string) => Promise<string> }).sendPrompt(spec.sessionId ?? "", spec.prompt);
+        const { classifyContent } = await import("../../components/clean-response.js");
+        return { sessionId: spec.sessionId ?? "", result, outcome: classifyContent(result) };
+      },
+    };
+
+    const pipelineDeps = {
+      transport: transport as never,
+      config: { workingDir: "/tmp" },
+      startedAt: Date.now(),
+      memoryRuntime: mem.runtime as never,
+      memoryConfig: { memoryEnabled: true, memoryDir: join(TEST_HOME, "memory") },
+      nlmConfig: { enabled: false },
+      idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() },
+      conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() },
+      sttConfig: null,
+      ttsConfig: null,
+      sessionManager,
+      updateCtxStart: vi.fn(),
+    } as unknown as Parameters<typeof mpMod.handleInboundMessage>[2];
+
+    const ingress = new MainConversationIngress({
+      getPipelineDeps: () => pipelineDeps,
+      getAdapter: () => adapter as never,
+    });
+
+    // Boot-shaped delivery closure: identity resolved at delivery time from
+    // the card; the raw sender is armed to fail loudly if ever used.
+    const makeMainDeliveryDeps = () => ({
+      sendMessage: async (): Promise<never> => { throw new Error("raw sender must not be used for scheduled T announce"); },
+      sendDocument: async (): Promise<never> => { throw new Error("raw document sender must not be used"); },
+      announce: async () => {},
+      chatIdFor: () => CHAT_ID,
+      announceToMain: async (card: { id: number; title: string; result_summary: string | null }) =>
+        ingress.announceToMain({
+          eventId: `scheduled-card:${card.id}`,
+          cardId: card.id,
+          title: card.title,
+          userId: "master",
+          platform: "telegram",
+          chatId: CHAT_ID,
+          result: card.result_summary ?? "",
+        }),
+    });
+
+    function enqueueAnnounceCard(): number {
+      const id = board.kanbanEnqueue("Morning greeting", "task", "run-main-journey", {
+        type: "T", deliveryMode: "announce", chatId: CHAT_ID, deliveryReady: false,
+      });
+      board.kanbanRunning(id);
+      board.kanbanComplete(id, null, ANNOUNCE_GREETING);
+      board.kanbanSetDeliveryReady(id);
+      return id;
+    }
+
+    return { mem, adapter, transport, session, ingress, pipelineDeps, makeMainDeliveryDeps, enqueueAnnounceCard, handleInboundMessage: mpMod.handleInboundMessage, CHAT_ID };
+  }
+
+  it("announces through Main, records both turns durably, and grounds a later follow-up", async () => {
+    const j = await makeJourney();
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    // Exactly one external message — Main's own response, never the raw T result.
+    expect(j.adapter.sendMessage).toHaveBeenCalledTimes(1);
+    const delivered = String(j.adapter.sendMessage.mock.calls[0]![1]);
+    expect(delivered).toContain("here is your morning briefing");
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+
+    // Durable target-A-session record: internal event BEFORE the turn,
+    // Main's assistant response AFTER delivery — same session id.
+    expect(j.mem.rows).toHaveLength(2);
+    expect(j.mem.rows[0]!.role).toBe("user");
+    expect(j.mem.rows[0]!.content).toContain("[SCHEDULED TASK COMPLETED]");
+    expect(j.mem.rows[0]!.content).toContain(ANNOUNCE_GREETING);
+    expect(j.mem.rows[0]!.sessionId).toBe(j.session.id);
+    // #1873: the durable row is the historical form, while the delivery turn
+    // itself still received the one-time announcement instruction.
+    expect(j.mem.rows[0]!.content).toContain("Historical scheduled-task handoff record.");
+    expect(j.mem.rows[0]!.content).not.toContain("Announce this result");
+    const sendPromptMock = j.transport.sendPrompt as unknown as { mock: { calls: Array<[string, string]> } };
+    expect(sendPromptMock.mock.calls[0]![1]).toContain("Announce this result");
+    expect(j.mem.rows[1]!.role).toBe("assistant");
+    expect(j.mem.rows[1]!.sessionId).toBe(j.session.id);
+
+    // A later user follow-up is recorded into the same session…
+    const followUp = {
+      platform: "telegram", channelId: j.CHAT_ID, userId: "master",
+      senderId: "42", senderName: "aksika", text: "What did you say about my day?",
+      timestamp: Date.now(), isGroup: false, isVoice: false,
+    };
+    await j.handleInboundMessage(followUp as never, j.adapter as never, j.pipelineDeps);
+    expect(j.mem.rows.length).toBeGreaterThanOrEqual(3);
+
+    // …and the durable archive exposes the announcement to later hydration.
+    // #1940: no durable-context projection — continuity comes from abmind
+    // hydration (recorded archive), which the next session-start carries.
+    const recent = await j.mem.runtime.getRecentConversation({ userId: "master", since: 0, limit: 50 });
+    const contents = recent.map(m => m.content);
+    expect(contents.some(c => c.includes("[SCHEDULED TASK COMPLETED]") && c.includes(ANNOUNCE_GREETING))).toBe(true);
+    expect(contents.some(c => c.includes("morning briefing"))).toBe(true);
+    // #1873: the archived record carries the historical form and no
+    // system-composed announcement instruction from the recorded event.
+    expect(contents.some(c => c.includes("Historical scheduled-task handoff record."))).toBe(true);
+    expect(contents.every(c => !c.includes("Announce this result"))).toBe(true);
+  }, 30_000);
+
+  it("keeps the card retryable when Main is busy, without queueing or direct fallback", async () => {
+    const j = await makeJourney();
+    j.session.busy = true;
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    expect(j.adapter.sendMessage).not.toHaveBeenCalled();
+    expect(j.mem.rows).toHaveLength(0);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("done");
+    expect(board.kanbanGetCard(cardId)!.delivery_result).toBe("definitely_not_sent");
+
+    // Recovery: free Main, retry succeeds through the normal pipeline.
+    j.session.busy = false;
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+    expect(j.adapter.sendMessage).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+  }, 30_000);
+
+  it("does not treat an empty Main response as successful announcement delivery", async () => {
+    const j = await makeJourney({ mainReply: "" });
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    // No announcement content ever reached the platform, no assistant
+    // content was recorded, and the card stays truthfully retryable.
+    const announced = j.adapter.sendMessage.mock.calls.some(c => String(c[1]).includes("morning briefing"));
+    expect(announced).toBe(false);
+    expect(j.mem.rows.some(r => r.role === "assistant" && r.content.length > 0)).toBe(false);
+    // #1873: the inbound row written before the empty turn stays truthful —
+    // historical form, no announcement instruction, no delivery-success claim.
+    const inbound = j.mem.rows.find(r => r.role === "user");
+    expect(inbound?.content).toContain("Historical scheduled-task handoff record.");
+    expect(inbound?.content).not.toContain("Announce this result");
+    expect(board.kanbanGetCard(cardId)!.status).toBe("done");
+    expect(["definitely_not_sent"]).toContain(board.kanbanGetCard(cardId)!.delivery_result);
+  }, 30_000);
+
+  it("routes a scheduled K Spanish-tutor card on its role-session route, never into A (#1724 discriminator)", async () => {
+    const j = await makeJourney();
+    const ingressSpy = vi.spyOn(j.ingress, "announceToMain");
+    const kCardId = board.kanbanEnqueue("Spanish tutor kickoff", "task", "run-k-tutor", {
+      type: "K", deliveryMode: "announce", chatId: j.CHAT_ID,
+    });
+    board.kanbanRunning(kCardId);
+    board.kanbanComplete(kCardId, null, "Hola! Ready for today's lesson?");
+    const directSends: string[] = [];
+    const deps = {
+      ...j.makeMainDeliveryDeps(),
+      sendMessage: async (_chatId: string, text: string) => { directSends.push(text); return "sent" as const; },
+    };
+
+    await delivery.pollPendingDeliveries(deps);
+
+    expect(ingressSpy).not.toHaveBeenCalled();
+    expect(directSends).toHaveLength(1);
+    expect(directSends[0]).toContain("Hola!");
+    expect(j.mem.rows).toHaveLength(0);
+    expect(board.kanbanGetCard(kCardId)!.status).toBe("delivered");
+  }, 30_000);
+});
+
 describe("#1520 scheduler E2E — journey 5: multi-agent one-shot through the internal O project", () => {
-  it("supervises via the real project runner + scripted Orc, validates, settles, releases delivery once", async () => {
+  it("supervises via the real project runner + scripted provider boundary, validates, settles, releases delivery once", async () => {
     const queue = await makeQueue();
     const { fixture } = await makeFixture();
     forceDue("project-task");
@@ -521,10 +889,15 @@ describe("#1520 scheduler E2E — journey 5: multi-agent one-shot through the in
 
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
-    if (doubles.sentMessages.length !== 1) {
+    if (doubles.sentMessages.length !== 2) {
       console.error("PRJ-CARDS:", JSON.stringify(board.kanbanList("*")));
     }
-    expect(doubles.sentMessages).toHaveLength(1);
+    // #1792: runner-dispatched lanes are production-shaped worker cards
+    // (delivery_mode deliver) — the root announce plus one lane completion
+    // message, each released exactly once (a third poll sends nothing).
+    expect(doubles.sentMessages).toHaveLength(2);
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentMessages).toHaveLength(2);
   });
 });
 
@@ -739,11 +1112,13 @@ describe("#1520 scheduler E2E — journey 8: late/duplicate completion and deliv
     expect(settleRunOnce({ entry, run, outcome: "success" })).toBe("duplicate");
     expect(events("announce-task").filter(e => e.runId === "announce-task_stale")).toHaveLength(1);
 
-    // Duplicate delivery polls send exactly once.
+    // Duplicate delivery polls hand the card to Main exactly once (#1724);
+    // the raw platform sender is never used for the scheduled T announce.
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
-    expect(doubles.sentMessages).toHaveLength(1);
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.sentMessages).toHaveLength(0);
     expect(cardStatuses().filter(s => s.endsWith(":delivered"))).toHaveLength(1);
   });
 });
@@ -762,6 +1137,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const ok = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["curl"], tools: ["execute_bash"] } },
     }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
     expect(ok.ok).toBe(true);
@@ -769,6 +1145,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const removedTool = preflight.preflightTask({
       id: "removed-tool-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "removed-tool-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: [], tools: ["web_browse"] } },
     }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
     expect(removedTool.ok).toBe(false);
@@ -780,6 +1157,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const missing = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["definitely-not-a-real-exe-xyz"], tools: [] } },
     }, scope, undefined);
     expect(missing.ok).toBe(false);
@@ -788,9 +1166,9 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     }
 
     // Local O/Orc cannot reach peer transport.
-    const peerOut = await executeToolCall("peer_doorbell", { peer_name: "O" }, {});
+    const peerOut = await executeToolCall("peer_doorbell", { peer_name: "O" }, { userId: "master" });
     expect(JSON.parse(peerOut).code).toBe("local_session_not_peer");
-    const orcOut = await executeToolCall("peer_session", { peer_name: "Orc", message: "hi" }, {});
+    const orcOut = await executeToolCall("peer_session", { peer_name: "Orc", message: "hi" }, { userId: "master" });
     expect(JSON.parse(orcOut).code).toBe("local_session_not_peer");
   });
 });
@@ -813,7 +1191,7 @@ describe("#1539 scheduler E2E — journey 10: due-time retry wake with no unrela
 
       const { queue, coordinator } = await makeQueueWithCoordinator();
       const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
-      scheduler.register(dueSourcesMod.createTaskAdmissionSource(() => tick.runTaskTick(makeTickCtx(queue))));
+      scheduler.register(dueSourcesMod.createTaskAdmissionSource(async () => { await tick.runTaskTick(makeTickCtx(queue)); }));
       scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
       stateStore.setTaskDueChangedHook(() => scheduler.sourceChanged("task-admission"));
       await scheduler.start();
@@ -926,14 +1304,22 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
 
       // The reattached run still owns its workers (durable W cards); complete
       // them and accept to settle the project exactly once. Reattach performs
-      // no authoring (supervision is already executing), so the fresh fixture
+      // no authoring (the plan revision already exists), so the fresh fixture
       // records no turn.
       await waitFor(() => stateStore.readState("project-task")?.activeRun?.runId === firstRunId && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
       expect(fixture2.fixture.lastTurn).toBe("none");
-      const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-      expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("executing");
+      // #1792: supervision is runner-owned now — first dispatch moves it to
+      // executing (claim fence) and it lands accepted/blocked only at
+      // terminal projection. The pending lane survives the restart; the
+      // reattached run completes it through the real result-commit path,
+      // never a fresh authoring turn.
+      const supAfterRestart = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
+      expect(supAfterRestart?.state).toBe("executing");
+      expect(fixture2.fixture.lastTurn).toBe("none");
       fixture2.fixture.adoptRoot(rootCardId);
       fixture2.fixture.completeWorkers();
+      // the held acceptance gates the scripted review turn; once released,
+      // the fixture accepts on the open review node
       fixture2.fixture.holdAcceptance = false;
       fixture2.fixture.accept();
       await waitFor(() => queue2.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
@@ -943,7 +1329,9 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       expect(ev[0]!.outcome).toBe("success");
       expect(ev[0]!.runId).toBe(firstRunId);
       expect(rootCardId).toBeDefined();
-      // Root O + its fixture worker W are done; no duplicates.
+      // Root O is done; its worker W completed through the reattached run. No
+      // duplicates: the same run ID settled exactly once across the restart.
+      expect(cardStatuses().filter(s => s.endsWith(":done") || s.endsWith(":failed"))).toHaveLength(2);
       expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(2);
       scheduler2.stop();
     } finally {
@@ -976,7 +1364,10 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
       await tick.runTaskTick(makeTickCtx(queue));
       // The admission chain crosses dynamic imports (real I/O), so flush
       // event-loop turns deterministically until the card attachment lands
-      // and the scripted Orc has authored the contract.
+      // and the scripted planner has proposed (fixture.reach pumps the
+      // runner on every attempt).
+      const { runId: _t1runId } = await waitForReachControlled(fixture, "executing");
+      void _t1runId;
       await advanceUntil(() =>
         stateStore.readState("project-task")?.activeRun?.cardId !== undefined
         && fixture.lastTurn === "authored");
@@ -1031,7 +1422,7 @@ async function waitForReach(fixture: Awaited<ReturnType<typeof makeFixture>>["fi
 }
 
 /** #1548: same as waitForReach but for controlled-time journeys (no real sleeps). */
-async function waitForReachControlled(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract"): Promise<{ runId: string; rootCardId: number }> {
+async function waitForReachControlled(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract" | "review_requested" | "needs_input"): Promise<{ runId: string; rootCardId: number }> {
   for (let i = 0; i < 400; i++) {
     try {
       return await fixture.reach(state);
@@ -1100,276 +1491,58 @@ describe("#1548 healthy control — long-running scheduled O project with real c
   });
 });
 
-describe("#1548 Stage-1 defect cells — current dev must fail through the custody oracle", () => {
-  async function setupCell(opts: { holdAcceptance?: boolean; failOrc?: boolean; workerCount?: number } = {}) {
+describe("#1751 scheduler E2E — a failing optional lane still produces the report", () => {
+  it("accepts with the failed required:false lane disclosed and never writes restart_interrupted", async () => {
     vi.useFakeTimers();
-    const { queue, coordinator } = await makeQueueWithCoordinator();
-    const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
-    const drainCalls: number[] = [];
-    scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
-    // #1546 Task 6: production-shaped wiring — BOTH kanban-retry callbacks
-    // (Reconciler wake + unsupervised drain) are registered, so a wake that
-    // reaches the drain for a supervised root is a named harness artifact.
-    scheduler.register(dueSourcesMod.createKanbanRetrySource((cardId: number) => {
-      reconcilerModule.requestReconcile(cardId);
-    }, () => { drainCalls.push(1); }));
-    await scheduler.start();
-    const { fixture } = await makeFixture({ holdAcceptance: opts.holdAcceptance ?? true, workerCount: opts.workerCount ?? 1 });
-    return { queue, coordinator, scheduler, fixture, drainCalls };
-  }
-
-  function supervisedRetrySource(drainCalls: number[]) {
-    return dueSourcesMod.createKanbanRetrySource((cardId: number) => {
-      reconcilerModule.requestReconcile(cardId);
-    }, () => { drainCalls.push(1); });
-  }
-
-  it("cell 1 (#1546): Orc terminal failure in worker-owned executing leaves the retry path without an owner", async () => {
-    const { queue, coordinator, scheduler, fixture, drainCalls } = await setupCell();
     try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      // v2 root contract: c1 is required (worker lane 0), c2 is optional
+      // (worker lane 1) — the incident's contract shape.
+      const { fixture } = await makeFixture({ v2RootContract: true, workerCount: 2 });
+
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
       const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
 
-      fixture.failOrc("terminal_tool");
-      fixture.failWorkers();
-      fixture.retryRoot("orc terminal failure");
-      const retryAt = Date.parse(board.kanbanGetCard(rootCardId)!.next_retry_at as string);
+      // The optional lane fails while the required lane completes. Lane
+      // failure must not block synthesis: no restart_interrupted, no abort.
+      fixture.completeWorker(0);
+      fixture.failWorker(1);
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.accept();
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
 
-      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
-      const kanbanRetrySource = supervisedRetrySource(drainCalls);
-
-      // The retry becomes due and is woken twice, >=1s apart, with the real
-      // reconciler pump attached: the retry path must re-claim the project.
-      // Current dev produces no correlated effect — the ownership loss is the
-      // named red diagnostic.
-      await vi.advanceTimersByTimeAsync(Math.max(1, retryAt - Date.now() + 1));
-      await observer.fireWake(kanbanRetrySource);
-      await vi.advanceTimersByTimeAsync(600);
-      observer.checkpoint();
-      await vi.advanceTimersByTimeAsync(600);
-      await observer.fireWake(kanbanRetrySource);
-      await vi.advanceTimersByTimeAsync(600);
-
-      // R6: this cell is intentionally RED on current dev. The retry path
-      // must re-claim the project; current dev cannot, so the custody oracle
-      // throws the named diagnostic. The shape is verified and the original
-      // error re-thrown — the failure IS the red evidence, never a generic
-      // timeout. After the #1546/#1547 fix the checkpoint passes and the
-      // post-fix assertions below run.
-      try {
-        observer.checkpoint();
-        const snap = observer.sample();
-        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
-        expect(snap.historyOutcome).toBeUndefined();
-        // Task 6: exactly one correlated claim after the retry (the admission
-        // authoring row plus one review claim); the second wake is idempotent.
-        expect(new orcRunStoreMod.OrcProjectRunStore().getRunsForProject(rootCardId)).toHaveLength(2);
-      } catch (e) {
-        if (e instanceof CustodyGapErrorClass) {
-          expect(e.kind).toBe("two_no_effect_wakes");
-          expect(e.wake?.sourceId).toBe("kanban-retry");
-          process.stdout.write("CELL1 " + e.message + "\n");
-          throw e;
-        }
-        throw e;
-      } finally {
-        observer.stop();
-        scheduler.stop();
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("cell 2 (#1546): the same failure plus bridge restart before retry dispatch", async () => {
-    const { queue, coordinator, scheduler, fixture } = await setupCell();
-    try {
-      forceDue("project-task");
-      await tick.runTaskTick(makeTickCtx(queue));
-      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
-
-      fixture.failOrc("terminal_tool");
-      fixture.failWorkers();
-      fixture.retryRoot("orc terminal failure");
-
-      // Restart before retry dispatch: fresh queue/coordinator recover the run.
-      // #1546 post-fix: the reattached runner wakes the shared driver, which
-      // promotes the due retry (claim-before-promotion), creates the review
-      // case for the terminal workers, and dispatches the Orc review. The
-      // fresh Orc dies on its review turn, leaving the open case + pending
-      // request as the durable owner — no legacy Spin dispatch, no settlement.
-      const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
-      const fixture2 = await makeFixture({ holdAcceptance: true, reviewMode: "die" });
-      const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
-      scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
-      const drainCalls2: number[] = [];
-      scheduler2.register(supervisedRetrySource(drainCalls2));
-      await scheduler2.start();
-      let reattached = false;
-      await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
-        const enqueueResult = queue2.enqueue(entry, false, run);
-        if (enqueueResult) return false;
-        reattached = true;
-        return true;
-      });
-      expect(reattached).toBe(true);
-
-      const observer = new observerClass("project-task", runId, observerStores(queue2, coordinator2, runId));
-      // The durable retry was due before restart. The driver owns the due
-      // check and promotion; the run keeps a durable owner (open review case)
-      // and never reaches the absolute deadline.
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(drainCalls2).toHaveLength(0); // the supervised root never drains
-
-      // Post-fix contract: one correlated review claim, consumed retry item,
-      // preserved run ID, no settlement.
-      try {
-        observer.checkpoint();
-        const snap = observer.sample();
-        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
-        expect(snap.durableContinuations.some(c => c.kind === "review_request" || c.kind === "orc_claim")).toBe(true);
-        expect(snap.historyOutcome).toBeUndefined();
-      } catch (e) {
-        if (e instanceof CustodyGapErrorClass) {
-          expect(e.kind).toBe("no_custody");
-          expect(e.snapshot.rootCardId).toBe(rootCardId);
-          expect(e.snapshot.supervisionState).toBe("executing");
-          expect(e.snapshot.liveAttempts).toHaveLength(0);
-          expect(e.snapshot.durableContinuations).toHaveLength(0);
-          process.stdout.write("CELL2 " + e.message + "\n");
-          throw e;
-        }
-        throw e;
-      } finally {
-        observer.stop();
-        scheduler2.stop();
-        scheduler.stop();
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("cell 3 (#1547): restart reattach from valid non-terminal executing with no live child", async () => {
-    const { queue, coordinator, scheduler, fixture } = await setupCell();
-    try {
-      forceDue("project-task");
-      await tick.runTaskTick(makeTickCtx(queue));
-      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
-
-      // The Orc dies; the live child is removed through the scripted failure.
-      fixture.failOrc("terminal_tool");
-      fixture.failWorkers();
-
-      // Restart: fresh harness reattaches the same run.
-      // #1546 post-fix: the reattach wake routes the run into the shared
-      // driver, which creates the review case for the terminal workers and
-      // dispatches the Orc review. The fresh Orc dies on its review turn,
-      // leaving the open case + pending request as the real durable owner
-      // after reattach.
-      const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
-      const fixture2 = await makeFixture({ holdAcceptance: true, reviewMode: "die" });
-      const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
-      scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
-      scheduler2.register(supervisedRetrySource([]));
-      let reattached = false;
-      await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
-        const enqueueResult = queue2.enqueue(entry, false, run);
-        if (enqueueResult) return false;
-        reattached = true;
-        return true;
-      });
-      expect(reattached).toBe(true);
-      expect(stateStore.readState("project-task")!.activeRun!.runId).toBe(runId);
-      fixture2.fixture.adoptRoot(rootCardId);
-
-      const observer = new observerClass("project-task", runId, observerStores(queue2, coordinator2, runId));
-      // The failed-worker terminal fact must clear its settle grace; after
-      // that the reattached run has no child, no continuation, and no driver.
-      await vi.advanceTimersByTimeAsync(20_000);
-
-      // R6: intentionally RED on current dev — see cell 1 for the contract.
-      try {
-        observer.checkpoint();
-        const snap = observer.sample();
-        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
-        expect(snap.historyOutcome).toBeUndefined();
-      } catch (e) {
-        if (e instanceof CustodyGapErrorClass) {
-          expect(e.kind).toBe("no_custody");
-          expect(e.snapshot.rootCardId).toBe(rootCardId);
-          expect(e.snapshot.supervisionState).toBe("executing");
-          expect(e.snapshot.liveAttempts).toHaveLength(0);
-          process.stdout.write("CELL3 " + e.message + "\n");
-          throw e;
-        }
-        throw e;
-      } finally {
-        observer.stop();
-        scheduler2.stop();
-        scheduler.stop();
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("cell 4 (#1546): a due supervised-root retry whose wake produces no correlated effect", async () => {
-    const { queue, coordinator, scheduler, fixture, drainCalls } = await setupCell();
-    try {
-      forceDue("project-task");
-      await tick.runTaskTick(makeTickCtx(queue));
-      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
-
-      fixture.failOrc("terminal_tool");
-      fixture.failWorkers();
-      fixture.retryRoot("orc terminal failure");
-      const retryCard = board.kanbanGetCard(rootCardId)!;
-      const retryAt = Date.parse(retryCard.next_retry_at as string);
-      expect(retryAt).toBeGreaterThan(Date.now());
-
-      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
-      const kanbanRetrySource = supervisedRetrySource(drainCalls);
-
-      // Fire two correlated wakes separated by at least 1s once due: both
-      // must be no-effect on current dev (the retry path loses ownership).
-      await vi.advanceTimersByTimeAsync(retryAt - Date.now() + 1);
-      await observer.fireWake(kanbanRetrySource);
-      await vi.advanceTimersByTimeAsync(600);
-      observer.checkpoint();
-      await vi.advanceTimersByTimeAsync(600);
-      await observer.fireWake(kanbanRetrySource);
-      await vi.advanceTimersByTimeAsync(600);
-
-      // R6: intentionally RED on current dev — see cell 1 for the contract.
-      try {
-        observer.checkpoint();
-        const snap = observer.sample();
-        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
-        expect(snap.historyOutcome).toBeUndefined();
-        // Task 6: one correlated claim after the retry; the two manual wakes
-        // are idempotent — no third run row.
-        expect(new orcRunStoreMod.OrcProjectRunStore().getRunsForProject(rootCardId)).toHaveLength(2);
-      } catch (e) {
-        if (e instanceof CustodyGapErrorClass) {
-          expect(e.kind).toBe("two_no_effect_wakes");
-          expect(e.wake?.wakeTimes).toHaveLength(2);
-          process.stdout.write("CELL4 " + e.message + "\n");
-          throw e;
-        }
-        throw e;
-      } finally {
-        observer.stop();
-        scheduler.stop();
-      }
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("success");
+      expect(ev[0]!.runId).toBe(runId);
+      expect(ev[0]!.diagnostic?.code).not.toBe("restart_interrupted");
+      // #1792: the failed optional lane is disclosed in the runner's node
+      // outcomes (the retired review-decision lanes JSON is gone with the
+      // Orc dispatch chain) — one lane succeeded, one failed, run accepted.
+      const wfMod = await import("../../components/orc-project/orc-workflow-store.js");
+      const wfStore = new wfMod.WorkflowStore();
+      const wfRun = wfStore.findLatestRunByCard(rootCardId);
+      expect(wfRun).toBeDefined();
+      const nodes = wfStore.listNodes(wfRun!.runId, wfStore.currentRevision(wfRun!.runId));
+      const laneNodes = nodes.filter((n) => n["kind"] === "work");
+      expect(laneNodes).toHaveLength(2);
+      expect(laneNodes.map((n) => n["status"]).sort()).toEqual(["failed", "succeeded"]);
+      expect(queue.currentJobs).toHaveLength(0);
+      scheduler.stop();
     } finally {
       vi.useRealTimers();
     }
   });
 });
 
-function observerStores(queue: import("../../components/tasks/task-queue.js").CronQueue, _coordinator: CoordinatorClass, runId: string) {
+// #1792: Stage-1 defect cells (cells 1-4) deleted with the retired Orc-dispatch custody model they pinned red —
+// the orc_claim/review_request custody continuations no longer exist under runner admission; ownership/audit coverage lives in orc-workflow.e2e.
+
+function observerStores(queue: import("../../components/tasks/task-queue.js").CronQueue, _coordinator: InstanceType<typeof CoordinatorClass>, runId: string) {
   return {
     readRun: (taskId: string) => stateStore.readState(taskId)?.activeRun,
     historyOutcome: (rid: string) => events("project-task").find(e => e.runId === rid)?.outcome,
@@ -1386,7 +1559,7 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
     pendingInputRequests: (rid: number) => new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rid),
     currentJobs: () => queue.currentJobs,
     now: () => Date.now(),
-    onCardEvent: (cb) => {
+    onCardEvent: (cb: (cardId: number) => void) => {
       const n = nerveMod.nerve;
       n.on("card:done", cb);
       n.on("card:failed", cb);
@@ -1401,7 +1574,7 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
 }
 
 describe("#1548 Task-6 coverage — dispatcher-owned review and external input wait", () => {
-  it("review_requested holds custody through the review_request continuation and settles from the Orc review", async () => {
+  it("review holds custody through the verdict and settles from the scripted accept", async () => {
     vi.useFakeTimers();
     try {
       const { queue, coordinator } = await makeQueueWithCoordinator();
@@ -1417,16 +1590,12 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       observer.sample(); // capture the root card before settlement
       observer.startPolling(); // R4: 100 ms journey-clock fallback poll
 
+      // Workers settle through the real result-commit path; the scripted
+      // reviewer accepts on the open review node and the run delivers.
       fixture.completeWorkers();
-      // The real reconciler assembles the case, inserts the review request,
-      // and schedules the Orc review turn.
-      reconcilerModule.requestReconcile(rootCardId);
-      await advanceUntil(() => fixture.lastTurn === "reviewed" || !stateStore.readState("project-task")?.activeRun);
-
-      if (!stateStore.readState("project-task")?.activeRun) {
-        console.error("T6a settled early:", JSON.stringify(events("project-task")));
-      }
+      expect(rootCardId).toBeDefined();
       await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+      expect(fixture.lastTurn).toBe("reviewed");
       observer.assertTerminal({ outcome: "success", source: "project_accepted" });
       const ev = events("project-task");
       expect(ev).toHaveLength(1);
@@ -1438,7 +1607,7 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
     }
   });
 
-  it("needs_input holds custody through the input_request continuation; answering resumes to acceptance", async () => {
+  it("needs_input holds the run in awaiting_input; answering resumes to acceptance", async () => {
     vi.useFakeTimers();
     try {
       const { queue, coordinator } = await makeQueueWithCoordinator();
@@ -1452,25 +1621,27 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
 
       fixture.completeWorkers();
-      reconcilerModule.requestReconcile(rootCardId);
       await waitForReachControlled(fixture, "needs_input");
 
-      // Pending external input is a named durable continuation: custody is
-      // held while the run waits.
-      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      // #1792: the input wait is runner-owned (durable input row, run
+      // awaiting_input) — the retired project_supervision needs_input state
+      // and Orc input-resume turn are gone, so this journey asserts the
+      // runner evidence directly instead of through the custody observer.
+      const pending = new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rootCardId);
+      expect(pending.length).toBeGreaterThan(0);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(observer.sample().durableContinuations.some(c => c.kind === "input_request")).toBe(true);
-      observer.checkpoint();
+      // Custody holds while waiting: no history row, run still live.
+      expect(events("project-task")).toHaveLength(0);
+      expect(stateStore.readState("project-task")?.activeRun?.runId).toBe(runId);
 
-      // The operator answers; the reconciler opens the next review round and
-      // the Orc review accepts.
+      // The operator answers; the scripted resume turn accepts.
       fixture.answerInput("scope confirmed");
-      fixture.setReviewMode("accept");
-      reconcilerModule.requestReconcile(rootCardId);
       await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
-      observer.assertTerminal({ outcome: "success", source: "project_accepted" });
-      expect(events("project-task")).toHaveLength(1);
-      observer.stop();
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("success");
+      expect(ev[0]!.runId).toBe(runId);
+      expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("accepted");
       scheduler.stop();
     } finally {
       vi.useRealTimers();
@@ -1509,7 +1680,7 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
     }
   });
 
-  it("a repair decision re-works the project through repair_planned -> repairing -> round 2 and accepts", async () => {
+  it("a repair verdict re-works the project through a bounded repair wave and accepts the re-review", async () => {
     vi.useFakeTimers();
     try {
       const { queue, coordinator } = await makeQueueWithCoordinator();
@@ -1525,38 +1696,29 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       observer.sample();
       observer.startPolling();
 
-      // Round 1: workers done -> the Orc review decides repair (durable
-      // decision, generation advance) and the fixture creates the repair
-      // worker. A second reconcile pass (production re-wakes the card on the
-      // decision settlement) moves repair_planned -> repairing.
+      // Round 1: workers done -> the scripted review returns changes_required
+      // (runner queues bounded repair planning) and the scripted planner
+      // proposes the repair wave, which dispatches a second worker.
       fixture.completeWorkers();
-      reconcilerModule.requestReconcile(rootCardId);
-      await waitForReachControlled(fixture, "repair_planned");
-      // The durable repair decision is a named reconciler-owned continuation.
-      expect(observer.sample().durableContinuations.some(c => c.kind === "repair_planned")).toBe(true);
+      await advanceUntil(() => board.kanbanGetChildren(rootCardId).filter((c) => c.type === "W").length >= 2);
       observer.checkpoint();
-      reconcilerModule.requestReconcile(rootCardId);
-      await waitForReachControlled(fixture, "repairing");
       await vi.advanceTimersByTimeAsync(500);
       const snapRepair = observer.sample();
       expect(snapRepair.liveAttempts.length).toBeGreaterThan(0);
       observer.checkpoint();
 
-      // Repair worker completes; the reconciler opens review round 2 and the
-      // Orc review accepts.
+      // Repair worker completes; the re-review on the original review node
+      // accepts the repaired revision.
       fixture.completeWorkers();
       fixture.setReviewMode("accept");
-      reconcilerModule.requestReconcile(rootCardId);
+      fixture.accept();
       await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
-      if (!stateStore.readState("project-task")?.activeRun) {
-        const sup2 = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
-        process.stdout.write("REPAIR2 state=" + sup2?.state + " ev=" + JSON.stringify(events("project-task")) + "\n");
-      }
       observer.assertTerminal({ outcome: "success", source: "project_accepted" });
       expect(events("project-task")).toHaveLength(1);
       const sup = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
       expect(sup?.state).toBe("accepted");
-      expect(sup?.review_round).toBeGreaterThanOrEqual(1);
+      // The repair wave ran: a second worker lane exists and is terminal.
+      expect(board.kanbanGetChildren(rootCardId).filter((c) => c.type === "W").length).toBeGreaterThanOrEqual(2);
       observer.stop();
       scheduler.stop();
     } finally {
@@ -1569,15 +1731,15 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
   it("settles once with supervision/lane_late_completion, notifies the operator with the lane facts, and stays silent for deferred runs", async () => {
     const cascadeDiagnostics: TaskFailureDiagnosticV1[] = [];
     const cascadeNotifications: string[] = [];
-    const { buildFailureNotification, buildShaFailurePrompt } = await import("../../boot/phase-pipeline-deps.js");
+    const { buildFailureNotification } = await import("../../boot/phase-pipeline-deps.js");
     const { CronQueue } = await import("../../components/tasks/task-queue.js");
     const coordinator = new CoordinatorClass({
       onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
       agentRunner: fakeAgentRunner,
       projectRunner: realProjectRunner,
-      onFailure: (entryId, diagnostic) => {
-        cascadeDiagnostics.push(diagnostic);
-        cascadeNotifications.push(buildFailureNotification(entryId, diagnostic));
+      onFailure: (event) => {
+        cascadeDiagnostics.push(event.diagnostic);
+        cascadeNotifications.push(buildFailureNotification(event));
       },
     });
     const queue = new CronQueue(coordinator);
@@ -1592,11 +1754,19 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     // late-completion cancel reason and records the absence envelope.
     const workerCard = board.kanbanGetChildren(rootCardId).find((c) => c.type === "W")!;
     const supStore = new WorkerSupervisionStoreClass();
+    const pending = supStore.getLatestAttempt(workerCard.id)!;
+    // The pass-through dispatch pump may not hold the claim yet; claim the
+    // lane synchronously so terminal settlement accepts it (settlement setup,
+    // not dispatch — the attempt row itself is production-created).
+    if (pending.lifecycle === "pending") {
+      const claim = supStore.claimAttempt(workerCard.id, pending.contract_id, pending.executor_kind, pending.executor_id, pending.generation || 1);
+      if (claim) supStore.markAttemptRunning(claim.attemptId);
+    }
     const attempt = supStore.getLatestAttempt(workerCard.id)!;
     supStore.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?")
       .run(new Date(Date.now() - 30_000).toISOString(), attempt.id);
     const settled = supStore.terminalSettlement({
-      attemptId: attempt.id, expectedGeneration: 1, desiredState: "completed", stableReason: "worker_completed",
+      attemptId: attempt.id, expectedGeneration: attempt.generation || 1, desiredState: "completed", stableReason: "worker_completed",
     });
     expect(settled.kind).toBe("settled");
     if (settled.kind === "settled") expect(settled.lifecycle).toBe("timed_out");
@@ -1606,9 +1776,9 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(absence).toBeDefined();
     expect(absence!.envelope.outcome).toBe("timed_out");
 
-    // The worker card completes; the Orc review blocks the project.
+    // The worker card completes; the failed lane fails the run through the
+    // runner, and the scheduled settler records the lane-level root cause.
     board.kanbanComplete(workerCard.id, null, "worker complete");
-    fixture.block("late completion review blocked");
     await waitFor(() => !stateStore.readState("project-task")?.activeRun);
 
     // 1. Durable history carries the supervision diagnostic with full context.
@@ -1618,10 +1788,10 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(ev[0]!.outcome).toBe("failed");
     const diag = ev[0]!.diagnostic as TaskFailureDiagnosticV1;
     expect(diag.category).toBe("supervision");
-    // #1605 R6: an Orc-authored blocked decision is the terminal authority —
-    // project_blocked with the Orc blocker; lane facts remain review evidence.
-    expect(diag.code).toBe("project_blocked");
-    expect(diag.message).toContain("late completion review blocked");
+    // #1792: the terminal authority is the runner, not an Orc-authored blocked
+    // decision — the lane fault wins over the generic run reason.
+    expect(diag.code).toBe("lane_late_completion");
+    expect(diag.message).toContain("completed after its hard deadline");
     const lane = diag.context!.lanes[0]!;
     expect(lane.cardId).toBe(workerCard.id);
     expect(lane.contractId).toMatch(/^c_/);
@@ -1632,7 +1802,10 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(lane.settledAt).toBeDefined();
     expect(lane.overrunMs).toBeGreaterThan(0);
     expect(lane.bindingLimit).toEqual({ name: "max_duration_ms", value: 120_000 });
-    expect(lane.criteria).toContainEqual({ id: "w0", status: "not_run" });
+    // #1792: criterion ids are runner-plan-derived (`<node>-c0`), not the
+    // retired fixture-authored `w0` — the absence evidence shape is unchanged.
+    expect(lane.criteria).toContainEqual(expect.objectContaining({ status: "not_run" }));
+    expect(lane.criteria[0]!.id).toMatch(/-c0$/);
     expect(lane.missingEvidence).toEqual([]);
 
     // 2. The failure callback fired exactly once for the run.
@@ -1640,33 +1813,420 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
 
     // 3. The operator notification carries category/code and the lane facts.
     expect(cascadeNotifications).toHaveLength(1);
-    // #1605 R6: the Orc-blocked decision is the terminal authority — the
-    // notification names project_blocked with the Orc blocker and the lane
-    // facts underneath.
-    expect(cascadeNotifications[0]).toContain("Project Task failed - supervision/project_blocked");
+    // #1792: the notification names the lane fault the runner selected.
+    expect(cascadeNotifications[0]).toContain("Project Task failed - supervision/lane_late_completion");
     expect(cascadeNotifications[0]).toContain(`card ${workerCard.id}`);
     expect(cascadeNotifications[0]).toContain("binding_limit max_duration_ms=120000");
     expect(cascadeNotifications[0]).toContain("overrun_ms");
     expect(cascadeNotifications[0]).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
 
-    // 4. The SHA prompt built from the captured diagnostic carries the
-    // structured root cause and its guardrails (full chain per spec).
-    const shaPrompt = buildShaFailurePrompt("project-task", cascadeDiagnostics[0]!, "");
-    expect(shaPrompt).toContain("Category: supervision/project_blocked");
-    expect(shaPrompt).toContain("<root-cause>");
-    expect(shaPrompt).toContain(`card="${workerCard.id}"`);
-    expect(shaPrompt).toContain('cancel-reason="late_completion_timed_out: worker_completed"');
-    expect(shaPrompt).toContain("Permitted remediation: task_manage action=adjust (bounded) or action=escalate.");
-    expect(shaPrompt).toContain("- transport.json\n- .env / .env.skills\n- peers.json\n- users.json");
+    // 4. The admission notice built from the captured diagnostic stays typed
+    // and bounded (#1688).
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    const shaNotice = shaAdmissionNotice(
+      { source: "scheduled", entryId: "project-task", runId: "r", taskKind: "agent", diagnostic: cascadeDiagnostics[0]!, occurredAt: Date.now() },
+      { kind: "ignored", reason: "system" },
+    );
+    expect(shaNotice).toContain("system-kind");
+});
+});
 
-    // 5. A deferred occurrence produces zero cascade sends.
-    const deferredEntry = taskStore.readEntries().find((e) => e.id === "deferred-task")!;
-    const enqueueErr = queue.enqueue(deferredEntry, true);
-    expect(enqueueErr).toBeNull();
-    await waitFor(() => events("deferred-task").length === 1 && !stateStore.readState("deferred-task")?.activeRun);
-    expect(events("deferred-task")[0]!.outcome).toBe("deferred");
-    expect(cascadeDiagnostics).toHaveLength(1);
-    expect(cascadeNotifications).toHaveLength(1);
+describe("#1644 E2E — scheduled-project terminal authority (incident shape)", () => {
+  it("fails once after all lanes fail; a stale spawn, a late result, and delivery all lose their authority", async () => {
+    const queue = await makeQueue();
+    const { fixture, orc } = await makeFixture({ workerCount: 3, reviewMode: "blocked" });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    // A stale Orc turn claims its run BEFORE the terminal settlement (the
+    // incident's verification-handoff shape); then all three lanes fail and
+    // the runner terminalizes the project.
+    const armed = fixture.armStaleSpawn("Web verification handoff");
+    expect("error" in armed).toBe(false);
+    if ("error" in armed) throw new Error(armed.error);
+    fixture.failWorkers();
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
+
+    // 1. Exactly one failed history entry; the root is blocked.
+    const ev = events("project-task");
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.runId).toBe(runId);
+    expect(ev[0]!.outcome).toBe("failed");
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("blocked");
+
+    // 2. #1792: no Orc turn owns the project anymore, so there is no stale
+    // run left to supersede — instead the terminal settlement fences the
+    // claim boundary itself: re-claiming the armed generation now fails
+    // closed as project_terminal.
+    const reclaim = orc.getStore().claimIntent({
+      projectCardId: rootCardId,
+      intentKind: "operator_turn",
+      intentRef: `stale-${Date.now()}`,
+      goal: "stale operator turn",
+      originKind: "local",
+      sourcePeer: null,
+      cardSource: "local",
+      expectedProjectGeneration: armed.projectGeneration,
+    }, "test-fixture", "fixture-stale-holder");
+    expect(reclaim.kind).toBe("not_actionable");
+    if (reclaim.kind === "not_actionable") expect(reclaim.reason).toBe("project_terminal");
+
+    // 3. The paused stale spawn cannot create a child post-terminal — no
+    // durable child card, contract, or attempt beyond the three original lanes.
+    const stale = fixture.releaseStaleSpawn();
+    expect(stale.rejected).toBe(true);
+    if (stale.error) expect(stale.error).toContain("project_terminal");
+    const children = board.kanbanGetChildren(rootCardId).filter(c => c.type === "W");
+    expect(children).toHaveLength(3);
+    const contracts = orc.getStore().db.prepare(`SELECT COUNT(*) AS cnt FROM worker_contracts`).get() as { cnt: number };
+    expect(contracts.cnt).toBe(3);
+
+    // 4. A late worker result is rejected at the project-authority fence: the
+    // failed lane attempt keeps its durable state and gains no new result.
+    const workerCard = children[0]!;
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(workerCard.id)!;
+    expect(attempt.lifecycle).toBe("failed");
+    const beforeLate = supStore.getResultByAttempt(attempt.id);
+    const late = fixture.submitLateWorkerResult(workerCard.id, attempt.id);
+    expect(late.settled).toBe(false);
+    expect(late.stale).toBe(true);
+    expect(supStore.getAttempt(attempt.id)!.lifecycle).toBe("failed");
+    expect(supStore.getResultByAttempt(attempt.id)).toEqual(beforeLate);
+
+    // 5. The delivery poll (captured platform boundary) sends nothing: the
+    // blocked root is not done, no artifact was attached, delivery never
+    // released.
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("failed");
+    expect(root.delivery_ready).toBe(0);
+    expect(root.result_path).toBeNull();
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments).toHaveLength(0);
+    expect(doubles.sentMessages).toHaveLength(0);
+
+    // 6. Bounded structured rejection traces: child creation and the late
+    // worker result each emitted exactly one primary rejection record.
+    const rejections = swarmTrace.lines.filter(l => l.msg.includes("project_mutation_rejected"));
+    expect(rejections.filter(l => l.msg.includes("child_creation"))).toHaveLength(1);
+    expect(rejections.filter(l => l.msg.includes("worker_result_settlement"))).toHaveLength(1);
+    expect(rejections.every(l => l.msg.includes("project_terminal"))).toBe(true);
+    // No content leak: bounded trace carries no prompts or results.
+    expect(rejections.every(l => !l.msg.includes("<summary>"))).toBe(true);
+  });
+});
+
+describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptance", () => {
+  const workspaceOf = (rootCardId: number): string => {
+    const scope = new reviewStoreMod.ProjectReviewStore().getWorkspaceScope(rootCardId);
+    if (!scope) throw new Error("scheduled project workspace was never bound");
+    return scope.cwd;
+  };
+
+  /** #1792: the legacy review-service path under test needs a root contract.
+   *  Runner plans carry no legacy contract row, so these journeys insert the
+   *  decided contract as explicit service-test input AFTER dispatch
+   *  (creation-time mapping validation already passed with no root contract
+   *  present). Shapes mirror the retired fixture-authored contracts. */
+  function insertRootContract(rootCardId: number, v2: boolean): void {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const base = {
+      id: `fixture_contract_${rootCardId}_${Date.now()}`,
+      digest: `fixture_digest_${rootCardId}`,
+      project_card_id: rootCardId,
+      goal: "scheduled project work",
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 1, max_repair_rounds: 1 },
+      provenance: { requested_by: "scheduler", authored_by: "fixture-orc", created_at: new Date().toISOString() },
+    };
+    const contract = v2
+      ? {
+          ...base,
+          schema_version: 2,
+          criteria: [
+            { id: "c1", description: "Task goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" },
+            { id: "c2", description: "Optional extra lane", required: false, execution_owner: "delegated", evidence_expectation: "synthesis" },
+          ],
+        }
+      : {
+          ...base,
+          schema_version: 1,
+          criteria: [
+            { id: "c1", description: "Task goal met", required: true, evidence_expectation: "synthesis" },
+          ],
+        };
+    store.insertContract(contract as never);
+  }
+
+  /** #1792: map each dispatched lane to its root criterion (the production
+   *  port creates unmapped children; the service under test reads the
+   *  mapping at assembly time). Supports are assigned in child order. */
+  function mapLanesToRoot(rootCardId: number, supports: string[][]): void {
+    const supStore = new WorkerSupervisionStoreClass();
+    const lanes = board.kanbanGetChildren(rootCardId).filter((c) => c.type === "W");
+    if (lanes.length !== supports.length) {
+      throw new Error(`mapLanesToRoot: ${lanes.length} lanes but ${supports.length} mappings`);
+    }
+    lanes.forEach((lane, i) => {
+      const row = supStore.getContractByCardId(lane.id);
+      if (!row) throw new Error(`mapLanesToRoot: no contract for lane #${lane.id}`);
+      const parsed = JSON.parse(row.contract_json) as { supports_root_criteria?: string[] };
+      parsed.supports_root_criteria = supports[i]!;
+      supStore.db.prepare(`UPDATE worker_contracts SET contract_json = ? WHERE id = ?`)
+        .run(JSON.stringify(parsed), row.id);
+    });
+  }
+
+  /** #1792: resolve the file-artifact evidence id of a lane's contract (the
+   *  retired `a0` shorthand no longer exists; ids are port-derived). */
+  function laneArtifactEvidence(attemptId: string, cardId: number): string {
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getAttempt(attemptId);
+    if (!attempt) throw new Error(`laneArtifactEvidence: unknown attempt ${attemptId}`);
+    const contract = supStore.getContract(attempt.contract_id);
+    if (!contract) throw new Error(`laneArtifactEvidence: unknown contract for ${attemptId}`);
+    const parsed = JSON.parse(contract.contract_json) as {
+      expected_artifacts?: Array<{ id: string; kind: string; required: boolean }>;
+    };
+    const file = (parsed.expected_artifacts ?? []).find((a) => a.kind === "file" && a.required);
+    if (!file) throw new Error(`laneArtifactEvidence: no required file artifact for card #${cardId}`);
+    return `attempt:${attemptId}:artifact:${file.id}`;
+  }
+
+  /** Settle the lane through the REAL collectAndSettle path in the bound
+   *  workspace; write the artifact first when the lane should pass. */
+  function settleLane(rootCardId: number, cardId: number, artifactExists: boolean): { attemptId: string; summary: string } {
+    const svc = new WorkerSupervisionServiceClass();
+    const supStore = new WorkerSupervisionStoreClass();
+    const pending = supStore.getLatestAttempt(cardId)!;
+    // #1792: lanes are production-dispatched (pending until the dispatch pump
+    // or an explicit claim holds them); claim synchronously before settling.
+    if (pending.lifecycle === "pending") {
+      const claim = supStore.claimAttempt(cardId, pending.contract_id, pending.executor_kind, pending.executor_id, pending.generation || 1);
+      if (claim) supStore.markAttemptRunning(claim.attemptId);
+    }
+    const attempt = supStore.getLatestAttempt(cardId)!;
+    const cwd = workspaceOf(rootCardId);
+    if (artifactExists) {
+      const artifact = join(cwd, "out", `lane-${attempt.ordinal - 1}.md`);
+      mkdirSync(dirname(artifact), { recursive: true });
+      writeFileSync(artifact, "lane delivered\n", "utf-8");
+    }
+    const outcome = svc.collectAndSettle(cardId, "<summary>lane finished</summary>", cwd, attempt.id, attempt.generation);
+    if (!outcome.settled) throw new Error(`lane settlement failed: ${outcome.summary}`);
+    return { attemptId: attempt.id, summary: outcome.summary };
+  }
+
+  /** Build the immutable review case through the real assembler.
+   *  #1554: the driver may already own the open case (all-terminal children);
+   *  reuse it so the decision targets the driver's durable case. */
+  async function assembleAndInsertReview(rootCardId: number): Promise<string> {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    const existing = store.getLatestOpenCase(rootCardId);
+    if (existing) return existing.id;
+    const { ReviewCaseAssembler } = await import("../../components/project-acceptance/project-review-case.js");
+    const snapshot = await new ReviewCaseAssembler().assembleCase(rootCardId, supervision.generation, supervision.review_round + 1);
+    if ("error" in snapshot) throw new Error(`review assembly failed: ${snapshot.error}`);
+    const { id } = store.insertReviewCase(rootCardId, supervision.generation, supervision.review_round + 1, snapshot, `digest_${rootCardId}_${Date.now()}`);
+    store.insertReviewRequest(rootCardId, id, supervision.generation);
+    return id;
+  }
+
+  it("Scenario A: all required lanes fail — accept is rejected and the parent is never delivered", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 1, holdAcceptance: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    // The bound workspace is durable before the first Orc turn could start.
+    const cwd = workspaceOf(rootCardId);
+    expect(existsSync(cwd)).toBe(true);
+
+    // Service-test inputs for the legacy review path: the decided root
+    // contract plus the lane→root mapping the production port omits.
+    insertRootContract(rootCardId, false);
+    mapLanesToRoot(rootCardId, [["c1"]]);
+
+    // The lane completes but its required artifact is missing → failed evidence.
+    const worker = board.kanbanGetChildren(rootCardId).find(c => c.type === "W")!;
+    settleLane(rootCardId, worker.id, false);
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(worker.id)!;
+    const result = supStore.getResultByAttempt(attempt.id)!;
+    expect(result.envelope.outcome).toBe("completed");
+    expect(result.envelope.criteria.every(c => c.status === "failed")).toBe(true);
+    // The pump projection fails the W card — execution completed ≠ accepted.
+    board.kanbanFail(worker.id, "worker completed without passing acceptance");
+    // #1792: no driver opens review cases under runner admission — assemble
+    // the case directly from the settled lane evidence.
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    // #1792: the decision/settle service is deleted with the supervised
+    // review-turn world — validate directly against the assembled snapshot.
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const snapshotA = JSON.parse(store.getReviewCase(caseId)!.case_json);
+
+    // The Orc submits the #1656 shape: satisfied c1 citing the failed child's
+    // artifact evidence. The validator must reject it.
+    const decision: ProjectReviewDecisionV1 = {
+      schema_version: 1,
+      id: `rd_e2e_a_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [{
+        criterion_id: "c1",
+        verdict: "satisfied",
+        evidence_ids: [laneArtifactEvidence(attempt.id, worker.id)],
+        rationale: "handoff exists",
+      }],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "all lanes delivered",
+      authored_at: new Date().toISOString(),
+    };
+    const issues = new ProjectReviewValidator().validateDecision(decision, snapshotA);
+    expect(issues.some(e => /no successful mapped child/.test(e.message))).toBe(true);
+
+    // Fail-closed parent: not accepted, not done, not delivery-ready, no
+    // delivery record, no acceptance outbox.
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(store.getSupervision(rootCardId)!.state).not.toBe("accepted");
+    expect(root.status).not.toBe("done");
+    expect(root.delivery_ready).toBe(0);
+    const outbox = store.db.prepare(`SELECT COUNT(*) AS cnt FROM project_acceptance_outbox WHERE project_card_id = ?`).get(rootCardId) as { cnt: number };
+    expect(outbox.cnt).toBe(0);
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments).toHaveLength(0);
+    expect(doubles.sentMessages).toHaveLength(0);
+  });
+
+  it("Scenario B: required lanes pass with relative artifacts — qualified evidence, accepted root, delivery eligible", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 1, holdAcceptance: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    insertRootContract(rootCardId, false);
+    mapLanesToRoot(rootCardId, [["c1"]]);
+    const worker = board.kanbanGetChildren(rootCardId).find(c => c.type === "W")!;
+    const { attemptId } = settleLane(rootCardId, worker.id, true);
+    board.kanbanComplete(worker.id, null, "worker completed");
+    // #1792: no driver opens review cases under runner admission — assemble
+    // the case directly from the settled lane evidence.
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    // #1792: the decision/settle service is deleted — validate directly,
+    // then settle through the store (what the service did internally).
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const snapshotB = JSON.parse(store.getReviewCase(caseId)!.case_json);
+
+    const decision: ProjectReviewDecisionV1 = {
+      schema_version: 1,
+      id: `rd_e2e_b_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [{
+        criterion_id: "c1",
+        verdict: "satisfied",
+        evidence_ids: [laneArtifactEvidence(attemptId, worker.id)],
+        rationale: "lane handoff verified",
+      }],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "lane delivered",
+      authored_at: new Date().toISOString(),
+    };
+    const issuesB = new ProjectReviewValidator().validateDecision(decision, snapshotB);
+    expect(issuesB).toEqual([]);
+    store.settleAcceptance(rootCardId, caseId, decision, "lane delivered");
+
+    // Let the scheduled runner observe the terminal acceptance and settle the
+    // run row (task_runs success) — the delivery release CAS depends on it.
+    nerveMod.nerve.fire("card:done", rootCardId);
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
+
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("done");
+    expect(store.getSupervision(rootCardId)!.state).toBe("accepted");
+    // Delivery release CAS: exact run/generation authority → ready → poll sends.
+    board.kanbanSetProjectDeliveryReady(rootCardId, { projectGeneration: supervision.generation, scheduledRunId: runId });
+    const released = board.kanbanGetCard(rootCardId)!;
+    expect(released.delivery_ready).toBe(1);
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments.length + doubles.sentMessages.length).toBeGreaterThan(0);
+  });
+
+  it("Scenario C: an optional failed lane is disclosed and accepted while required lanes pass", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 2, holdAcceptance: true, v2RootContract: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    insertRootContract(rootCardId, true);
+    mapLanesToRoot(rootCardId, [["c1"], ["c2"]]);
+    const children = board.kanbanGetChildren(rootCardId).filter(c => c.type === "W");
+    expect(children).toHaveLength(2);
+    const [requiredLane, optionalLane] = children as [typeof children[number], typeof children[number]];
+    const required = settleLane(rootCardId, requiredLane.id, true);
+    const optional = settleLane(rootCardId, optionalLane.id, false);
+    board.kanbanComplete(requiredLane.id, null, "worker completed");
+    board.kanbanFail(optionalLane.id, "worker completed without passing acceptance");
+    // #1792: no driver opens review cases under runner admission — assemble
+    // the case directly from the settled lane evidence.
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    // #1792: the decision/settle service is deleted — validate directly,
+    // render the disclosed synthesis, then settle through the store.
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const { renderAcceptedSynthesis } = await import("../../components/project-acceptance/project-review-service.js");
+    const snapshotC = JSON.parse(store.getReviewCase(caseId)!.case_json);
+
+    const decision: ProjectReviewDecisionV1 = {
+      schema_version: 1,
+      id: `rd_e2e_c_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [
+        { criterion_id: "c1", verdict: "satisfied", evidence_ids: [laneArtifactEvidence(required.attemptId, requiredLane.id)], rationale: "required lane verified" },
+        { criterion_id: "c2", verdict: "unsatisfied", evidence_ids: [], rationale: "optional source lane failed; the report remains useful without it" },
+      ],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "required lane delivered; optional lane disclosed as omitted",
+      authored_at: new Date().toISOString(),
+    };
+    const issuesC = new ProjectReviewValidator().validateDecision(decision, snapshotC);
+    expect(issuesC).toEqual([]);
+    store.settleAcceptance(rootCardId, caseId, decision, renderAcceptedSynthesis(decision, snapshotC));
+
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("done");
+    // The disclosed optional failure is visible in the rendered synthesis.
+    expect((root.result_summary ?? "")).toContain("c2");
   });
 });
 
@@ -1688,3 +2248,278 @@ async function advanceUntil(predicate: () => boolean, steps = 200): Promise<void
   }
   throw new Error("condition not reached under controlled time");
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// #1688 Epic-28 — SHA staged incident workflow E2E.
+// One continuous journey: scheduled settler → typed signal → coordinator/store
+// → Kanban O/W cards → Worker supervision → staged results → review → cleanup.
+// Only model/provider/process boundaries are fixtures; the SHA workspace is a
+// REAL disposable git checkout and stage evidence is written into it exactly
+// as the Pi executor would.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban → Worker → review → cleanup", () => {
+  let shaWs: string;
+  let shaStore: typeof import("../../components/sha/sha-incident-store.js");
+  let shaCoordinator: import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
+  let shaSupervision: InstanceType<typeof WorkerSupervisionStoreClass>;
+  let shaNotices: string[];
+
+  type ShaIncidentCoordinatorClass = import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
+
+  async function setupShaWorkspace(): Promise<void> {
+    const { execFileSync } = await import("node:child_process");
+    shaWs = join(dirname(TEST_HOME), "sha-ws");
+    rmSync(shaWs, { recursive: true, force: true });
+    mkdirSync(shaWs, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: shaWs });
+    execFileSync("git", ["-c", "user.email=sha@test", "-c", "user.name=sha", "commit", "-q", "--allow-empty", "-m", "baseline"], { cwd: shaWs });
+    writeFileSync(join(TEST_HOME, "config", "pi-executor.json"), JSON.stringify({
+      enabled: true, command: "pi", fixedArgs: [], allowedEnv: [], maxConcurrent: 1,
+      maxWallClockMs: 1_800_000, abortGraceMs: 10_000, projectTrust: "never",
+      workspaceAliases: { sha: { path: shaWs, root: dirname(TEST_HOME), projectTrust: "never" } },
+      sessionStorageRoot: join(TEST_HOME, "state"),
+    }));
+  }
+
+  async function makeShaQueue(mode: "off" | "investigation" | "full" = "full"): Promise<import("../../components/tasks/task-queue.js").CronQueue> {
+    shaNotices = [];
+    const { ShaIncidentCoordinator } = await import("../../components/sha/sha-incident-coordinator.js");
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    shaStore = await import("../../components/sha/sha-incident-store.js");
+    shaSupervision = new WorkerSupervisionStoreClass();
+    shaCoordinator = new ShaIncidentCoordinator({
+      modeProvider: () => mode,
+      policyView: () => ({ fixes: [], logAdmissionAllowed: true }),
+      noticeSink: { send: (n) => shaNotices.push(n.message) },
+    });
+    shaCoordinator.subscribe();
+    const { CronQueue } = await import("../../components/tasks/task-queue.js");
+    const coordinator = new CoordinatorClass({
+      onTaskPaused: () => {},
+      agentRunner: fakeAgentRunner,
+      projectRunner: realProjectRunner,
+      onFailure: (event) => {
+        const outcome = shaCoordinator.admit(event);
+        const notice = shaAdmissionNotice(event, outcome);
+        if (notice) shaNotices.push(notice);
+      },
+    });
+    return new CronQueue(coordinator);
+  }
+
+  function stageCardIds(rootId: number): number[] {
+    return board.kanbanList("*")
+      .filter((c: { parent_id: number | null }) => c.parent_id === rootId)
+      .sort((a: { id: number }, b: { id: number }) => a.id - b.id)
+      .map((c: { id: number }) => c.id);
+  }
+
+  async function completeStage(cardId: number, artifactId: string, ref: string, digest: string): Promise<void> {
+    const attempt = shaSupervision.getLatestAttempt(cardId)!;
+    const contract = shaSupervision.getContract(attempt.contract_id)!;
+    const contractJson = JSON.parse(contract.contract_json) as { digest?: string };
+    const now = new Date().toISOString();
+    const artifacts = [{ artifact_id: artifactId, exists: true, kind: "file" as const, ref, digest }];
+    if (ref === "sha/solution.patch") {
+      artifacts.push({ artifact_id: "sha-verification-json", exists: true, kind: "file", ref: "sha/verification.json", digest });
+    }
+    const envelope = {
+      schema_version: 1,
+      attempt: { id: attempt.id, ordinal: attempt.ordinal, contract_id: attempt.contract_id, contract_digest: contractJson.digest ?? "d", executor_kind: "pi", executor_id: "e2e-pi-run", started_at: now, finished_at: now },
+      outcome: "completed",
+      criteria: [{ criterion_id: "sha-" + artifactId.slice(4).split(".")[0], status: "passed", evidence_ids: [artifactId] }],
+      checks: [],
+      artifacts,
+      worker_report: { summary: "e2e stage done", claims: [], unresolved_risks: [] },
+    } as import("../../components/worker-contract.js").WorkerResultEnvelopeV1;
+    // The Pi process boundary: write the evidence artifact into the real
+    // disposable workspace exactly as the executor would.
+    const dir = join(shaWs, "sha");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(shaWs, ref), JSON.stringify({ artifact: artifactId, digest }, null, 2));
+    if (ref === "sha/solution.patch") {
+      writeFileSync(join(shaWs, "sha/verification.json"), JSON.stringify({ commands: [], exit: 0 }, null, 2));
+    }
+    shaSupervision.insertResult(attempt.id, envelope);
+    board.kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "pi_run_settle", reason: "stage complete" });
+  }
+
+  it("full mode: one root, sequential RCA/design/solution stages, accepted review, dedupe, evidence, cleanup", { timeout: 120_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+
+    // 1. Real scheduled settler: a failing agent run emits the typed signal.
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+
+    const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+    expect(incidents).toHaveLength(1);
+    const incident = incidents[0]!;
+    expect(incident.state).toBe("rca");
+    expect(incident.mode).toBe("full");
+    const root = board.kanbanGetCard(incident.rootCardId!)!;
+    expect(root.type).toBe("O");
+    expect(root.source).toBe("sha");
+    expect(root.max_agents).toBe(2);
+    expect(root.delivery_mode).toBe("silent");
+    const stages = stageCardIds(root.id);
+    expect(stages).toHaveLength(3);
+    // Complete blocked_by chain.
+    const cards = board.kanbanList("*").filter((c: { id: number }) => stages.includes(c.id));
+    expect(cards.map((c: { blocked_by: string | null }) => c.blocked_by)).toEqual([null, String(stages[0]), String(stages[1])]);
+
+    // 2. RCA completes → design bound; design completes → solution bound.
+    await completeStage(stages[0]!, "sha-rca-json", "sha/rca.json", "d-rca");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("design"), { timeout: 10_000 });
+    expect(shaSupervision.getContractByCardId(stages[1]!)).toBeDefined();
+    expect(shaSupervision.getContractByCardId(stages[2]!)).toBeUndefined();
+
+    await completeStage(stages[1]!, "sha-design-md", "sha/design.md", "d-design");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("solution"), { timeout: 10_000 });
+    expect(shaSupervision.getContractByCardId(stages[2]!)).toBeDefined();
+
+    // 3. Solution completes → review → accepted root.
+    await completeStage(stages[2]!, "sha-solution-patch", "sha/solution.patch", "d-sol");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "project_acceptance", reason: "final review accepted" });
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("accepted"), { timeout: 10_000 });
+
+    // 4. Evidence copied privately; disposable workspace restored to baseline;
+    // canonical fixture files untouched.
+    const evidenceDir = join(TEST_HOME, "state", "sha", "incidents", String(incident.id));
+    expect(existsSync(join(evidenceDir, "rca", "rca.json"))).toBe(true);
+    expect(existsSync(join(evidenceDir, "design", "design.md"))).toBe(true);
+    expect(existsSync(join(evidenceDir, "solution", "solution.patch"))).toBe(true);
+    const { execFileSync } = await import("node:child_process");
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
+
+    // 5. Repeated failure after terminal acceptance allocates a NEW episode
+    // (R4 rollover) — the terminal episode never gains duplicate roots.
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => {
+      const active = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+      expect(active.length).toBe(1);
+      expect(active[0]!.episode).toBe(2);
+    }, { timeout: 10_000 });
+    const roots = board.kanbanList("*").filter((c: { type: string | null; source: string }) => c.type === "O" && c.source === "sha");
+    expect(roots).toHaveLength(2);
+    // Exactly one admission notice per durable decision.
+    expect(shaNotices.filter((n) => n.includes("SHA: incident")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("system-kind failures notify only — zero SHA state, zero quota", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+    const { execFileSync } = await import("node:child_process");
+    // A failing system task: register a handler that reports failure.
+    registry.getSystemTaskRegistry().register("hardware-sleep", (_entry, _ctx) => ({ status: "failed", error: "hardware sleep failed" }));
+    const systemEntry: ScheduledTask = {
+      id: "sys-sha-e2e", kind: "system", action: "hardware-sleep", schedule: "* * * * *",
+      enabled: true, priority: "medium", delivery: "silent",
+    };
+    taskStore.writeEntry(systemEntry);
+    stateStore.initializeState([...taskStore.readEntries()]);
+    forceDue("sys-sha-e2e");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("system-kind"))).toBe(true), { timeout: 10_000 });
+    const events = board.requireTaskDatabase().prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get();
+    expect(Number(events?.["n"])).toBe(0);
+    const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+    expect(incidents).toHaveLength(0);
+    // No canonical mutation: the workspace stays at baseline.
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
+  });
+
+  it("investigation mode: RCA+design only, no solution card, investigation_complete terminal", { timeout: 120_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("investigation");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+    const incident = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal()[0]!;
+    const root = board.kanbanGetCard(incident.rootCardId!)!;
+    const stages = stageCardIds(root.id);
+    expect(stages).toHaveLength(2);
+    await completeStage(stages[0]!, "sha-rca-json", "sha/rca.json", "d-rca");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("design"), { timeout: 10_000 });
+    await completeStage(stages[1]!, "sha-design-md", "sha/design.md", "d-design");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "project_acceptance", reason: "accepted" });
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("investigation_complete"), { timeout: 10_000 });
+    const status = (await import("node:child_process")).execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
+  });
+
+  it("off mode: ordinary notice only, zero SHA writes, no registration of work", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("off");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await new Promise((r) => setTimeout(r, 100));
+    const events = board.requireTaskDatabase().prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get();
+    expect(Number(events?.["n"])).toBe(0);
+    const roots = board.kanbanList("*").filter((c: { type: string | null; source: string }) => c.type === "O" && c.source === "sha");
+    expect(roots).toHaveLength(0);
+  });
+
+  it("stage timeout blocks the incident, cascades placeholders, and reports a typed reason", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+    const incident = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal()[0]!;
+    const stages = stageCardIds(incident.rootCardId!);
+    // Simulate a timed-out RCA worker: the stage card fails without an envelope.
+    board.kanbanTransition({ cardId: stages[0]!, from: ["queued", "running"], to: "failed", actor: "pi_run_settle", reason: "stage timed out" });
+    await vi.waitFor(() => {
+      const i = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!;
+      expect(i.state).toBe("blocked");
+      expect(i.terminalReason).toContain("failed");
+    }, { timeout: 10_000 });
+    // Later placeholders cascaded; the root project is blocked.
+    for (const stageId of stages.slice(1)) {
+      expect(board.kanbanGetCard(stageId)!.status).toBe("failed");
+    }
+    const supervision = board.requireTaskDatabase().prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(incident.rootCardId!) as { state: string };
+    expect(supervision.state).toBe("blocked");
+  });
+
+  it("known fix with a failing verifier is never reported fixed", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const { ShaIncidentCoordinator } = await import("../../components/sha/sha-incident-coordinator.js");
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    shaStore = await import("../../components/sha/sha-incident-store.js");
+    const rule = {
+      pattern: "sha-incident-boom", action: "run" as const,
+      command: ["git", "rev-parse", "HEAD"], verifyCommand: ["git", "rev-parse", "no-such-branch"],
+      cooldownMin: 5, verified: true,
+    };
+    shaCoordinator = new ShaIncidentCoordinator({
+      modeProvider: () => "full",
+      policyView: () => ({ fixes: [rule], logAdmissionAllowed: true }),
+      noticeSink: { send: () => {} },
+    });
+    const event = { source: "scheduled" as const, entryId: "sha-agent-task", runId: "run-kf-1", taskKind: "agent" as const, diagnostic: makeDiagnosticShaBoom(), occurredAt: Date.now() };
+    const outcome = shaCoordinator.admit(event);
+    expect(outcome.kind).toBe("known_fix_started");
+    await vi.waitFor(() => {
+      const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+      expect(incidents.length).toBe(0); // terminal episode
+      const row = board.requireTaskDatabase().prepare("SELECT state FROM sha_incidents WHERE id = ?").get(outcome.kind === "known_fix_started" ? outcome.incidentId : 0) as { state: string };
+      expect(row.state).toBe("known_fix_unverified");
+    }, { timeout: 15_000 });
+    // Truthful notice: never "fixed".
+    expect(shaAdmissionNotice(event, outcome)).toContain("known fix started");
+  });
+
+  function makeDiagnosticShaBoom(): import("../../components/tasks/task-failure.js").TaskFailureDiagnosticV1 {
+    return {
+      version: 1, category: "execution", code: "model_error", phase: "executing",
+      message: "provider model error: sha-incident-boom", retryability: "none", occurredAt: Date.now(),
+    };
+  }
+});

@@ -15,6 +15,13 @@ const TAG = "session-control";
 export interface SessionControlServiceDeps {
   /** Optional content-free telemetry sink. */
   onTelemetry?: (event: SessionCompactionTelemetryV1) => void;
+  /**
+   * #1869 — re-apply the core bundle after a completed compaction. Invoked
+   * from finish() (the single completion point for every adapter) only when
+   * the result status is "completed": never on failed or no-op outcomes
+   * (nothing_to_compact, busy, unsupported, stale). Must never throw — a
+   * re-injection failure is logged and the control result stands.
+   */
 }
 
 export class SessionControlService {

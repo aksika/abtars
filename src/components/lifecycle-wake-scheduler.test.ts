@@ -60,6 +60,21 @@ describe("LifecycleWakeScheduler #1539", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it("never admits due items during boot registration (#1935)", async () => {
+    const now = Date.now();
+    const source = makeSource("task-admission", [{ key: "a", dueAt: now - 5_000 }], collect(calls)("task-admission"));
+    scheduler.register(source);
+    // Boot recovery/barrier run between registration and start; a due task
+    // must not be admitted into a generation that has not recovered yet.
+    await Promise.resolve();
+    expect(calls).toHaveLength(0);
+    scheduler.sourceChanged("task-admission");
+    await Promise.resolve();
+    expect(calls).toHaveLength(0);
+    await scheduler.start();
+    expect(calls).toEqual([{ source: "task-admission", now: expect.any(Number) }]);
+  });
+
   it("re-arms when a source mutation changes the earliest due time", async () => {
     const now = Date.now();
     const items: LifecycleDueItem[] = [{ key: "a", dueAt: now + 60_000 }];

@@ -8,6 +8,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, readlinkSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { TIMEOUTS, type PiAcceptanceLane, type ProviderScript, type RequestExpectation, type ProviderSummary } from "./contracts.js";
 import { ScriptedProvider } from "./scripted-provider.js";
 import { TuiAcceptanceClient } from "./tui-client.js";
@@ -26,8 +29,14 @@ export interface PiAcceptanceContext {
   markers: MarkerFactory;
   /** Timestamp captured before scenario messages were recorded (for row assertions). */
   scenarioStart: number;
-  /** Kill the exact bridge PID and spawn bundle/abtars.js with the same home/env. */
-  restartBridge: () => Promise<SpawnedChild>;
+  /**
+   * Kill the exact bridge PID and spawn bundle/abtars.js with the same
+   * home/env. `beforeSpawn` runs only after the old bridge is confirmed
+   * stopped and before the replacement starts (#1935 fixture ordering).
+   */
+  restartBridge: (beforeSpawn?: () => void) => Promise<SpawnedChild>;
+  /** #1776: bounded bridge-log tail (re-read from disk on every call). */
+  readBridgeLog: () => string;
   /** #1548: isolated abtars home the bridge reads/writes (tasks, state, kanban). */
   abtarsHome: string;
   /** #1548: bounded artifact persistence through the result writer. */
@@ -76,7 +85,7 @@ export interface ScenarioOutcome {
 
 export interface PiScenario {
   name: string;
-  profiles: readonly ("core" | "full")[];
+  profiles: readonly ("core" | "full" | "proof" | "hydration")[];
   run(ctx: PiAcceptanceContext): Promise<void>;
 }
 
@@ -84,6 +93,45 @@ export interface PiScenario {
 function textScript(candidate: string, expectation: RequestExpectation | undefined, reply: string): ProviderScript {
   return { candidate, expectation, action: { kind: "text", chunks: [reply] } };
 }
+
+/**
+ * #1940: Pi sessions are in-memory — no binding files, no session files.
+ * Fail when the route wrote Pi-route state to disk (dispatch bypassed the
+ * AgentSession path or resurrected the retired durable bindings).
+ */
+function assertNoPiSessionFiles(abtarsHome: string): void {
+  for (const rel of ["state/pi-sdk-conversations-v1", "state/pi-sessions"]) {
+    const dir = join(abtarsHome, rel);
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    const leftovers = names.filter((n) => n !== ".gitkeep");
+    if (leftovers.length > 0) {
+      throw new Error(`Pi-route state written to disk at ${dir}: [${leftovers.slice(0, 5).join(", ")}]`);
+    }
+  }
+}
+
+/**
+ * #1940 R3/R5: every conversational provider request carries the role
+ * system prompt (never dropped, never empty). The retired defect dropped
+ * the system message; Pi replays it across compaction.
+ */
+function assertSystemPromptPresent(summaries: ProviderSummary[], what: string): void {
+  if (summaries.length === 0) throw new Error(`no provider requests recorded for ${what}`);
+  for (const s of summaries) {
+    if (s.action === "unscripted" || s.action === "expectation_failed") continue;
+    if ((s.roleCounts["system"] ?? 0) < 1 || !s.systemTexts.some((t) => t.trim().length > 0)) {
+      throw new Error(`provider request seq ${s.seq} carries no system prompt (${what})`);
+    }
+  }
+}
+
+/** #1940 R5: Pi built-in file/shell tools must never be declared. */
+const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write"];
 
 /** Assert a received TUI reply contains the scripted reply marker. */
 function expectReply(reply: { markdown: string }, expected: string, what: string): void {
@@ -209,6 +257,19 @@ async function mainContinuity(ctx: PiAcceptanceContext): Promise<void> {
 
   const turnTwo = ctx.provider.summariesFor(FIXTURE_MODEL_A).at(-1);
   if (!turnTwo) throw new Error("no provider requests recorded for turn two");
+
+  // #1940: Pi owns the session in memory — the second provider request
+  // carries the first exchange as session history (the turn text itself
+  // holds only the new message plus recall), and no binding or session
+  // files exist on disk.
+  const turnSummaries = ctx.provider.summariesFor(FIXTURE_MODEL_A).slice(-2);
+  assertSystemPromptPresent(turnSummaries, "main continuity turns");
+  assertNoPiSessionFiles(ctx.abtarsHome);
+  ctx.writeArtifact("pi-session-continuity.json", JSON.stringify({
+    scenario: "main-continuity-and-cursor",
+    historyCarriedByPiSession: true,
+    noSessionFiles: true,
+  }, null, 2));
 }
 
 // ── Scenario 2: Tool multi-generation (core) ────────────────────────────────
@@ -243,9 +304,313 @@ async function toolMultiGeneration(ctx: PiAcceptanceContext): Promise<void> {
   if (!postTool) {
     throw new Error("no post-tool provider generation observed carrying the tool result");
   }
+
+  // #1940 R3/R5: the run went through the in-memory Pi session with the
+  // role system prompt on every request, exactly the authorized tools
+  // declared (no Pi built-ins), and nothing written to disk.
+  assertSystemPromptPresent([toolSummary, postTool], "tool turn requests");
+  for (const declared of toolSummary.declaredTools) {
+    if (PI_BUILTIN_TOOLS.includes(declared)) {
+      throw new Error(`Pi built-in tool declared to the provider: ${declared}`);
+    }
+  }
+  if (!toolSummary.declaredTools.includes("memory_recall")) {
+    throw new Error(`authorized tool missing from provider declarations: [${toolSummary.declaredTools.join(", ")}]`);
+  }
+  assertNoPiSessionFiles(ctx.abtarsHome);
+
+  // #1780: fragmented argument JSON must arrive intact at the real tool
+  // boundary. The fixture streams the args across multiple SSE deltas through
+  // the real Pi parser; the audit sink records the decoded args the tool
+  // actually received. The unique query marker isolates this turn's entry.
+  // A lost, duplicated, or malformed fragment drifts the decoded query and
+  // fails here even when a post-tool continuation still occurs.
+  const observedArgs = await waitFor(
+    async () => {
+      let raw: string;
+      try {
+        raw = readFileSync(join(ctx.abtarsHome, "logs", "audit.jsonl"), "utf-8");
+      } catch {
+        return undefined;
+      }
+      for (const line of raw.trim().split("\n").reverse()) {
+        if (!line.trim()) continue;
+        let entry: Record<string, unknown>;
+        try {
+          entry = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (entry["tool"] !== "memory_recall") continue;
+        const argsRaw = entry["args"];
+        if (typeof argsRaw !== "string") continue;
+        let decoded: Record<string, unknown>;
+        try {
+          decoded = JSON.parse(argsRaw) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (decoded["query"] !== query) continue;
+        return decoded;
+      }
+      return undefined;
+    },
+    15_000,
+    `audit entry for fragmented memory_recall query ${query.slice(0, 40)}`,
+  );
+  if (observedArgs["query"] !== query || observedArgs["limit"] !== 5) {
+    throw new Error(
+      `fragmented tool arguments drifted at the tool boundary: expected ${JSON.stringify({ query, limit: 5 }).slice(0, 200)} (got ${JSON.stringify(observedArgs).slice(0, 300)})`,
+    );
+  }
 }
 
-// ── Scenario 3: Reset/rebuild (core) ────────────────────────────────────────
+// ── Scenario 2b: Tool policy denial (proof) — #1775 ─────────────────────────
+
+/**
+ * A forbidden bridge-spawning command must be rejected by the production
+ * self-protection guard before any process is created, surfacing as a
+ * structured policy rejection that the turn then continues past normally.
+ */
+async function toolPolicyDenial(ctx: PiAcceptanceContext): Promise<void> {
+  const m = ctx.markers.next("PD1");
+  const reply = ctx.markers.next("PD1A");
+  const deniedCommand = "node main.js";
+
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: m },
+    action: { kind: "toolCall", name: "execute_bash", arguments: { command: deniedCommand } },
+  });
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: m,
+    exactlyOnce: [m],
+  }, reply));
+
+  // Summaries accumulate lane-wide: scope every lookup below to requests
+  // made after this turn starts, so an earlier scenario's tool pair can
+  // never satisfy this scenario's assertions.
+  const baselineSeq = Math.max(0, ...ctx.provider.summaries.map((s) => s.seq));
+  await sendExpectReply(ctx.tui, m, reply, "post-denial reply");
+
+  const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_A).filter((s) => s.seq > baselineSeq);
+  const toolSummary = summaries.find((s) => s.action === "toolCall");
+  if (!toolSummary) {
+    throw new Error(`denied tool call never reached the provider (toolCalls seen: ${JSON.stringify(summaries.map((s) => s.toolCalls))})`);
+  }
+  const postTool = summaries.filter((s) => s.seq > toolSummary.seq).find((s) => s.roleCounts["tool"] !== undefined);
+  if (!postTool) {
+    throw new Error("no post-denial provider generation observed carrying the tool result");
+  }
+  if (!postTool.toolCalls.includes("execute_bash")) {
+    throw new Error(`post-denial generation does not carry the denied call (toolCalls seen: ${JSON.stringify(postTool.toolCalls)})`);
+  }
+
+  // Correlate the audit invocation + completion entries by call id. The
+  // invocation carries the redacted argument string; the completion must
+  // carry the structured policy rejection and no successful completion for
+  // this call may exist.
+  const completions = await waitFor(
+    async () => {
+      let raw: string;
+      try {
+        raw = readFileSync(join(ctx.abtarsHome, "logs", "audit.jsonl"), "utf-8");
+      } catch {
+        return undefined;
+      }
+      const invocationIds = new Set<string>();
+      const found: Array<{ callId: string; status: unknown; error: unknown }> = [];
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        let entry: Record<string, unknown>;
+        try {
+          entry = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (entry["tool"] !== "execute_bash") continue;
+        const callId = entry["call_id"];
+        if (typeof callId !== "string") continue;
+        if (entry["args"] !== undefined) {
+          let decoded: Record<string, unknown> | null = null;
+          try {
+            decoded = JSON.parse(entry["args"] as string) as Record<string, unknown>;
+          } catch {
+            decoded = null;
+          }
+          if (decoded?.["command"] === deniedCommand) invocationIds.add(callId);
+        } else if (entry["status"] !== undefined) {
+          found.push({ callId, status: entry["status"], error: entry["error"] });
+        }
+      }
+      if (invocationIds.size === 0) return undefined;
+      const ours = found.filter((c) => invocationIds.has(c.callId));
+      return ours.length > 0 ? ours : undefined;
+    },
+    15_000,
+    `audit completion for denied execute_bash ${deniedCommand}`,
+  );
+  for (const c of completions) {
+    if (c.status !== "error") {
+      throw new Error(`denied execute_bash completion is not an error (call ${c.callId}, status=${JSON.stringify(c.status)})`);
+    }
+    if (c.error !== "policy_rejected") {
+      throw new Error(`denied execute_bash completion is not a policy rejection (call ${c.callId}, error=${JSON.stringify(c.error)})`);
+    }
+  }
+
+  ctx.writeArtifact("tool-policy-denial.json", JSON.stringify({
+    schemaVersion: 1,
+    kind: "pi-boundary-proof",
+    runId: ctx.runId,
+    lane: ctx.lane,
+    piVersion: "0.85.1",
+    route: "pi-ai",
+    tuiSessionId: ctx.tui.sessionId,
+    scenario: "tool-policy-denial",
+    markerHashes: [ctx.markers.hash(m), ctx.markers.hash(reply)],
+    providerRequestIds: [String(toolSummary.seq), String(postTool.seq)],
+    assertions: { denialError: "policy_rejected", completions: completions.length },
+  }, null, 2));
+}
+
+// ── Scenario 2c: Durable compaction (proof) — #1775 ─────────────────────────
+
+/** Bounded deterministic long reply: the marker plus filler, exactly N chars. */
+function longProofReply(marker: string, chars: number): string {
+  const filler = "0123456789abcdef";
+  const repeats = Math.max(0, Math.ceil((chars - marker.length - 1) / filler.length));
+  return `${marker}\n${filler.repeat(repeats)}`.slice(0, chars);
+}
+
+/**
+ * #1787: exclusive cursor for "rows this scenario caused", derived from the
+ * store's own newest row rather than the test process's clock. `timestamp >
+ * cursor` then excludes everything already durable and admits everything
+ * written afterwards, with no cross-process clock comparison — a bridge
+ * stamp landing in the same millisecond as the scenario start can no longer
+ * permanently exclude the first turn. Bounded to 1 row: the query returns
+ * the newest `limit` rows, so limit=1 is exactly max(timestamp) for a few
+ * bytes. Empty store yields 0 (admits everything, and nothing foreign can
+ * exist to admit).
+ */
+async function durableReadCursor(ctx: PiAcceptanceContext): Promise<number> {
+  const newest = await ctx.owner.conversationRows(MASTER_USER_ID, 0, 1);
+  const row = newest[0];
+  return row === undefined ? 0 : row.timestamp;
+}
+
+/**
+ * Five large normal turns followed by manual /compact must keep Pi working:
+ * Pi compacts its own session (SOUL survives as the system prompt, not
+ * history), the next turn completes, and the archive still records every
+ * turn durably. No abmind compaction, no checkpoint rows, no session files.
+ */
+async function durableCompaction(ctx: PiAcceptanceContext): Promise<void> {
+  const since = await durableReadCursor(ctx);
+  const turnMarkers: string[] = [];
+  const replyMarkers: string[] = [];
+
+  for (let i = 1; i <= 5; i++) {
+    const m = ctx.markers.next(`CC${i}`);
+    const a = ctx.markers.next(`CC${i}A`);
+    turnMarkers.push(m);
+    replyMarkers.push(a);
+    ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+      candidate: FIXTURE_MODEL_A,
+      currentTurn: m,
+      exactlyOnce: [m],
+    }, longProofReply(a, 24_000)));
+    await sendExpectReply(ctx.tui, m, a, `compaction turn ${i} reply`);
+  }
+
+  // Pi summarizes in one or two requests: the history summary wraps the
+  // serialized conversation in <conversation> tags; a split-turn prefix
+  // summary uses a "# Conversation" header instead. Constrain each script
+  // to its wrapper so leftovers can never leak into later scenarios.
+  const summary = ctx.markers.next("CSUM");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    containsInOrder: ["<conversation>"],
+  }, summary));
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    containsInOrder: ["# Conversation"],
+  }, summary));
+
+  const compactReply = await ctx.tui.sendAndAwaitReply("/compact");
+  if (!compactReply.markdown.includes("Compaction complete")) {
+    throw new Error(`manual /compact did not complete (got: ${compactReply.markdown.slice(0, 200)})`);
+  }
+  await settleBetweenTurns();
+
+  const pm = ctx.markers.next("PC1");
+  const pa = ctx.markers.next("PC1A");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: pm,
+    exactlyOnce: [pm],
+  }, pa));
+  await sendExpectReply(ctx.tui, pm, pa, "post-compaction reply");
+
+  // Post-compaction requests still carry the role system prompt — Pi kept
+  // it across compaction (system, not history) — and wrote no files.
+  const postSummaries = ctx.provider.summariesFor(FIXTURE_MODEL_A).slice(-1);
+  assertSystemPromptPresent(postSummaries, "post-compaction turn");
+  assertNoPiSessionFiles(ctx.abtarsHome);
+
+  // Durable history: exactly one user row per turn marker and one assistant
+  // row per reply marker since this scenario started; no foreign proof
+  // marker may have entered the owner's history in that window. A missing
+  // row on the first read is retried boundedly (read transient); duplicate
+  // or foreign rows fail immediately since they cannot be timing artifacts.
+  // The final failure carries query diagnostics.
+  let rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
+  const missingMarkers = () => turnMarkers.filter(
+    (m) => !rows.some((r) => r.role === "user" && r.content.includes(m)),
+  );
+  for (let attempt = 1; attempt <= 5 && missingMarkers().length > 0; attempt++) {
+    await settleBetweenTurns(2000);
+    rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
+  }
+  const ours = new Set([...turnMarkers, ...replyMarkers, summary, pm, pa]);
+  for (const row of rows) {
+    for (const marker of row.content.match(/PI-E2E-[A-Za-z0-9-]+/g) ?? []) {
+      if (!ours.has(marker)) {
+        throw new Error(`foreign proof marker in durable history: ${marker.slice(0, 60)}`);
+      }
+    }
+  }
+  for (const m of turnMarkers) {
+    const hits = rows.filter((r) => r.role === "user" && r.content.includes(m));
+    if (hits.length !== 1) {
+      const roles = [...new Set(rows.map((r) => r.role))].join(",");
+      const foundMarkers = turnMarkers.filter((t) => rows.some((r) => r.content.includes(t)));
+      throw new Error(
+        `turn marker ${m.slice(0, 40)} has ${hits.length} user rows, expected exactly 1 ` +
+        `(rows=${rows.length} roles=[${roles}] since=${since} markersFound=${foundMarkers.length}/5)`,
+      );
+    }
+  }
+  for (const a of replyMarkers) {
+    const hits = rows.filter((r) => r.role === "assistant" && r.content.includes(a));
+    if (hits.length !== 1) throw new Error(`reply marker ${a.slice(0, 40)} has ${hits.length} assistant rows, expected exactly 1`);
+  }
+
+  ctx.writeArtifact("pi-compaction.json", JSON.stringify({
+    schemaVersion: 1,
+    kind: "pi-boundary-proof",
+    runId: ctx.runId,
+    lane: ctx.lane,
+    route: "pi-ai",
+    tuiSessionId: ctx.tui.sessionId,
+    scenario: "durable-compaction",
+    markerHashes: [...turnMarkers, ...replyMarkers].map((mk) => ctx.markers.hash(mk)),
+    providerRequestIds: [],
+    assertions: { turns: 5, replyChars: 24_000, durableRows: rows.length, compactResult: "complete", systemPromptSurvives: true, noSessionFiles: true },
+  }, null, 2));
+}
 
 async function resetRebuild(ctx: PiAcceptanceContext): Promise<void> {
   const r1 = ctx.markers.next("R1");
@@ -270,36 +635,239 @@ async function resetRebuild(ctx: PiAcceptanceContext): Promise<void> {
   await sendExpectReply(ctx.tui, r2, a2, "post-reset second reply");
 }
 
+// ── Scenario: session-start hydration (#1776, hydration profile) ─────────────
+
+function countLinesWith(text: string, needle: string): number {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (line.includes(needle)) count++;
+  }
+  return count;
+}
+
+async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
+  // Unique-per-run markers. User sides are never truncated; assistant sides
+  // are short enough to survive head/tail truncation.
+  const tag = (s: string): string => `HYD-${s}-${ctx.runId}`;
+  const pairUser = (i: number): string => `${tag(`U${i}`)} continuity probe alpha beta`;
+  const pairAsst = (i: number): string => `${tag(`A${i}`)} acknowledged`;
+  const dailyMarker = tag("DAILY");
+  const weeklyMarker = tag("WEEKLY");
+  const foreignMarker = tag("FOREIGN");
+
+  // 1. Atomic fixture seed: ten complete pairs + fresh daily + weekly + one
+  // foreign-user marker. The seed replaces the primary user's rows (the
+  // runner's smoke turns wrote earlier rows), so the floor is exactly the
+  // ten seeded pairs.
+  await ctx.owner.seedHydrationFixture({
+    userId: MASTER_USER_ID,
+    pairs: Array.from({ length: 10 }, (_, i) => ({ user: pairUser(i), assistant: pairAsst(i) })),
+    daily: `# ${dailyMarker}\n\nContinuity summary for hydration acceptance.`,
+    weekly: `# ${weeklyMarker}\n\nWeekly rollup for hydration acceptance.`,
+    foreignUserId: "e2e-user-b",
+    foreignContent: `${foreignMarker} another user's turn`,
+  });
+
+  // Baseline daemon evidence before the fresh lifecycle starts. (The daemon
+  // tail is in-memory, so positional baselines are stable here — unlike the
+  // bridge file log, which flushes lazily and must be filtered by key.)
+  const daemonBaseline = countLinesWith(await ctx.owner.daemonLogTail(), "[session-context]");
+
+  // 2. Fresh Main/A lifecycle after setup: the runner's smoke turn must not
+  // satisfy the hydration assertion. Assembly order is consolidation-first,
+  // then chronological pairs, so the chain leads with daily/weekly.
+  const probe1 = ctx.markers.next("H1");
+  const reply1 = ctx.markers.next("H1A");
+  const floorChain = [2, 3, 4, 5, 6, 7, 8, 9].flatMap((i) => [pairUser(i), pairAsst(i)]);
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: {
+      candidate: FIXTURE_MODEL_A,
+      containsInOrder: [dailyMarker, weeklyMarker, ...floorChain],
+      excludes: [foreignMarker],
+      currentTurn: probe1,
+    },
+    action: { kind: "text", chunks: [reply1] },
+  });
+  await ctx.tui.sendAndAwaitReply("/reset");
+  // Re-attach with a brand-new session: `resume` would reattach to the
+  // most-recently-active ready session, which is not deterministically the
+  // fresh Main. A new attach guarantees the probe is the lifecycle's first
+  // turn. The id rotation proves the lifecycle is actually fresh.
+  const preResetSession = ctx.tui.sessionId;
+  ctx.tui.close();
+  await ctx.tui.connect("new");
+  if (ctx.tui.sessionId === null || ctx.tui.sessionId === preResetSession) {
+    throw new Error(`fresh lifecycle requires a rotated session id (was ${preResetSession}, now ${ctx.tui.sessionId})`);
+  }
+  await sendExpectReply(ctx.tui, probe1, reply1, "hydration probe reply");
+
+  // 3. One following ordinary turn: succeeds, hydrates nothing new. Durable
+  // Pi projection may retain hydrated markers, so the second request is
+  // never scanned for their absence.
+  const probe2 = ctx.markers.next("H2");
+  const reply2 = ctx.markers.next("H2A");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: probe2 }, reply2));
+  await sendExpectReply(ctx.tui, probe2, reply2, "post-hydration ordinary reply");
+
+  // 4. Lifecycle uniqueness from bounded log evidence, scoped to the fresh
+  // session key (earlier sessions' lines can flush late, so positional
+  // baselines on the lazily-flushed bridge file are unsound). The bridge
+  // logger buffers, so poll until the flushed lines arrive or the deadline
+  // hits — a missing prerequisite fails here, never passes as a skip.
+  const freshSession = ctx.tui.sessionId;
+  if (!freshSession) throw new Error("fresh lifecycle has no attached session id");
+  await waitFor(
+    async () => {
+      const bridge = ctx.readBridgeLog();
+      const states = bridge.split("\n").filter((l) => l.includes("session-state:") && l.includes(`key=${freshSession} `));
+      const assemblies = bridge.split("\n").filter((l) => l.includes("session-assembly:") && l.includes(`key=${freshSession} `));
+      const trues = states.filter((l) => l.includes("isSessionStart=true"));
+      const falses = states.filter((l) => l.includes("isSessionStart=false"));
+      const oks = assemblies.filter((l) => l.includes("outcome=ok"));
+      if (trues.length === 1 && falses.length === 1 && oks.length === 1 && assemblies.length === 1) {
+        return { trues: trues.length, falses: falses.length, oks: oks.length };
+      }
+      return undefined;
+    },
+    75000,
+    "hydration lifecycle bridge evidence (1 session-start, 1 assembly, then ordinary)",
+  );
+
+  // Daemon evidence: exactly one history-enabled assembly for the lifecycle.
+  const daemonTail = await ctx.owner.daemonLogTail();
+  const newDiags = daemonTail.split("\n").filter((l) => l.includes("[session-context]")).slice(daemonBaseline);
+  if (newDiags.length !== 1) {
+    throw new Error(`expected exactly 1 session-context diagnostic for the fresh lifecycle, saw ${newDiags.length}`);
+  }
+  const diag = newDiags[0]!;
+  const scalar = (name: string): number => {
+    const m = diag.match(new RegExp(`${name}=(\\d+)`));
+    if (!m) throw new Error(`diagnostic missing ${name}: ${diag.slice(0, 160)}`);
+    return parseInt(m[1]!, 10);
+  };
+  const modelContextTokens = scalar("modelContextTokens");
+  const historyBudgetChars = scalar("historyBudgetChars");
+  const usedChars = scalar("usedChars");
+  const daemonPairs = scalar("pairs");
+  const daemonDailies = scalar("dailies");
+  const daemonWeeklies = scalar("weeklies");
+  // The fixture model window is 128k: full-window forwarding with a single
+  // 5% application yields 6,400 (a 15%-prescaled window would yield 960).
+  if (modelContextTokens !== 128000) {
+    throw new Error(`expected full 128000-token model window forwarded, saw ${modelContextTokens}`);
+  }
+  if (historyBudgetChars !== 6400) {
+    throw new Error(`expected single 6,400-char history budget, saw ${historyBudgetChars}`);
+  }
+  if (daemonPairs < 8 || daemonDailies < 1 || daemonWeeklies < 1) {
+    throw new Error(`expected floor evidence pairs>=8 dailies>=1 weeklies>=1, saw ${daemonPairs}/${daemonDailies}/${daemonWeeklies}`);
+  }
+
+  // 5. Bounded content-free artifact: scalars and hashes only.
+  const requestIds = ctx.provider.summaries.map((s) => `seq${s.seq}`);
+  ctx.writeArtifact("session-start-hydration.json", JSON.stringify({
+    scenario: "session-start-hydration",
+    lane: ctx.lane,
+    floorPairsObserved: 8,
+    dailiesObserved: daemonDailies,
+    weekliesObserved: daemonWeeklies,
+    daemonPairs,
+    modelContextTokens,
+    historyBudgetChars,
+    usedChars,
+    providerRequestIds: requestIds,
+    sessionStates: ["isSessionStart=true", "isSessionStart=false"],
+    markerHashes: {
+      probe1: ctx.markers.hash(probe1),
+      daily: ctx.markers.hash(dailyMarker),
+      weekly: ctx.markers.hash(weeklyMarker),
+    },
+  }, null, 2));
+}
+
+// ── Scenario: provider terminal surfaces visibly, no memo (core) ───────────
+// #1940 R1/R6: a terminal provider error surfaces visibly and is never
+// reported as durable; there is no availability memo, no cooldown gate, and
+// no retry subsystem. The next turn dispatches normally — Pi owns retry and
+// overflow recovery. Runs before fail-closed: the owner must be up (durable
+// intent), since this is about provider errors, not memory unavailability.
+async function providerCooldownSuppresses(ctx: PiAcceptanceContext): Promise<void> {
+  const c1 = ctx.markers.next("PC1");
+  const c2 = ctx.markers.next("PC2");
+  const c2a = ctx.markers.next("PC2A");
+
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: c1 },
+    action: { kind: "httpError", status: 429, code: "fixture_rate_limited" },
+  });
+  // Terminal provider failure is the expected turn-1 outcome: the turn
+  // either delivers a bounded error reply or times out waiting for one.
+  // Either way no provider retry is manufactured above Pi.
+  try {
+    await ctx.tui.sendAndAwaitReply(c1, TIMEOUTS.turnMs);
+  } catch {
+    // No reply within the turn bound — acceptable for a failed turn as long
+    // as the assertions below hold.
+  }
+
+  // No memo subsystem: a terminal error must not leave a cooldown file, and
+  // must not suppress the next turn.
+  const memoPath = join(ctx.abtarsHome, "state", "provider-availability-v1.json");
+  if (existsSync(memoPath)) {
+    throw new Error(`availability memo written after terminal 429 (retired subsystem): ${memoPath}`);
+  }
+
+  // Turn 2 dispatches normally — the failure above suppressed nothing.
+  const beforeA = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: c2 }, c2a));
+  await sendExpectReply(ctx.tui, c2, c2a, "post-failure reply");
+  if (ctx.provider.requestCountFor(FIXTURE_MODEL_A) <= beforeA) {
+    throw new Error("post-failure turn made no provider request — dispatch is suppressed without a memo gate");
+  }
+  ctx.writeArtifact("provider-terminal-no-memo.json", JSON.stringify({
+    scenario: "provider-cooldown-suppression",
+    lane: ctx.lane,
+    failedModel: FIXTURE_MODEL_A,
+  }, null, 2));
+}
+
 // ── Scenario 4: Fail closed (core) ──────────────────────────────────────────
 
-async function failClosed(ctx: PiAcceptanceContext): Promise<void> {
+/**
+ * #1940 R1: memory readiness is decided once at abtars start. Losing the owner
+ * after boot leaves existing sessions running; memory operations report their
+ * own failures and the turn still reaches the provider with degraded memory.
+ * The pre-#1940 per-turn fail-closed gate (and its provider-suppression
+ * assertion) is retired, so this scenario proves degraded continuation and
+ * leaves the owner down for the recovery cell.
+ */
+async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> {
   const f1 = ctx.markers.next("F1");
   const a1 = ctx.markers.next("F1A");
   const f2 = ctx.markers.next("F2");
+  const a2 = ctx.markers.next("F2A");
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: f1 }, a1));
-  await sendExpectReply(ctx.tui, f1, a1, "fail-closed first reply");
-  // #1528: the f1/a1 exchange is the durable history that precedes route
-  // loss; f2 is a fail-closed turn that must never be persisted.
+  await sendExpectReply(ctx.tui, f1, a1, "owner-loss baseline reply");
+  // The f1/a1 exchange is durable history that precedes route loss; f2/a2 is
+  // a degraded turn whose archive write fails and must not become history.
   ctx.durableHistory = [f1, a1];
 
   const before = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
   await ctx.owner.stopOwner();
-  try {
-    await ctx.tui.sendAndAwaitReply(f2, TIMEOUTS.turnMs);
-    // A bounded unavailable/error result is expected; a context-blind model
-    // answer would have required a provider call.
-    const after = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
-    if (after !== before) {
-      throw new Error(`provider request count changed while owner was down (${before} → ${after}) — fail-closed violated`);
-    }
-  } catch (err) {
-    // The turn may time out if the bridge never surfaces an error; that is
-    // acceptable only when no provider request was made.
-    const after = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
-    if (after !== before) {
-      throw new Error(`provider request count changed while owner was down (${before} → ${after}) — fail-closed violated: ${(err as Error).message}`);
-    }
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: f2,
+    orderedContains: [f1, a1],
+  }, a2));
+  await sendExpectReply(ctx.tui, f2, a2, "degraded-memory reply");
+  // Existing sessions keep running: the provider is reached without a
+  // per-turn memory admission, while the failed archive write stays visible
+  // in the bridge log and out of durable history.
+  if (ctx.provider.requestCountFor(FIXTURE_MODEL_A) <= before) {
+    throw new Error("degraded-memory turn did not reach the provider");
   }
 }
 
@@ -334,7 +902,7 @@ async function ownerRecovery(ctx: PiAcceptanceContext): Promise<void> {
 async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
   const a1 = ctx.markers.next("B1A");
   const a3 = ctx.markers.next("B3A");
-  const preRestart = Date.now() - 1000;
+  const preRestart = await durableReadCursor(ctx);
 
   // The bridge may still be renegotiating memory after the owner recovery;
   // retry on the bounded unavailability reply like the recovery scenario.
@@ -354,13 +922,27 @@ async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
   ctx.tui.close();
   await ctx.tui.connect("resume");
 
-  await sendWithRecoveryRetry(
+  // #1940: restart starts the next conversation fresh — the post-restart
+  // turn runs in a new in-memory Pi session whose history comes only from
+  // abmind hydration (orderedContains already proves the pre-restart
+  // exchange arrived). No binding or session files exist on either side.
+  const b3marker = await sendWithRecoveryRetry(
     ctx,
     "B3",
-    (marker) => textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: marker, exactlyOnce: [marker] }, a3),
+    // #1940: the post-restart session is fresh; pre-restart history arrives
+    // only as abmind hydration inside the single session-start message, so
+    // assert across the whole request text rather than successive messages.
+    (marker) => textScript(FIXTURE_MODEL_A, {
+      candidate: FIXTURE_MODEL_A,
+      currentTurn: marker,
+      containsInOrder: [b1, a1, marker],
+      exactlyOnce: [marker],
+    }, a3),
     a3,
     "post-restart reply",
   );
+  void b3marker;
+  assertNoPiSessionFiles(ctx.abtarsHome);
 
   // Durable store continuity: the daemon retained the pre-restart transcript
   // under the same user identity (the bridge process is new; its session ids
@@ -441,6 +1023,31 @@ async function lazyTransports(ctx: PiAcceptanceContext): Promise<void> {
   if (goal2Summary.markerTexts.some((t) => t.includes(goal1))) {
     throw new Error("lazy task transport projected the first spawn's exchange into the second");
   }
+
+  // #1940 R3: the spawned task session's system prompt is its role SOUL
+  // bundle (T identity), not the generic transport line — one-shots get the
+  // same session setup as Main, captured once at session creation.
+  const workerSummary = ctx.provider.summariesFor(FIXTURE_MODEL_A).find(
+    (s) => s.markerTexts.some((t) => t.includes(goal1)),
+  );
+  if (!workerSummary) throw new Error("worker provider request for goal1 missing");
+  if (!workerSummary.systemTexts.some((t) => t.includes("I am a task agent"))) {
+    throw new Error(
+      `worker request carries no role SOUL in the system prompt: ${JSON.stringify(workerSummary.systemTexts).slice(0, 300)}`,
+    );
+  }
+  if (workerSummary.markerTexts.some((t) => t.includes("I am a task agent"))) {
+    throw new Error("worker turn text duplicates the role SOUL already installed as its system prompt");
+  }
+
+  // #1940: the spawned task ran in its own in-memory Pi session — the
+  // second spawn's request carries none of the first spawn's exchange
+  // (asserted above), and neither session wrote files to disk.
+  assertNoPiSessionFiles(ctx.abtarsHome);
+  ctx.writeArtifact("pi-worker-isolation.json", JSON.stringify({
+    scenario: "lazy-transport-composition",
+    inMemorySessionsOnly: true,
+  }, null, 2));
 }
 
 // ── Scenario 8: Steer/follow-up (full) ──────────────────────────────────────
@@ -502,28 +1109,38 @@ async function steerFollowUp(ctx: PiAcceptanceContext): Promise<void> {
   await sendExpectReply(ctx.tui, s2, a2, "follow-up reply");
 }
 
-// ── Scenario 9: Fallback (full) ─────────────────────────────────────────────
+// ── Scenario 9: Single-candidate failure (full) ────────────────────────────
+// #1940: no fallback chain exists — a terminal provider failure on the
+// configured candidate ends the turn with a bounded error, the fallback
+// candidate is never contacted (even though the lane config still lists
+// it, proving inert config stays inert), and no memo is recorded.
 
-async function fallback(ctx: PiAcceptanceContext): Promise<void> {
+async function singleCandidateFailure(ctx: PiAcceptanceContext): Promise<void> {
   const fb0 = ctx.markers.next("FB0");
   const fb0a = ctx.markers.next("FB0A");
   const fb1 = ctx.markers.next("FB1");
-  const fb1a = ctx.markers.next("FB1A");
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: fb0 }, fb0a));
-  await sendExpectReply(ctx.tui, fb0, fb0a, "fallback baseline reply");
+  await sendExpectReply(ctx.tui, fb0, fb0a, "single-candidate baseline reply");
 
+  const beforeB = ctx.provider.requestCountFor(FIXTURE_MODEL_B);
   ctx.provider.enqueue({ candidate: FIXTURE_MODEL_A, expectation: { candidate: FIXTURE_MODEL_A, currentTurn: fb1 }, action: { kind: "httpError", status: 500, code: "fixture_transient" } });
-  ctx.provider.enqueue(textScript(FIXTURE_MODEL_B, {
-    candidate: FIXTURE_MODEL_B,
-    currentTurn: fb1,
-    orderedContains: [fb0, fb0a],
-    exactlyOnce: [fb1],
-  }, fb1a));
+  await sendExpectReply(ctx.tui, fb1, "candidate failed", "single-candidate bounded error reply");
+  if (ctx.provider.requestCountFor(FIXTURE_MODEL_B) !== beforeB) {
+    throw new Error("fallback candidate contacted after the configured candidate failed");
+  }
 
-  await sendExpectReply(ctx.tui, fb1, fb1a, "fallback reply");
-  const fbSummary = ctx.provider.summariesFor(FIXTURE_MODEL_B).at(-1);
-  if (!fbSummary) throw new Error("candidate B never served the fallback turn");
+  // No memo subsystem: a terminal failure leaves no cooldown file behind.
+  const memoPath = join(ctx.abtarsHome, "state", "provider-availability-v1.json");
+  if (existsSync(memoPath)) {
+    throw new Error(`availability memo written after terminal failure (retired subsystem): ${memoPath}`);
+  }
+  ctx.writeArtifact("single-candidate-failure.json", JSON.stringify({
+    scenario: "single-candidate-failure",
+    lane: ctx.lane,
+    failedModel: FIXTURE_MODEL_A,
+    uncontactedModel: FIXTURE_MODEL_B,
+  }, null, 2));
 }
 
 // ── Scenario 10: Model switch (full) ────────────────────────────────────────
@@ -571,6 +1188,19 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   const held = await waitForHeldMarkerSummary(ctx.provider, c1);
   const servedCandidate = held.candidate;
 
+  // Discard the speculative hold on the unserved candidate NOW, before any
+  // later turn can match it: its current-turn marker survives inside later
+  // turns' recall hydration, so a later turn on that candidate would match
+  // the stale hold first (queue order) and hang on its never-released gate.
+  const loser = servedCandidate === FIXTURE_MODEL_A ? FIXTURE_MODEL_B : FIXTURE_MODEL_A;
+  const discarded = ctx.provider.removeQueuedScripts(
+    loser,
+    (s) => (s.action.kind === "hold" || s.action.kind === "acquisitionHold") && s.expectation?.currentTurn === c1,
+  );
+  if (discarded !== 1) {
+    throw new Error(`expected exactly one speculative hold to discard on ${loser} (got ${discarded})`);
+  }
+
   ctx.tui.sendInput("/stop");
 
   // The held provider connection must observe the abort.
@@ -607,26 +1237,222 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   if (since.some((s) => s.action === "unscripted" || s.action === "expectation_failed")) {
     throw new Error("orphan or unscripted provider request after cancellation");
   }
+
+  // #1775: late arrivals after the terminal outcome must be fenced. After the
+  // continuation settles, drain straggler frames, then require a bounded quiet
+  // window with no new provider request on either candidate. The sleep is a
+  // negative-assertion window, not readiness evidence.
+  await settleBetweenTurns();
+  for (let i = 0; i < 3; i++) {
+    try {
+      await ctx.tui.awaitMessage(1_000);
+    } catch {
+      break;
+    }
+  }
+  const quietBaseline = ctx.provider.summaries.length;
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const quietLater = ctx.provider.summaries.length;
+  if (quietLater !== quietBaseline) {
+    throw new Error(`late provider request after cancellation settled (summaries ${quietBaseline} → ${quietLater})`);
+  }
+}
+
+// ── Scenario 11b: Acquisition hang cancellation (full) — #1506 ──────────────
+
+/**
+ * The escaped #1506 edge: a provider whose request/stream NEVER opens (no
+ * response headers) leaves the attempt in `acquiring` with no iterator for
+ * any stream watchdog to observe. The whole-attempt liveness runner must
+ * bound the acquisition on the execution abort signal so the turn terminates
+ * and the next turn starts — the old code awaited the factory forever.
+ */
+async function acquisitionCancel(ctx: PiAcceptanceContext): Promise<void> {
+  const a1 = ctx.markers.next("ACQ1");
+  const a2 = ctx.markers.next("ACQ2");
+
+  // Script the acquisition hold on both candidates — headers never written —
+  // so the request lands on exactly the candidate the session currently uses.
+  const hold = releaseHold();
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
+    ctx.provider.enqueue({ candidate, expectation: { candidate, currentTurn: a1 }, action: { kind: "acquisitionHold", release: hold.promise } });
+  }
+
+  // Fire the turn without awaiting; /stop interrupts the pending acquisition.
+  ctx.tui.sendInput(a1);
+  const held = await waitForHeldMarkerSummary(ctx.provider, a1);
+  const servedCandidate = held.candidate;
+
+  // Same speculative-hold hygiene as cancellation: the unserved candidate's
+  // acquisition hold must not survive to shadow a later turn there.
+  const loser = servedCandidate === FIXTURE_MODEL_A ? FIXTURE_MODEL_B : FIXTURE_MODEL_A;
+  const discarded = ctx.provider.removeQueuedScripts(
+    loser,
+    (s) => (s.action.kind === "hold" || s.action.kind === "acquisitionHold") && s.expectation?.currentTurn === a1,
+  );
+  if (discarded !== 1) {
+    throw new Error(`expected exactly one speculative hold to discard on ${loser} (got ${discarded})`);
+  }
+
+  ctx.tui.sendInput("/stop");
+
+  // The never-opened provider connection must observe the abort — the bridge
+  // cancelled the acquisition even though no stream ever existed.
+  await waitFor(
+    async () => held.aborted,
+    TIMEOUTS.holdSettleMs,
+    "held acquisition request abort",
+  );
+
+  // Drain the bounded abort/error frames the cancelled turn may surface.
+  for (let i = 0; i < 4; i++) {
+    try {
+      await ctx.tui.awaitMessage(1_000);
+    } catch {
+      break;
+    }
+  }
+
+  // The next turn must reach the provider and settle normally.
+  ctx.provider.enqueue(textScript(servedCandidate, {
+    candidate: servedCandidate,
+    currentTurn: a2,
+    orderedContains: [a1],
+    exactlyOnce: [a2],
+  }, a2));
+  await sendExpectReply(ctx.tui, a2, a2, "post-cancel reply after acquisition hang");
+
+  // No orphan requests: the only requests since the held one are the turn
+  // that settled the cancel and the successful continuation.
+  const since = ctx.provider.summaries.filter((s) => s.seq > held.seq);
+  if (since.some((s) => s.action === "unscripted" || s.action === "expectation_failed")) {
+    throw new Error("orphan or unscripted provider request after acquisition cancellation");
+  }
+}
+
+// ── Scenario 12: Pi terminal cleanup (core) — #1647 ────────────────────────
+
+/**
+ * Terminal cleanup for a real spawned Pi child, offline: after a terminal
+ * generation, its external C session is gone from /sessions, no Pi process
+ * survives under the run root, and no workspace claim remains. The run
+ * itself is driven over the real TUI and the real Pi RPC boundary with no
+ * credentials — the prompt fails closed and the lifecycle settles.
+ */
+async function piTerminalCleanup(ctx: PiAcceptanceContext): Promise<void> {
+  const goal = ctx.markers.next("PI-CLEAN");
+  const runRoot = join(ctx.abtarsHome, "..");
+
+  // 1. Create a Pi run over the real TUI.
+  const created = await ctx.tui.sendAndAwaitReply(`/pi run --workspace default ${goal}`);
+  const runId = created.markdown.match(/Run: `([^`]+)`/)?.[1];
+  if (!runId) {
+    throw new Error(`pi run creation reply had no run id: ${created.markdown.slice(0, 300)}`);
+  }
+
+  // 2. Wait for a terminal state (offline prompt fails closed).
+  await waitFor(async () => {
+    const status = await ctx.tui.sendAndAwaitReply(`/pi status ${runId}`);
+    const m = status.markdown.match(/Status:\s*(\w+)/);
+    const s = m?.[1] ?? "";
+    return ["completed", "failed", "cancelled", "interrupted"].includes(s) ? s : undefined;
+  }, 120_000, `pi run ${runId} terminal`);
+
+  // 3. The external C session is gone: /sessions carries no entry naming the
+  //    run's goal (session name is `Pi: <goal slice 60>`).
+  await waitFor(async () => {
+    const sessions = await ctx.tui.sendAndAwaitReply("/sessions");
+    return sessions.markdown.includes(goal) ? undefined : true;
+  }, 15_000, `no C session for ${runId} in /sessions`);
+  const sessionsAfter = await ctx.tui.sendAndAwaitReply("/sessions");
+  if (sessionsAfter.markdown.includes(goal)) {
+    throw new Error("external C session for the terminal Pi generation still visible in /sessions");
+  }
+
+  // 4. No Pi process survives under the run root.
+  const piChildren = () => {
+    const out: Array<{ pid: number }> = [];
+    let entries: string[];
+    try { entries = readdirSync("/proc"); } catch { return out; }
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      try {
+        const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
+        if (comm !== "pi") continue;
+        const cwd = readlinkSync(`/proc/${pid}/cwd`);
+        if (!cwd.startsWith(runRoot)) continue;
+        out.push({ pid });
+      } catch { /* process vanished mid-scan */ }
+    }
+    return out;
+  };
+  await waitFor(async () => (piChildren().length === 0 ? true : undefined), 15_000, "no pi child processes after terminal");
+  if (piChildren().length > 0) {
+    throw new Error(`orphan pi process(es) after terminal generation: ${piChildren().map(p => p.pid).join(",")}`);
+  }
+
+  // 5. No workspace claim remains for the run, and the row is terminal.
+  const dbPath = join(ctx.abtarsHome, "kanban", "kanban.db");
+  if (!existsSync(dbPath)) throw new Error(`kanban db missing at ${dbPath}`);
+  const claims = execFileSync("sqlite3", [dbPath, `SELECT COUNT(*) FROM pi_workspace_claims WHERE run_id = '${runId}'`], { encoding: "utf-8" }).trim();
+  if (claims !== "0") {
+    throw new Error(`workspace claim(s) remain for terminal run ${runId}: ${claims}`);
+  }
+  const row = execFileSync("sqlite3", [dbPath, `SELECT status FROM pi_runs WHERE id = '${runId}'`], { encoding: "utf-8" }).trim();
+  if (!["completed", "failed", "cancelled", "interrupted"].includes(row)) {
+    throw new Error(`pi run ${runId} not terminal after cleanup (status=${row})`);
+  }
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
 export const PI_SCENARIOS: PiScenario[] = [
-  { name: "main-continuity-and-cursor", profiles: ["core", "full"], run: mainContinuity },
-  { name: "tool-multi-generation", profiles: ["core", "full"], run: toolMultiGeneration },
+  { name: "main-continuity-and-cursor", profiles: ["core", "full", "proof"], run: mainContinuity },
+  { name: "tool-multi-generation", profiles: ["core", "full", "proof"], run: toolMultiGeneration },
+  { name: "tool-policy-denial", profiles: ["proof"], run: toolPolicyDenial },
+  { name: "durable-compaction", profiles: ["proof"], run: durableCompaction },
   { name: "reset-rebuild", profiles: ["core", "full"], run: resetRebuild },
-  { name: "fail-closed-provider-suppression", profiles: ["core", "full"], run: failClosed },
+  { name: "session-start-hydration", profiles: ["hydration"], run: sessionStartHydration },
+  { name: "provider-cooldown-suppression", profiles: ["core", "full"], run: providerCooldownSuppresses },
+  { name: "owner-loss-degraded-memory", profiles: ["core", "full"], run: ownerLossDegradedMemory },
   { name: "owner-recovery", profiles: ["full"], run: ownerRecovery },
-  { name: "bridge-restart", profiles: ["full"], run: bridgeRestart },
+  { name: "bridge-restart", profiles: ["full", "proof"], run: bridgeRestart },
   { name: "lazy-transport-composition", profiles: ["full"], run: lazyTransports },
-  { name: "steer-followup", profiles: ["full"], run: steerFollowUp },
-  { name: "candidate-fallback", profiles: ["full"], run: fallback },
-  { name: "model-switch", profiles: ["full"], run: modelSwitch },
-  { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
+  { name: "steer-followup", profiles: ["full", "proof"], run: steerFollowUp },
+  { name: "single-candidate-failure", profiles: ["full"], run: singleCandidateFailure },
+  { name: "model-switch", profiles: ["full", "proof"], run: modelSwitch },
+  { name: "cancellation-deadline", profiles: ["full", "proof"], run: cancellation },
+  { name: "acquisition-hang-cancellation", profiles: ["full"], run: acquisitionCancel },
   { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
   { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
+  // This scenario intentionally relies on the offline/fail-closed Pi prompt.
+  // The full profile leaves the fixture session on model B and runs scheduled
+  // provider traffic immediately before this scenario, so it is not an
+  // offline boundary and can wait forever for an unscripted provider turn.
+  // Core exercises both transport lanes while preserving that contract.
+  { name: "pi-terminal-cleanup", profiles: ["core"], run: piTerminalCleanup },
 ];
 
-export function scenariosForProfile(profile: "core" | "full"): PiScenario[] {
+/** #1775 proof order: later scenarios observe state produced by earlier ones. */
+const PROOF_SCENARIO_ORDER = [
+  "main-continuity-and-cursor",
+  "tool-multi-generation",
+  "tool-policy-denial",
+  "durable-compaction",
+  "steer-followup",
+  "cancellation-deadline",
+  "bridge-restart",
+  "model-switch",
+];
+
+export function scenariosForProfile(profile: "core" | "full" | "proof" | "hydration"): PiScenario[] {
+  if (profile === "proof") {
+    return PROOF_SCENARIO_ORDER.map((name) => {
+      const scenario = PI_SCENARIOS.find((s) => s.name === name);
+      if (!scenario) throw new Error(`proof profile requires missing registry scenario ${name}`);
+      return scenario;
+    });
+  }
   return PI_SCENARIOS.filter((s) => s.profiles.includes(profile));
 }

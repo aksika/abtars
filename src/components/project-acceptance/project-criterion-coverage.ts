@@ -108,7 +108,11 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
   const supStore = new WorkerSupervisionStore();
   const mappings: ContractCriterionMapping[] = [];
   for (const child of kanbanGetChildren(rootCardId)) {
-    const contractRow = supStore.getContractByCardId(child.id);
+    // #1638 E2E: the LATEST contract of the card lineage — a retried child
+    // runs the revised contract, and the review case assembles its summary
+    // from that revision. Mapping the first-row contract would make every
+    // retried child's success invisible to acceptance.
+    const contractRow = supStore.getLatestContractForCard(child.id) ?? supStore.getContractByCardId(child.id);
     if (!contractRow) continue; // unsupervised sibling — not a mapping source
     const supports = childSupportsRootCriteria(contractRow.contract_json);
     if (supports === undefined) {

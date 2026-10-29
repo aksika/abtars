@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { LifecycleWakeScheduler } from "../lifecycle-wake-scheduler.js";
+import type { ScheduledTask } from "./task-types.js";
 import type { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 
 let TEST_HOME: string;
@@ -119,7 +120,7 @@ describe("kanban-retry due source #1539", () => {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
       const store = new ProjectReviewStore();
       store.ensureAwaitingContract(root);
-      store.setState(root, "executing");
+      store.stateTransition(root, ["awaiting_contract"], "executing");
       kanban.kanbanRetryOrFail(root, "orc terminal failure");
       kanban.kanbanRetryOrFail(child, "worker retry");
       const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
@@ -151,7 +152,7 @@ describe("kanban-retry due source #1539", () => {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
       const store = new ProjectReviewStore();
       store.ensureAwaitingContract(root);
-      store.setState(root, "blocked", { blocked_reason: "terminal" });
+      store.stateTransition(root, ["awaiting_contract"], "blocked", { blocked_reason: "terminal" });
       kanban.kanbanRetryOrFail(root, "late retry");
       const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
       await scheduler.start();
@@ -236,7 +237,7 @@ describe("run-deadline inactivity limits #1600", () => {
     writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify([entry], null, 2));
     stateStore.initializeState(taskStore.readEntries());
     const res = stateStore.reserveRun(entry.id, {
-      runId: "idle-run", groupId: "g", attempt: 1, trigger: "schedule",
+      runId: `${entry.id}-idle-run`, groupId: "g", attempt: 1, trigger: "schedule",
       occurrenceAt: Date.now(), deadlineAt,
     });
     if (!res.ok) throw new Error("reserveRun failed");
@@ -278,7 +279,7 @@ describe("run-deadline inactivity limits #1600", () => {
 
     source.wakeDue(lastProgressAt + taskTypes.runIdleBudgetMs());
     expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", expect.stringContaining("no progress for"));
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, run.runId, expect.stringContaining("no progress for"));
   });
 
   it("#1600: a run reporting progress forever is settled at the ceiling with the ceiling reason", () => {
@@ -290,7 +291,7 @@ describe("run-deadline inactivity limits #1600", () => {
     stateStore.advanceRun(entry.id, run.runId, { progressAt: now + 5 * 60_000 });
     source.wakeDue(now + 10 * 60_000);
     expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", "absolute ceiling exceeded");
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, run.runId, "absolute ceiling exceeded");
   });
 
   it("#1600: a spurious wake with no limit elapsed settles nothing", () => {
@@ -320,8 +321,8 @@ describe("run-deadline inactivity limits #1600", () => {
     const { source } = deadlineSource();
 
     const items = source.listDueItems();
-    expect(items.some(i => i.key === "run:idle-run" && i.dueAt === now + 10 * 60_000)).toBe(true);
-    expect(items.some(i => i.key === "idle:idle-run" && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
+    expect(items.some(i => i.key === `run:${run.runId}` && i.dueAt === now + 10 * 60_000)).toBe(true);
+    expect(items.some(i => i.key === `idle:${run.runId}` && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
   });
 
   it("#1603: a system run reporting progress through its handler survives the idle budget; a silent one is settled", () => {
@@ -350,13 +351,13 @@ describe("run-deadline inactivity limits #1600", () => {
     expect(silentC.deadlineExpired).not.toHaveBeenCalled();
     silentS.wakeDue(silentRun.lastProgressAt + taskTypes.runIdleBudgetMs());
     expect(silentC.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(silentC.deadlineExpired).toHaveBeenCalledWith(silent.id, "idle-run", expect.stringContaining("no progress for"));
+    expect(silentC.deadlineExpired).toHaveBeenCalledWith(silent.id, silentRun.runId, expect.stringContaining("no progress for"));
   });
 });
 
 describe("settleExpiredRun failure cascade (#1588)", () => {
   it("settles an expired run as failed and fires the cascade exactly once", () => {
-    const entry = {
+    const entry: ScheduledTask = {
       id: "expired-task",
       kind: "agent",
       prompt: "p",
@@ -380,13 +381,13 @@ describe("settleExpiredRun failure cascade (#1588)", () => {
 
     const calls: string[] = [];
     dueSources.settleExpiredRun(entry, stateStore.readState(entry.id)!.activeRun!,
-      "deadline passed", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+      "deadline passed", "abort", (event) => calls.push(event.diagnostic.code));
     expect(calls).toEqual(["deadline_exceeded"]);
     expect(stateStore.readState(entry.id)!.activeRun).toBeUndefined();
 
     // A second settlement of the same occurrence reports nothing further.
     const run = { runId: "exp-1", groupId: "g", attempt: 1 as const, trigger: "schedule" as const, occurrenceAt: now, reservedAt: now, deadlineAt: now - 60_000, phase: "executing" as const, lastProgressAt: now };
-    dueSources.settleExpiredRun(entry, run, "again", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+    dueSources.settleExpiredRun(entry, run, "again", "abort", (event) => calls.push(event.diagnostic.code));
     expect(calls).toHaveLength(1);
   });
 });

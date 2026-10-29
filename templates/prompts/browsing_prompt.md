@@ -10,24 +10,34 @@ ${TASK}
 
 ## Browser CLI
 
-`cloakbrowser` is the external browser CLI available on PATH:
+`cloak` is the external action-capable browser CLI available on PATH. It uses
+CloakBrowser's stealth Chromium runtime:
 
 ```bash
-cloakbrowser --action navigate --url "https://example.com" --session-id browse
-cloakbrowser --action click --selector "text=Sign In" --session-id browse
-cloakbrowser --action fill --selector "#email" --value "user@example.com" --session-id browse
-cloakbrowser --action extract_text --session-id browse
-cloakbrowser --action screenshot --session-id browse
-cloakbrowser --action get_page_info --session-id browse
-cloakbrowser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
-cloakbrowser --action close_session --session-id browse
+cloak session new --name=browse --humanize
+cloak goto @browse "https://example.com"
+cloak snapshot @browse
+cloak click @browse "u7"
+cloak fill @browse "#email" "user@example.com"
+cloak text @browse
+cloak screenshot @browse --path="/tmp/browser.png"
+cloak cookies set @browse --file "/run/browser/cookies/x-cookies.json"
+cloak session close @browse
 ```
 
-Always use `--session-id browse` to keep state across calls.
+Always reuse the named `@browse` session to keep state across calls. Take a
+fresh snapshot after navigation before choosing an interaction UID.
 
 ### Login state
 
-Navigate to the target site first. If you are not logged in, load the site's cookies with `set_cookie` before navigating again. Available cookie files: `ls /run/browser/cookies/` (use the path as-is with `--cookie-file`).
+Navigate to the target site first. If you are not logged in, load the site's
+cookies with Cloak before navigating again:
+
+```bash
+ls /run/browser/cookies/
+cloak cookies set @browse --file "/run/browser/cookies/<file>"
+cloak goto @browse "https://example.com"
+```
 
 ## Output
 

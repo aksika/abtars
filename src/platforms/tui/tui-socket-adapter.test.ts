@@ -33,8 +33,12 @@ import {
 import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
 import { createSpinSessionRegistry, type SpinSessionRegistry } from "../../components/spin-sessions.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
+import type { SpinSessionSpec, AwaitedSpinResult } from "../../components/spin-types.js";
+import { classifyContent } from "../../components/clean-response.js";
 import type { InboundMessage } from "../../types/platform.js";
+import type { Mock } from "vitest";
 import { expireInstructions, drainInstructionBatch } from "../../components/session-instruction-queue.js";
+import { setCodingRouteService } from "../../components/pipeline/coding-route.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 import { SessionOutputFeed } from "../../components/session-output-feed.js";
 
@@ -54,7 +58,7 @@ interface MockSpinOpts {
   orcBusy?: boolean;
   /** #1533: mark the orc ManagedSession entry as ended (getOrcSession → null). */
   orcEnded?: boolean;
-  spinResult?: { sessionId: string; cardId?: number; result?: string };
+  spinResult?: { sessionId: string; cardId?: number; result: string };
   /** #1336: sessions returned by listAllSessions for cross-platform attach. */
   allSessions?: ManagedSession[];
 }
@@ -96,12 +100,18 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     getSessionByGlobalIndex: vi.fn((index: number) => {
       calls.getSessionByGlobalIndex.push([index]);
       if (opts.switchResult && typeof opts.switchResult !== "string") return opts.switchResult;
-      return allEntries.find(s => s.shortIndex === index) ?? null;
+      // Production treats a miss as falsy either way; Spin's contract is undefined.
+      return allEntries.find(s => s.shortIndex === index) ?? undefined;
     }),
     listAllSessions: vi.fn(() => allEntries),
-    spin: vi.fn(async (spec: unknown) => {
+    spin: vi.fn(async (spec: SpinSessionSpec): Promise<AwaitedSpinResult> => {
       calls.spin.push([spec]);
-      return opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
+      // #1651: mirror the production contract — the provider's own string,
+      // verbatim (possibly empty), plus the classified outcome. Production
+      // spin computes outcome via classifyContent at the single settle point.
+      // result is required (possibly empty) per AwaitedSpinResult.
+      const settled = opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
+      return { sessionId: settled.sessionId, cardId: settled.cardId, result: settled.result, outcome: classifyContent(settled.result) };
     }),
   };
   return { spin: spin as Spin, calls };
@@ -391,7 +401,10 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
       this: net.Socket, event: string, listener: (...args: unknown[]) => void,
     ) {
       if (event === "data") dataListeners.push({ socket: this, listener: listener as (buf: Buffer) => void });
-      return originalOn.call(this, event, listener);
+      // Forward through the data overload: the overload set's literal matching
+      // cannot see through the string-typed event variable.
+      const dataOn = originalOn as (event: string, listener: (...args: unknown[]) => void) => net.Socket;
+      return dataOn.call(this, event, listener);
     });
 
     try {
@@ -457,7 +470,7 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
 describe("TuiSocketAdapter — attach selector resolution", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -567,14 +580,14 @@ describe("TuiSocketAdapter — attach selector resolution", () => {
 describe("TuiSocketAdapter — setMessageHandler swap", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let initialHandler: ReturnType<typeof vi.fn>;
-  let swappedHandler: ReturnType<typeof vi.fn>;
+  let initialHandler: Mock<(msg: InboundMessage) => void>;
+  let swappedHandler: Mock<(msg: InboundMessage) => void>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
     mock = makeMockSpin();
-    initialHandler = vi.fn();
-    swappedHandler = vi.fn();
+    initialHandler = vi.fn((_msg: InboundMessage) => {});
+    swappedHandler = vi.fn((_msg: InboundMessage) => {});
   });
 
   it("initially routes input through onMessage; after setMessageHandler, routes through the new handler", async () => {
@@ -628,7 +641,7 @@ describe("TuiSocketAdapter — setMessageHandler swap", () => {
 describe("TuiSocketAdapter — orc mode", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -729,6 +742,29 @@ describe("TuiSocketAdapter — orc mode", () => {
 
     conn.destroy(); adapter.stop();
   });
+
+  it("#1651 v2: a reaction-only Orc turn renders the parsed emoji at the display boundary, never the raw marker", async () => {
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    mock = makeMockSpin({
+      orcSession: orc,
+      orcBusy: false,
+      spinResult: { sessionId: "1749563282_O_01", cardId: 1, result: "[REACT:🧠]" },
+    });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    conn.write(encodeFrame({ t: "input", text: "are you alive?" }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    const assistantMsg = frames.find((f) => f.t === "message" && (f as { role: string }).role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    if (assistantMsg && assistantMsg.t === "message") {
+      expect(assistantMsg.markdown).toBe("🧠");
+      expect(assistantMsg.markdown).not.toContain("[REACT:");
+    }
+
+    conn.destroy(); adapter.stop();
+  });
 });
 
 // ── #1332: steering in orc mode ──────────────────────────────────────
@@ -736,7 +772,7 @@ describe("TuiSocketAdapter — orc mode", () => {
 describe("TuiSocketAdapter — steer mode", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -1483,7 +1519,7 @@ describe("TuiSocketAdapter — #1399 steer binding", () => {
 describe("TuiSocketAdapter — #1362 steering isolation", () => {
   let sockPath: string;
   let adapter: TuiSocketAdapter;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -1493,18 +1529,19 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
   afterEach(() => { if (adapter) adapter.stop(); });
 
   /** Create a minimal ManagedSession for queue operations. */
-  function makeSession(id: string, execId: string): ManagedSession {
+  function makeSession(id: string, execId: string, overrides?: Partial<ManagedSession>): ManagedSession {
     return {
       id, userId: "aksika", platform: "tui", chatId: 0,
       delivery: "simple", active: false, status: "ready",
       idleTimeoutMs: 7200000, lastActiveAt: Date.now(),
       messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1, busy: true, queue: [], fullMode: false,
-      pendingStart: false, seen: false, compacting: false, ctxWarned: false,
-      compactFailures: 0, primingTerms: [], completions: [],
+      log: [], shortIndex: 1, showThinking: false, busy: true, queue: [], fullMode: false,
+      pendingStart: false, seen: false,
+      primingTerms: [], completions: [],
       instructionQueue: [] as QueuedSessionInstruction[],
       activeExecutionId: execId, steeringAccepting: true,
-    } as ManagedSession;
+      ...overrides,
+    };
   }
 
   /**
@@ -1524,10 +1561,9 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
       return sharedSession;
     }) as any;
     // Fix listAllSessions to return the orc managed entry
-    mock.spin.listAllSessions = vi.fn(() => [{
-      id: "1749563282_O_01", busy: orcBusy, instructionQueue: [],
-      activeExecutionId: execId, steeringAccepting: orcBusy,
-    } as ManagedSession]);
+    mock.spin.listAllSessions = vi.fn(() => [makeSession("1749563282_O_01", execId, {
+      busy: orcBusy, steeringAccepting: orcBusy,
+    })]);
     return { spin: mock.spin, getSession: () => sharedSession! };
   }
 
@@ -1676,7 +1712,10 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
       return expiredAcks.length > 0 ? expiredAcks : null;
     }, 1000);
     expect(expiredAcks.length).toBe(1);
-    expect(expiredAcks[0]!.instructionId).toBe(ownedId);
+    const expired = expiredAcks[0];
+    expect(expired?.t).toBe("steer-ack");
+    if (expired?.t !== "steer-ack") throw new Error("expected steer-ack frame");
+    expect(expired.instructionId).toBe(ownedId);
     conn.destroy();
   });
 
@@ -1766,7 +1805,7 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
 describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)", () => {
   let sockPath: string;
   let adapter: TuiSocketAdapter;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
   let spin: Spin;
   let registry: SpinSessionRegistry;
 
@@ -1906,5 +1945,295 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
     expect(spinSpy).not.toHaveBeenCalled();
     expect(onMessage).not.toHaveBeenCalled();
     conn.destroy();
+  });
+});
+
+// ── #1319 execution-follow binding (R1) ─────────────────────────────────
+
+describe("TuiSocketAdapter — #1319 idle Orc execution-follow", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("idle attach follows the next execution's card and channel activity, rejects stale, then follows a second execution", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    // Idle: activeExecutionId is undefined at attach time.
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(frames.some((f) => f.t === "ready")).toBe(true);
+
+    const OID = "1749563282_O_01";
+    const publish = (kind: string, executionId: string, cardId?: number, message?: string): void => {
+      feed.publish({
+        kind,
+        ...(message !== undefined ? { from: "worker", to: "orc", message } : {}),
+        title: cardId !== undefined ? `card ${cardId}` : undefined,
+        status: "running",
+        cardId,
+        sessionId: OID,
+        executionId,
+      } as any);
+    };
+
+    // Execution 1 starts — idle attach binds to it.
+    publish("execution.started", "exec_1");
+    publish("card.queued", "exec_1", 101);
+    publish("channel.message", "exec_1", 101, "discussing plan");
+    publish("execution.completed", "exec_1");
+    await new Promise((r) => setTimeout(r, 40));
+
+    const kinds = frames
+      .filter((f) => f.t === "activity")
+      .map((f) => (f as any).event.kind as string);
+    expect(kinds).toEqual([
+      "execution.started",
+      "card.queued",
+      "channel.message",
+      "execution.completed",
+    ]);
+    const channel = frames.find(
+      (f) => f.t === "activity" && (f as any).event?.kind === "channel.message",
+    ) as Extract<TuiServerFrame, { t: "activity" }> | undefined;
+    expect(channel?.event).toMatchObject({ from: "worker", to: "orc", message: "discussing plan" });
+
+    // After terminal settlement the binding returns to idle-follow: late
+    // events from the settled execution are rejected.
+    publish("card.completed", "exec_1", 101);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(frames.filter((f) => f.t === "activity" && (f as any).event?.kind === "card.completed").length).toBe(0);
+
+    // Execution 2 starts — the same attachment follows it.
+    publish("execution.started", "exec_2");
+    publish("card.queued", "exec_2", 202);
+    await new Promise((r) => setTimeout(r, 40));
+    const exec2Events = frames
+      .filter((f) => f.t === "activity" && (f as any).event?.executionId === "exec_2")
+      .map((f) => (f as any).event.kind as string);
+    expect(exec2Events).toEqual(["execution.started", "card.queued"]);
+
+    conn.destroy();
+  });
+
+  it("idle attach receives a burst published synchronously (delivery-time predicate binding)", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Full execution published in ONE stack before any microtask delivery:
+    // start → card → channel → terminal. The predicate must bind at delivery
+    // time, not lose the mid-burst events at publish time.
+    const OID = "1749563282_O_01";
+    feed.publish({ kind: "execution.started", sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "card.queued", title: "c", status: "queued", cardId: 5, sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "channel.message", from: "w", to: "orc", message: "burst", sessionId: OID, executionId: "exec_1", cardId: 5 } as any);
+    feed.publish({ kind: "execution.completed", summary: "done", sessionId: OID, executionId: "exec_1" } as any);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const kinds = frames
+      .filter((f) => f.t === "activity")
+      .map((f) => (f as any).event.kind as string);
+    expect(kinds).toEqual(["execution.started", "card.queued", "channel.message", "execution.completed"]);
+    conn.destroy();
+  });
+
+  it("superseding attach stops delivery to the replaced attachment", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const first = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+    const second = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const OID = "1749563282_O_01";
+    feed.publish({ kind: "execution.started", sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "card.queued", title: "c", status: "queued", cardId: 5, sessionId: OID, executionId: "exec_1" } as any);
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Only the second (current) attachment receives activity.
+    const firstActivity = first.frames.filter((f) => f.t === "activity");
+    expect(firstActivity.length).toBe(0);
+    expect(second.frames.filter((f) => f.t === "activity").length).toBeGreaterThanOrEqual(2);
+
+    first.conn.destroy();
+    second.conn.destroy();
+  });
+});
+
+// ── #1635 Phase 2 — native TUI handoff ──────────────────────────────────
+
+describe("TuiSocketAdapter — native coding handoff", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+  let coding: {
+    beginNativeHandoff: ReturnType<typeof vi.fn>;
+    recordNativeHandoffPid: ReturnType<typeof vi.fn>;
+    endNativeHandoff: ReturnType<typeof vi.fn>;
+    abortNativeHandoff: ReturnType<typeof vi.fn>;
+  };
+  const H1 = { sessionId: "spin-c-1", workspaceAlias: "repo-a", canonicalPath: "/ws/repo-a", memoryMode: "none", sessionStorageRoot: "/state", piSessionId: "sess-1", piSessionFile: "/state/sess-1.jsonl" } as const;
+
+  beforeEach(async () => {
+    sockPath = tmpSocketPath();
+    coding = {
+      beginNativeHandoff: vi.fn(() => ({ ok: true, handoff: H1 })),
+      recordNativeHandoffPid: vi.fn(),
+      endNativeHandoff: vi.fn(() => ({ ok: true, message: "Pi session returned to idle" })),
+      abortNativeHandoff: vi.fn(),
+    };
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      codingService: coding as never,
+    });
+    await adapter.start();
+  });
+
+  afterEach(() => { adapter.stop(); });
+
+  async function openConn(): Promise<{ conn: net.Socket; frames: TuiServerFrame[] }> {
+    const frames: TuiServerFrame[] = [];
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const conn = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      conn.once("connect", () => resolve());
+      conn.once("error", reject);
+    });
+    conn.on("data", (buf: Buffer) => {
+      for (const f of decoder.push(buf)) frames.push(f);
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    return { conn, frames };
+  }
+
+  it("accepts a coding-handoff request and replies with session facts only", async () => {
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-accepted"), 2000);
+
+    expect(coding.beginNativeHandoff).toHaveBeenCalledWith(expect.objectContaining({
+      ownerPrincipal: "aksika",
+      command: "/coding",
+    }));
+    const accepted = frames.find((f) => f.t === "coding-handoff-accepted");
+    expect(accepted).toMatchObject({ t: "coding-handoff-accepted", handoff: H1 });
+    conn.destroy();
+  });
+
+  it("rejects with the bounded reason when the service refuses", async () => {
+    coding.beginNativeHandoff.mockReturnValue({ ok: false, reason: "Session is running" });
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-rejected"), 2000);
+    expect(frames.find((f) => f.t === "coding-handoff-rejected")).toMatchObject({
+      t: "coding-handoff-rejected", message: "Session is running",
+    });
+    conn.destroy();
+  });
+
+  it("rejects when the bridge has no coding service", async () => {
+    adapter.stop();
+    sockPath = tmpSocketPath();
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+    });
+    await adapter.start();
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-rejected"), 2000);
+    expect(frames.find((f) => f.t === "coding-handoff-rejected")).toMatchObject({
+      t: "coding-handoff-rejected",
+    });
+    conn.destroy();
+  });
+
+  it("#1690 accepts a coding-handoff when the service registers after adapter construction", async () => {
+    // Production shape: the platforms boot phase builds the adapter BEFORE
+    // boot-pi runs, so the constructor snapshot is null. The handoff must
+    // resolve the service through the coding-route registry instead.
+    adapter.stop();
+    sockPath = tmpSocketPath();
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+    });
+    setCodingRouteService(coding as never);
+    try {
+      await adapter.start();
+      const { conn, frames } = await openConn();
+      conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+      await waitFor(() => frames.some((f) => f.t === "coding-handoff-accepted"), 2000);
+      expect(coding.beginNativeHandoff).toHaveBeenCalled();
+      const accepted = frames.find((f) => f.t === "coding-handoff-accepted");
+      expect(accepted).toMatchObject({ t: "coding-handoff-accepted", handoff: H1 });
+      conn.destroy();
+    } finally {
+      setCodingRouteService(null);
+    }
+  });
+
+  it("forwards coding-handoff-started pid and coding-handoff-exit to the service", async () => {
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff-started", sessionId: "spin-c-1", pid: 4242 }));
+    conn.write(encodeFrame({ t: "coding-handoff-exit", sessionId: "spin-c-1", code: 0 }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-released"), 2000);
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-started-accepted"), 2000);
+
+    expect(coding.recordNativeHandoffPid).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", pid: 4242 }));
+    expect(coding.endNativeHandoff).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", code: 0 }));
+    expect(frames.find((f) => f.t === "coding-handoff-started-accepted")).toMatchObject({
+      t: "coding-handoff-started-accepted", sessionId: "spin-c-1", pid: 4242,
+    });
+    expect(frames.find((f) => f.t === "coding-handoff-released")).toMatchObject({
+      t: "coding-handoff-released",
+    });
+    conn.destroy();
+  });
+
+  it("aborts the handoff when the connection dies", async () => {
+    const { conn } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => coding.beginNativeHandoff.mock.calls.length > 0, 2000);
+    const leaseOwner = `tui:${(adapter as unknown as { _connGen: number })._connGen}`;
+    conn.destroy();
+    await waitFor(() => coding.abortNativeHandoff.mock.calls.length > 0, 2000);
+    expect(coding.abortNativeHandoff).toHaveBeenCalledWith(leaseOwner);
   });
 });

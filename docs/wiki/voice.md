@@ -1,59 +1,20 @@
 # Voice (STT/TTS)
 
-abTARS transcribes voice messages and can respond with synthesized speech.
+Telegram supports voice transcription and synthesized voice replies.
 
-## Speech-to-Text (STT)
+## Speech-to-text
 
-Provider: Groq Whisper (`whisper-large-v3-turbo`).
+Transcription uses Groq Whisper. Store the GROQ_API_KEY credential in abTARS's local secret directory. Speech-to-text enables by default when that credential is present; STT_ENABLED can explicitly enable or disable it.
 
-### Setup
+After adding a credential, run abtars restart --cold so the new bridge process loads it.
 
-```bash
-# ~/.abtars/config/.env
-STT_ENABLED=true
-```
+## Text-to-speech
 
-Store the Groq API key in the secrets vault (never in `.env`):
-
-```bash
-echo -n "gsk-..." > ~/.abtars/secret/GROQ_API_KEY
-chmod 600 ~/.abtars/secret/GROQ_API_KEY
-```
-
-Then restart the bridge (`abtars stop --force && abtars start`). The key is encrypted at rest and loaded into `process.env.GROQ_API_KEY` at boot.
-
-### Flow
-
-1. User sends a voice note on Telegram
-2. Bridge downloads the audio file
-3. Sends to Groq Whisper API for transcription
-4. Injects transcript as: `[🎤 voice, EN] Hello, how are you?`
-5. Agent responds normally (text or TTS)
-
-### Language handling
-
-- `LANGUAGE_HINT_PROMPT` guides Whisper (e.g. `"ez egy magyar szöveg. or English"`)
-- Whisper returns detected language code (`hu`, `en`, `ja`, etc.)
-- `users.json` defines expected languages per user: `"languages": ["hu", "en"]`
-- If detected language isn't in the user's list → agent asks back (likely hallucination on short audio)
-- Soft check via prompt — no hard rejection
-
-## Text-to-Speech (TTS)
-
-When enabled, the agent can respond with voice messages on Telegram.
-
-### Setup
-
-```bash
-TTS_ENABLED=true
-TTS_PROVIDER=openai    # or other supported provider
-```
+Text-to-speech uses Microsoft Edge TTS. It is enabled by default. Set TTS_ENABLED=false to disable it, or set TTS_VOICE to choose a voice.
 
 ## Platform support
 
-| Platform | STT | TTS |
-|----------|-----|-----|
-| Telegram | ✓ | ✓ |
-| Discord | — | — |
-
-Voice is Telegram-only — it's the only platform that sends voice note file IDs the bridge can download.
+| Platform | Speech-to-text | Text-to-speech |
+|----------|----------------|-----------------|
+| Telegram | Supported | Supported |
+| Discord | Not currently supported | Not currently supported |

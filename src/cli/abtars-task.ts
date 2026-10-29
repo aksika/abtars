@@ -1,8 +1,10 @@
 import { localISO } from "../utils/local-time.js";
-import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
-import { readState, updateState, removeState } from "../components/tasks/task-state-store.js";
+import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry, readTaskCatalog, TaskCatalogUnavailableError } from "../components/tasks/task-store.js";
+import { readState, initializeState, updateState, removeState } from "../components/tasks/task-state-store.js";
+import { requireTaskDatabase } from "../components/tasks/kanban-board.js";
 import { recentRuns } from "../components/tasks/task-history-store.js";
 import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
+import { validateTaskFile } from "../components/tasks/task-validator.js";
 
 export function readEntries(): ScheduledTask[] {
   return dbReadEntries();
@@ -117,7 +119,13 @@ function add(args: string[]): void {
 }
 
 function listEntries(): void {
-  const entries = readEntries();
+  const catalog = readTaskCatalog();
+  if (catalog.kind === "unavailable") {
+    console.log(JSON.stringify({ ok: false, error: "task catalog unavailable", reason: catalog.reason }));
+    process.exit(1);
+  }
+  const entries = catalog.entries;
+  initializeState(entries);
   if (entries.length === 0) {
     console.log(JSON.stringify({ ok: true, entries: [], message: "No pending cron entries" }));
     return;
@@ -148,7 +156,39 @@ function listEntries(): void {
 }
 
 function remove(id: string): void {
-  if (!dbRemoveEntry(id)) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
+  let removed: boolean;
+  try {
+    removed = dbRemoveEntry(id);
+  } catch (err) {
+    if (err instanceof TaskCatalogUnavailableError) {
+      console.log(JSON.stringify({ ok: false, error: "task catalog unavailable", reason: err.reason }));
+      process.exit(1);
+    }
+    throw err;
+  }
+  if (!removed) {
+    let durableStateExists = false;
+    try {
+      const db = requireTaskDatabase();
+      const row = db.prepare(`
+        SELECT 1 AS present FROM task_state WHERE task_id = ?
+        UNION ALL
+        SELECT 1 AS present FROM task_runs WHERE task_id = ?
+        LIMIT 1
+      `).get(id, id);
+      durableStateExists = row !== undefined;
+    } catch (err) {
+      console.log(JSON.stringify({ ok: false, error: "task state unavailable" }));
+      process.exit(1);
+      return;
+    }
+    if (durableStateExists) {
+      removeState(id);
+      console.log(JSON.stringify({ ok: true, action: "removed", id }));
+      return;
+    }
+    console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1);
+  }
   removeState(id);
   console.log(JSON.stringify({ ok: true, action: "removed", id }));
 }
@@ -208,6 +248,12 @@ function showHistory(id: string): void {
   console.log(JSON.stringify({ ok: true, id, label: label.slice(0, 80), runs }));
 }
 
+function validate(path: string | undefined): void {
+  const result = validateTaskFile(path);
+  console.log(JSON.stringify(result));
+  if (!result.ok) process.exit(1);
+}
+
 export function main(argv: string[] = process.argv): void {
   if (argv.includes('--help')) {
     console.log(`abtars-task — schedule time-based reminders and tasks.
@@ -218,7 +264,8 @@ Usage:
   abtars-task remove <id>
   abtars-task pause <id>
   abtars-task resume <id>
-  abtars-task history <id>`);
+  abtars-task history <id>
+  abtars-task validate [path]`);
     process.exit(0);
   }
 
@@ -256,8 +303,16 @@ Usage:
       showHistory(id);
       break;
     }
+    case "validate": {
+      if (args.length > 2) {
+        console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task validate [path]" }));
+        process.exit(1);
+      }
+      validate(args[1]);
+      break;
+    }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task <add|list|remove|pause|resume|history> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task <add|list|remove|pause|resume|history|validate> [args]" }));
       process.exit(1);
   }
 }

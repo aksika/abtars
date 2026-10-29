@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillSessionManager } from "./skill-session.js";
 import { SkillSessionStore, scopeKeyOf } from "./skill-session-store.js";
+import { classifyContent } from "./clean-response.js";
 import type { ManagedSession, SessionType } from "./spin-types.js";
 import type { SkillSpinFacade } from "./skill-session.js";
 
@@ -35,10 +36,10 @@ function allocateSession(
     messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [],
     shortIndex: idx + 1,
+    showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false,
-    seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
+    seen: false,
     primingTerms: [], completions: [],
-    pendingWait: [],
     instructionQueue: [],
     steeringAccepting: false,
   };
@@ -107,7 +108,10 @@ function fakeSpin(): FakeSpin {
       if (!session) throw new Error(`unknown session ${sessionId}`);
       if (session.status === "ended") throw new Error("session ended");
       prompts.push({ sessionId, prompt });
-      return { sessionId, result: `response-to:${prompt.slice(0, 40)}` };
+      // #1651: mirror the production contract — spin reports the classified
+      // outcome alongside the verbatim result, and the launch guard reads it.
+      const result = `response-to:${prompt.slice(0, 40)}`;
+      return { sessionId, result, outcome: classifyContent(result) };
     },
     finalizeExactSession: (sessionId, expectedUserId) => {
       const s = sessions.get(sessionId);
@@ -188,6 +192,25 @@ describe("SkillSessionManager launch", () => {
     expect(result.error.code).toBe("transport_failed");
     expect(mgr.list(TARGET)).toBeUndefined();
     expect(spin.finalized).toHaveLength(1);
+  });
+
+  it.each<[string, string]>([
+    ["a reaction-only", "[REACT:👋]"],
+    ["a no-reply", "[NO_REPLY]"],
+    ["an empty", ""],
+  ])("#1651 v2: bootstrap fails when the first K turn yields %s outcome — only text content activates a skill", async (_label, raw) => {
+    const spin = fakeSpin();
+    spin.facade.spin = async ({ sessionId, prompt }) => {
+      const session = spin.sessions.get(sessionId);
+      if (!session) throw new Error(`unknown session ${sessionId}`);
+      return { sessionId, result: raw, outcome: classifyContent(raw) };
+    };
+    const mgr = makeManager(spin);
+    const result = await mgr.launch({ skill: "spanish-tutor", agent: "professor", target: TARGET, message: "hola" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("empty model response");
+    expect(mgr.list(TARGET)).toBeUndefined();
   });
 
   it("same skill + same agent reuses the same K session", async () => {
@@ -384,7 +407,8 @@ describe("SkillSessionManager restart rehydration", () => {
       spin: async ({ sessionId, prompt }) => {
         const session = sessions.get(sessionId);
         if (!session) throw new Error(`unknown session ${sessionId}`);
-        return { sessionId, result: `ok:${prompt.slice(0, 20)}` };
+        const result = `ok:${prompt.slice(0, 20)}`;
+        return { sessionId, result, outcome: classifyContent(result) };
       },
       finalizeExactSession: (id, expected) => {
         const s = sessions.get(id);

@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkPiBoundarySource, checkPiImportSurface } from "../../../scripts/check-pi-boundary.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..", "..");
@@ -28,28 +29,41 @@ describe("dependency boundary (#1425)", () => {
     expect(pkg.devDependencies?.["@earendil-works/pi-ai"]).toBeDefined();
   });
 
-  it("@earendil-works/pi-ai is absent from the npm pack manifest", () => {
-    // Read .npmignore / files field to verify exclusion
-    const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf-8")) as {
-      files?: string[];
-    };
-    // The `files` field should not include any pi-ai modules
-    const bundledFiles = pkg.files ?? [];
-    expect(bundledFiles.some(f => f.includes("pi-ai"))).toBe(false);
-    // Verify node_modules is not in the files list
-    expect(bundledFiles.includes("node_modules")).toBe(false);
+  it("#1746 — the AST import guard accepts a multi-line import type block and rejects a value import", () => {
+    const violations = checkPiBoundarySource(
+      [
+        'import type {',
+        '  Model,',
+        '  Provider,',
+        '} from "@earendil-works/pi-ai";',
+        '',
+        'import { clampThinkingLevel } from "@earendil-works/pi-ai";',
+      ].join("\n"),
+      "fixture.ts",
+    );
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.line).toBe(6);
+    expect(violations[0]!.specifier).toBe("@earendil-works/pi-ai");
   });
 
-  it("pi-ai is type-only — import type should be erased at runtime", async () => {
-    const mod = await import("./pi-ai-adapter.js");
-    expect(mod.pickPiApi).toBeDefined();
-    expect(mod.buildPiModel).toBeDefined();
-    expect(mod.buildPiContext).toBeDefined();
+  it("#1577 — the import-surface allowlist pins Pi types to the integration area", () => {
+    const typeOnly = 'import type { Model } from "@earendil-works/pi-ai";';
+    // Inside the integration area: no surface violation.
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/transport/pi-core-types.ts")).toEqual([]);
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/pi-executor/pi-rpc-client.ts")).toEqual([]);
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/cli/commands/tui-ui.ts")).toEqual([]);
+    // Outside it: even a type-only Pi import fails.
+    const outside = checkPiImportSurface(typeOnly, "x.ts", "src/components/pipeline/prompt-builder.ts");
+    expect(outside).toHaveLength(1);
+    expect(outside[0]!.kind).toBe("outside-allowlist");
+    // Test/dev exclusions still skip both checks.
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/transport/pi-core-types.test.ts")).toEqual([]);
+  });
 
-    const catalog = await import("./pi-catalog.js");
-    expect(catalog.mapProviderName).toBeDefined();
-    expect(catalog.loadPiModels).toBeDefined();
-    expect(catalog.resolveModelMeta).toBeDefined();
+  it("#1577 — the product port module imports no Pi package", () => {
+    const port = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-port.ts"), "utf-8");
+    expect(port).not.toMatch(/from\s+["']@earendil-works\//);
+    expect(port).not.toMatch(/import\(["']@earendil-works\//);
   });
 });
 
@@ -65,39 +79,27 @@ describe("official type compatibility (#1425)", () => {
     expect(piPkg.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("esbuild config excludes pi-ai as external", () => {
-    // Verify the esbuild config does NOT include pi-ai in the external list
-    // (pi-ai must remain bundled-absent because it's resolved at runtime via lazyRequire)
-    // Actually, we need to verify it's NOT in the external list AND NOT bundled.
-    // pi-ai should be lazily required at runtime from ~/.local/lib/node_modules/
-    const esbuildConfig = readFileSync(resolve(ROOT, "esbuild.config.js"), "utf-8");
-    // Verify esbuild does NOT have pi-ai in its externals (it's lazy-loaded, not external)
-    // The external list should NOT include pi-ai because esbuild should not even see it
-    // (all imports are type-only and erased; lazyRequire uses CJS require at runtime)
-    const externals = [
-      "rettiwt-api", "better-sqlite3", "abmind", "pdf-parse",
-      "youtube-transcript", "jimp",
-    ];
-    for (const ext of externals) {
-      expect(esbuildConfig).toContain(ext);
-    }
-    // pi-ai should not be in the external list (it's type-only, not bundled nor external)
-    expect(esbuildConfig).not.toContain("@earendil-works/pi-ai");
+  it("#1746 — the bundle input graph contains no @earendil-works module", () => {
+    // meta.json is emitted by esbuild.config.js on every build (CI builds
+    // before npm test). Any pi module inlined into the bundle would appear
+    // as an input — the cheap unit-level twin of scripts/check-bundle-boundary.mjs,
+    // which guards the emitted sourcemaps as part of `npm run bundle`.
+    const meta = JSON.parse(
+      readFileSync(resolve(ROOT, "bundle", "meta.json"), "utf-8"),
+    ) as { inputs: Record<string, { bytesInOutput: number }> };
+    const leaked = Object.keys(meta.inputs).filter((input) => input.includes("@earendil-works"));
+    expect(leaked).toEqual([]);
   });
 });
 
 // ── 3. Retry/fallback ownership ───────────────────────────────────────────────
 
-describe("retry/fallback ownership (#1425)", () => {
-  it("adapter passes maxRetries: 0 to pi-ai — abtars L2 owns the retry budget", async () => {
-    const src = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-ai-adapter.ts"), "utf-8");
-    expect(src).toContain("maxRetries: 0");
-    // No local retry loop, retry budget, or fallback in the adapter
-    // (only passes maxRetries to pi-ai; L2 owns the retry budget)
-    expect(src).not.toContain("withRetry(");
+describe("retry ownership (#1940 R6)", () => {
+  it("Pi owns provider retries: the session store neither disables them nor replaces Pi's stream function", () => {
+    const src = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-agent-session-store.ts"), "utf-8");
+    expect(src).not.toMatch(/maxRetries\s*:\s*0/);
+    expect(src).not.toMatch(/streamFn\s*:|streamFunction\s*=/);
   });
-
-
 });
 
 // ── 4. No provider-specific wire format copies ────────────────────────────────
@@ -119,5 +121,3 @@ describe("no upstream provider wire copies (#1425)", () => {
     expect(src).not.toContain(`"stream": true`);
   });
 });
-
-

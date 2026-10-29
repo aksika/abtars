@@ -4,32 +4,21 @@
  * streaming → response delivery → memory → auto-compact.
  */
 
+import { randomUUID } from "node:crypto";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { cleanResponse } from "./clean-response.js";
+import { cleanResponse, extractSupportIds, SUPPORT_STRIP_RE } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
-import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
+import { isProviderExecutionError } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
-import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
+import { assistantMessageKey } from "./memory-operation-key.js";
+import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence } from "./answer-evidence.js";
 
-/** Retry a send operation on transient network errors (fetch failed, timeout, 5xx). */
-async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
-  for (let i = 0; i < attempts; i++) {
-    try { return await fn(); }
-    catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const transient = msg.includes("fetch failed") || msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || /^5\d\d/.test(msg);
-      if (!transient || i === attempts - 1) throw err;
-      const delay = 1000 * Math.pow(3, i);
-      logWarn("pipeline", `Delivery failed (attempt ${i + 1}/${attempts}), retrying in ${delay}ms: ${msg}`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw new Error("unreachable");
-}
+/** Retry a send operation on transient network errors. */
+import { retrySend } from "./pipeline/delivery-retry.js";
 
 /** A compaction trigger is eligible only after the assistant row has a
  * durable identity. `attemptMemoryMutation` intentionally swallows write
@@ -46,9 +35,11 @@ import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
-import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
-import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
-import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { isTrustedScheduledAnnouncement, type InboundMessage, type PlatformAdapter, type DeliveryCorrelation, type MainDeliveryResult } from "../types/platform.js";
+import { BOOT_GREETING_TOKEN } from "../types/platform.js";
+import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
+import { codingRouteMiddleware } from "./pipeline/coding-route.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
@@ -56,39 +47,65 @@ import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
 import { abmind } from "../utils/abmind-lazy.js";
-import { getSessionControlService } from "./session-control/instance.js";
+
 import type { ResolvedHailMary } from "./transport-config.js";
 
+/**
+ * Map a turn failure to the bounded operator-visible reason. The typed Pi
+ * provider settlement is authoritative: its inner provider text can contain
+ * words like "aborted" without meaning the transport connection dropped, so
+ * generic substring mapping must not rewrite it (#1935).
+ */
+export function describePipelineError(err: unknown): string {
+  if (isProviderExecutionError(err)) {
+    if (err.failure.code === "credits_exhausted") {
+      return "OpenRouter credits exhausted — top up at openrouter.ai/credits";
+    }
+    const message = err.failure.message.trim().slice(0, 300);
+    return message.length > 0 ? `Error: ${message}` : "Error: All models exhausted.";
+  }
+  const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
+  return errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
+    : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
+    : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
+    : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
+    : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
+    : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
+    : `Error: ${errStr.slice(0, 80)}`;
+}
+
 const TAG = "pipeline";
-const PRIMING_MAX = 8;
+const BOOT_GREETING_TEXT = "[SESSION START] You just came online. Greet the user.";
 
-// #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
-// Map<platform_message_id_string, recalled_memory_ids[]> with 1h TTL
-// Keys are lossless string representations of platform message IDs (Discord snowflakes,
-// Telegram integers, etc.) — never use Number() to avoid precision loss.
-const recalledIdsPerMessage = new Map<string, number[]>();
-const RECALL_MAP_TTL = 60 * 60_000;
-setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
+/** #1515: code-owned, deterministic user-visible suffix prefix for boot
+ *  questions. Never model-authored; question text itself is validated by the
+ *  server before persistence. */
+export const DREAMY_QUESTION_SUFFIX_PREFIX = "Dreamy needs your help with one memory: ";
 
-/** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
-export function getRecalledIdsForMessage(platformMsgId: string): number[] | undefined {
-  return recalledIdsPerMessage.get(platformMsgId);
+/**
+ * #1515: owner-scoped `pending -> asked` settlement after a durable assistant
+ * record. Never throws through the message pipeline: a failure logs one
+ * bounded diagnostic and leaves the server row pending — the server CAS makes
+ * a later retry safe and preserves the first delivery key.
+ */
+export async function settleDreamQuestion(
+  deps: PipelineDeps,
+  question: { id: string },
+  userId: string,
+  deliveryKey: string,
+): Promise<void> {
+  const settle = deps.settleDreamQuestion;
+  if (!settle) return;
+  try {
+    await settle({ id: question.id, userId, deliveryKey });
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err
+      ? String((err as { code: unknown }).code)
+      : "unknown";
+    logWarn(TAG, `dream question settlement failed (id=${question.id} code=${code}) — row stays pending`);
+  }
 }
 
-const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
-  "have","has","had","do","does","did","will","would","could","should","can",
-  "may","might","shall","it","its","this","that","what","how","when","where",
-  "who","which","why","about","for","with","from","into","just","also","very",
-  "not","but","and","or","if","so","too","let","lets","dont","you","we",
-  "my","your","our","me","us","them","they","he","she"]);
-
-function extractKeywords(text: string): string[] {
-  return text.toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter(w => w.length >= 3 && !STOPWORDS.has(w))
-    .slice(0, 3);
-}
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 
 /** Shared session reset: reset transport, clear buffer, mark pendingStart. */
@@ -161,8 +178,13 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   /** Admit a manual sleep run directly (/sleep now | /sleep resume). #1321. */
   startSleep?: (opts: { fresh: boolean; resume: boolean }) => import("../capabilities/sleep/index.js").SleepStartResult;
   loadedCapabilities?: string[];
-  selfHealerTask?: { enabled: boolean } | null;
+  selfHealerTask?: import("../types/index.js").HeartbeatTask | null;
   hailMary?: (ResolvedHailMary & { apiKey?: string }) | null;
+  /**
+   * #1468: boot-owned emergency execution service. First in the middleware
+   * list; the service itself never touches Spin, memory, or this transport.
+   */
+  emergencyExecution?: import("./emergency-execution-service.js").EmergencyExecutionService | null;
   /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
   rebuildTransport?: () => Promise<void>;
   /** Boot-time phase health (#331). */
@@ -171,6 +193,19 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   registry?: { getStates(): Record<string, import("./service-registry.js").ServiceState> };
   /** bridge.lock path for heartbeat liveness check. */
   bridgeLockPath?: string;
+  /** #1515: optional owner-scoped asked-CAS settlement after a durable
+   *  assistant record for a boot-greeting question. Must never throw through
+   *  the pipeline; failure leaves the server row pending. */
+  settleDreamQuestion?: (input: { id: string; userId: string; deliveryKey: string }) => Promise<void>;
+}
+
+/**
+ * #1724: terminal delivery receipt for trusted internal submissions.
+ * `settle` is invoked exactly once per turn with the final outcome; later
+ * calls are ignored. Ordinary external callers pass no receipt.
+ */
+export interface TurnReceipt {
+  settle: (outcome: MainDeliveryResult) => void;
 }
 
 /**
@@ -182,11 +217,40 @@ export async function handleInboundMessage(
   msg: InboundMessage,
   adapter: PlatformAdapter,
   deps: PipelineDeps,
+  receipt?: TurnReceipt,
 ): Promise<void> {
-  // Run early middleware (voice → select → commands → paused → busy guard)
+  // #1724: outcome tracking for receipt-bearing internal submissions. Every
+  // settle call no-ops without a receipt, so ordinary external-message
+  // behavior is unchanged. Classification contract:
+  //   - "sent"      only after every response chunk was externally delivered
+  //                 and the turn is not reaction-only;
+  //   - "not_sent"  on rejected admission (busy/paused/handled), blocked
+  //                 hooks/transport, empty/no-reply/reaction-only turns, or a
+  //                 failure before any chunk was sent;
+  //   - "unknown"   on an adapter failure after at least one chunk was sent.
+  let settled = false;
+  let sentAnyChunk = false;
+  const settle = (outcome: MainDeliveryResult): void => {
+    if (!receipt || settled) return;
+    settled = true;
+    receipt.settle(outcome);
+  };
+  // Run early middleware (emergency → voice → select → coding-route →
+  // commands → paused → busy guard)
+  // #1635: codingRouteMiddleware sits between session selection and commands so
+  // coding-owned controls are claimed before the generic handlers, busy guards,
+  // and BeforeMessage see them.
+  // #1468: emergencyRouteMiddleware is FIRST — it claims emergency activation/
+  // restore/interrupt controls and active-owner turns before voice, session
+  // selection, coding routing, commands, guards, and BeforeMessage.
   const ctx = createMessageContext(msg, adapter, deps);
-  await runPipeline(ctx, [voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
-  if (ctx.handled) return;
+  await runPipeline(ctx, [emergencyRouteMiddleware, voiceMiddleware, sessionSelectionMiddleware, codingRouteMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
+  if (ctx.handled) {
+    // #1724: rejected admission (paused guard, no-queue busy rejection,
+    // emergency claim, command) — definitely nothing was delivered.
+    settle("not_sent");
+    return;
+  }
 
   // --- BeforeMessage hook ---
   if (hasHooks("BeforeMessage")) {
@@ -197,6 +261,7 @@ export async function handleInboundMessage(
     });
     if (result?.decision === "block") {
       logInfo(TAG, `BeforeMessage hook blocked: ${result.reason ?? "no reason"}`);
+      settle("not_sent");
       return;
     }
   }
@@ -248,12 +313,14 @@ export async function handleInboundMessage(
           if (!effectiveSession.transport) await spin.ensureSessionTransport(effectiveSession);
         } catch (fallbackErr) {
           logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
-          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(() => {});
+          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "send fallback-transport error notice", err));
+          settle("not_sent");
           return;
         }
       } else {
         logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
-        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
+        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(err2 => logAndSwallow(TAG, "send transport error notice", err2));
+        settle("not_sent");
         return;
       }
     }
@@ -261,8 +328,9 @@ export async function handleInboundMessage(
   ctx.transport = effectiveSession.transport!;
   ctx.delivery = effectiveSession.delivery;
 
-  // Mark seen so isSessionStart doesn't inject full soul bundle
-  effectiveSession.seen = true;
+  // #1776: do not mark seen here — prompt-builder owns the session-start
+  // decision and marks seen after the hydration attempt. Marking seen first
+  // suppresses hydration on every first turn.
   effectiveSession.lastActiveAt = Date.now();
 
   // --- Core transport/response handling ---
@@ -288,6 +356,8 @@ export async function handleInboundMessage(
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
   let assistantDurablyRecorded = false;
+  let evidenceExecutionId: string | undefined;
+  const deliveryFallbackId = randomUUID();
   /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
   let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
@@ -299,21 +369,59 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    // #1529: buildPrompt classifies the turn's durable-context intent (durable,
-    // not-required, or required-unavailable). We forward it to spin as part of
-    // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
-    // transport, which fails closed when durable context is required but
-    // unavailable.
-    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
+    // #1940: the Pi route is identified positively by the serving transport;
+    // a missing live Pi session makes this turn a session start.
+    const routeTransport = (effectiveSession.transport ?? transport) as IKiroTransport & {
+      piAgentSessionRoute?: boolean;
+      hasLiveSession?: (sessionKey: string) => boolean;
+    };
+    const piRoute = routeTransport.piAgentSessionRoute === true;
+    const { prompt: builtPrompt, imageContent, recalledHits, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
+      piRoute,
+      ...(piRoute ? { piSessionLive: routeTransport.hasLiveSession?.(activeSessionId) ?? false } : {}),
     }, registry, effectiveSession);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
+      settle("not_sent");
       return;
     }
 
+    // Capture support at each text segment's boundary. Later reads must never
+    // ground text already delivered; successful chunks survive later failures.
+    const answerIdentity = (): string => evidenceExecutionId ?? pSession.activeExecutionId ?? deliveryFallbackId;
+    const supportFor = (answerText: string, declared: readonly string[]): string[] => {
+      if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return [];
+      // detectCitations matches by content and returns positional labels;
+      // map them back to the owner ref keys so no numeric memory identity
+      // is fabricated or persisted.
+      const positional = (recalledHits ?? []).map((hit, index) => ({ id: index + 1, contentEn: hit.contentEn }));
+      let heuristic: string[] = [];
+      try {
+        heuristic = (abmind()?.detectCitations?.(answerText, positional) ?? [])
+          .map((n) => (recalledHits ?? [])[n - 1]?.ref)
+          .filter((ref): ref is string => typeof ref === "string");
+      }
+      catch (err) { logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`); }
+      return resolveAnswerSupport({
+        declared, heuristic, autoInjected: recalledHits?.map((hit) => hit.ref) ?? [],
+        toolDelivered: peekToolEvidence(answerIdentity()),
+      });
+    };
+    const deliverAnswer = async (send: () => Promise<number | string | void>, support: readonly string[]): Promise<number | string | void> => {
+      const executionId = answerIdentity();
+      const finishSend = beginAnswerSend(msg.platform, channelId);
+      try {
+        const sentId = await send();
+        if (sentId !== undefined && msg.platform !== "tui") {
+          publishAnswerRecord({ platform: msg.platform, channelId, principal: userId,
+            sessionId: activeSessionId, executionId, support, messageIds: [String(sentId)] });
+        }
+        return sentId;
+      } finally { finishSend(); }
+    };
     let prompt = builtPrompt;
     if (bootstrapPrefix) {
       prompt = `${bootstrapPrefix}\n\n${prompt}`;
@@ -338,11 +446,18 @@ export async function handleInboundMessage(
       prompt = `${lines.join("\n")}\n\n${prompt}`;
     }
 
-    // --- Auto-notify: inject buffered system events (#844) ---
-    const { drainSystemEvents } = await import("./system-event-buffer.js");
-    const events = drainSystemEvents();
-    if (events.length > 0) {
-      prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
+    // --- Auto-notify: inject buffered system events (#844, #1652) ---
+    // Agent notices are for Main only. Keep the shared buffer intact when a
+    // guest, specialist, or skill session receives a turn so a later Main
+    // turn can still surface the fault to the master.
+    const isMainMasterTurn = sessionType(effectiveSession) === "A"
+      && registry.byUserId.get(userId)?.role === "master";
+    if (isMainMasterTurn) {
+      const { drainSystemEvents } = await import("./system-event-buffer.js");
+      const events = drainSystemEvents();
+      if (events.length > 0) {
+        prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
+      }
     }
 
     // --- Send to transport ---
@@ -437,12 +552,15 @@ export async function handleInboundMessage(
       incremental = new IncrementalBlockDeliveryController({
         sendBlock: async (block) => {
           await retrySend(() => adapter.sendMessage(channelId, block, { threadId: msg.threadId }));
+          // Thinking/progress blocks are deliberately not counted as
+          // announcement content; only semantic segments and the terminal
+          // response make a partial announcement ambiguous.
         },
         sanitize: sanitizeOutbound,
         chunkBound: (text: string) => adapter.chunkResponse(text),
       });
     }
-    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform })) {
+    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform, showThinking: effectiveSession.showThinking })) {
       transport.onOutputDelta = (event) => { incremental?.accept(event); };
     } else {
       transport.onOutputDelta = undefined;
@@ -461,18 +579,22 @@ export async function handleInboundMessage(
         await incremental?.flushBeforeSemantics();
         const clean = sanitizeOutbound(text);
         if (!clean) return;
+        const support = supportFor(clean, extractSupportIds(text));
         if (streamMsgId && adapter.editMessage) {
           try {
-            await adapter.editMessage(channelId, streamMsgId, clean);
+            const editedId = streamMsgId;
+            await deliverAnswer(async () => { await adapter.editMessage!(channelId, editedId, clean); return editedId; }, support);
             streamMsgId = undefined;
             incremental?.segmentDelivered(clean);
+            sentAnyChunk = true;
             return;
           } catch { /* fall through to a fresh send */ }
         }
         try {
-          await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId })), support);
           streamMsgId = undefined;
           incremental?.segmentDelivered(clean);
+          sentAnyChunk = true;
         } catch (err) {
           // #1619: interim send failure is content-free and never rejects the turn.
           logWarn(TAG, `Pre-tool segment delivery failed (content-free): ${err instanceof Error ? err.message : String(err)}`);
@@ -489,18 +611,20 @@ export async function handleInboundMessage(
       prompt,
       imageContent,
       userId,
-      durableContextIntent,
       directContextTurn,
       settlementOwner: "spin",
       await: true,
-    }).then(r => r.result ?? "");
+    }).then(r => {
+      evidenceExecutionId = r.executionId;
+      return r.result;
+    });
     // #1292: the model call is started early to overlap with the setReaction/sendTyping
     // round-trips below, but is not awaited until later in this try block. Without this
     // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
     // unhandled rejection during those awaits and crashes the bridge. Marking the promise
     // handled here: the real rejection still propagates when `await responsePromise` runs
     // and is caught by this try/catch, which renders the graceful error to the user.
-    void responsePromise.catch(() => {});
+    void responsePromise.catch(() => { /* rejection still propagates to the `await` below and is handled by the enclosing try/catch; this pre-attach only prevents unhandled-rejection surfacing during the overlap */ });
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
@@ -543,19 +667,25 @@ export async function handleInboundMessage(
     // Successful segments are removed only from a matching prefix; failed
     // segments are retained and merged in. Thinking never participates.
     let reconciledResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    // Reconciliation sanitizes text, including support markers. Capture the
+    // declaration first so tool-only answers retain their references.
+    const terminalDeclaredSupportIds = extractSupportIds(reconciledResponse);
     if (incremental) {
       const reconciled = incremental.reconcileTerminal(reconciledResponse);
       await incremental.end();
       reconciledResponse = reconciled;
     }
     const rawResponse = reconciledResponse;
-    const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
+    const { text: cleanedText, reactionEmoji, noReply } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
+    // #1724: a reaction-only turn is a chat control signal, never a
+    // deliverable announcement payload — it must not settle as "sent".
+    const reactionOnly = !cleanedText && Boolean(reactionEmoji);
 
     // #1397: Capture stable execution ID before async cleanup may clear it.
     const deliveryCorrelation: DeliveryCorrelation | undefined =
-      pSession.activeExecutionId
-        ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
+      evidenceExecutionId
+        ? { sessionId: activeSessionId, executionId: evidenceExecutionId, kind: "final_assistant" }
         : undefined;
 
     // #869: strip <think>/<thinking> blocks (Pi transport handles thinking natively via events)
@@ -570,18 +700,54 @@ export async function handleInboundMessage(
       }
     }
 
+    // #1515: deterministic boot-greeting question composition. Only the
+    // automatic boot message (trusted internal metadata set by Spin) carries
+    // a question. The provider never sees it — it is appended here, once,
+    // after response normalization/redaction and before chunking, send, TTS,
+    // or assistant-memory write. Empty, reaction-only, no-reply, think-only,
+    // or failed-generation outcomes bypass composition AND settlement.
+    const bootQuestion = msg.text === BOOT_GREETING_TEXT && msg.internal?.kind === "boot_greeting" && msg.internal[BOOT_GREETING_TOKEN] === true
+      ? msg.internal.dreamQuestion
+      : undefined;
+    const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && userResponse.trim().length > 0);
+    if (bootQuestionDelivered) {
+      userResponse = `${userResponse}\n\n${DREAMY_QUESTION_SUFFIX_PREFIX}${bootQuestion!.text}`;
+    }
+
+    const terminalSupport = supportFor(userResponse, terminalDeclaredSupportIds);
+
     // --- #936: Simple delivery (non-master sessions) ---
+    // #1651 v2: a reaction-only response IS a deliverable chat reply in simple
+    // delivery too — apply it before the no-reply/empty handling, matching the
+    // main branch below. The reaction payload comes from the parsed emoji,
+    // never the raw [REACT:…] marker.
     if (ctx.delivery === "simple") {
-      if (!userResponse && noReply) return;
+      if (reactionOnly && isTrustedScheduledAnnouncement(msg.internal)) {
+        settle(sentAnyChunk ? "unknown" : "not_sent");
+        return;
+      }
+      if (!userResponse && reactionEmoji) {
+        userResponse = reactionEmoji;
+      }
+      if (!userResponse && noReply) {
+        settle("not_sent");
+        return;
+      }
       if (userResponse) {
         const chunks = adapter.chunkResponse(userResponse);
         for (const chunk of chunks) {
           const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
-          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+          if (clean) {
+            await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation })), terminalSupport);
+            sentAnyChunk = true;
+          }
         }
       }
-      // Record assistant response to memory (skipped for K — skill-isolated)
-      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+      // Record assistant response to memory (skipped for K — skill-isolated).
+      // #1515: generic synthetic greetings stay excluded; a question-bearing
+      // boot greeting is recorded with a storage-only marker so the user's
+      // reply appears beside the question in the next sleep transcript.
+      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
         const timestamp = Date.now();
         const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
         const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -589,17 +755,26 @@ export async function handleInboundMessage(
           phase: "after_delivery",
           family: "assistant",
           operationKey,
-          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
+          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
         });
         assistantDurablyRecorded = hasDurableMessageId(writeResult);
+        // #1940 R1: a failed archive write is never reported as durable;
+        // the gap is accepted — no outbox or retry subsystem.
+        // #1515: settle the asked CAS only after a durable assistant record;
+        // the operation key is the delivery key (server CAS keeps the first).
+        if (assistantDurablyRecorded && bootQuestionDelivered) {
+          await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);
+        }
       }
-      // #1406: automatic durable compaction also applies to simple delivery.
-      if (assistantDurablyRecorded) {
-        scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
-      }
+      // #1940: Pi owns threshold and overflow compaction; abmind
+      // conversation compaction is retired (R8). No automatic scheduling.
+      // #1724: terminal receipt — after all chunks were externally delivered
+      // (and the assistant record attempt completed), never for a
+      // reaction-only turn.
+      settle(reactionOnly ? "unknown" : (sentAnyChunk ? "sent" : "not_sent"));
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
-          const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+          const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : (cleanAnswer || response).replace(SUPPORT_STRIP_RE, ""), ttsConfig);
           if (audio) await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
         } catch (err) { logAndSwallow(TAG, "TTS", err); }
       }
@@ -612,23 +787,38 @@ export async function handleInboundMessage(
     }
 
     // --- Empty response ---
+    if (reactionOnly && isTrustedScheduledAnnouncement(msg.internal)) {
+      settle(sentAnyChunk ? "unknown" : "not_sent");
+      return;
+    }
     if (!userResponse && reactionEmoji) {
       userResponse = reactionEmoji; // emoji IS the response — deliver normally
     }
     if (!userResponse) {
       if (noReply) {
         logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
+        settle(sentAnyChunk ? "unknown" : "not_sent");
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
         logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
+        settle(sentAnyChunk ? "unknown" : "not_sent");
+        return;
       } else {
         logWarn(TAG, "Empty response from transport");
+        if (isTrustedScheduledAnnouncement(msg.internal)) {
+          // A scheduled announcement must never surface the generic external
+          // error/fallback as its result. Let Kanban retry the durable task
+          // handoff instead.
+          settle(sentAnyChunk ? "unknown" : "not_sent");
+          return;
+        }
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
         await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
+        settle(sentAnyChunk ? "unknown" : "not_sent");
+        return;
       }
-      return;
     }
 
     // --- Clear 👀 reaction ---
@@ -645,7 +835,8 @@ export async function handleInboundMessage(
       const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
       if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+        lastSentMsgId = (await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation })), terminalSupport)) ?? undefined;
+        sentAnyChunk = true;
       }
     }
 
@@ -659,17 +850,11 @@ export async function handleInboundMessage(
       }
     }
 
-    // --- Update priming buffer ---
-    if (getEnv().activeMemory) {
-      const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
-      const regexKw = extractKeywords(text);
-      const existing = pSession.primingTerms ?? [];
-      pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
-    }
-
-    // --- Record to memory (skipped for K — skill-isolated; guests and greeting injects) ---
+    // --- Record to memory (skipped for K — skill-isolated; guests and generic
+    // greeting injects). #1515: a question-bearing boot greeting is recorded
+    // with a storage-only marker; settlement follows only a durable ID. ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && !text.startsWith("[SESSION START]")) {
+    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
       const timestamp = Date.now();
       const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
       const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -678,28 +863,33 @@ export async function handleInboundMessage(
         family: "assistant",
         operationKey,
         run: () => deps.memoryRuntime!.recordMessage({
-          role: "assistant", content: userResponse,
+          role: "assistant", content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse,
           timestamp, userId, sessionId: activeSessionId,
           platformMessageId: lastSentMsgId != null ? String(lastSentMsgId) : undefined,
         }, operationKey),
       });
       assistantDurablyRecorded = hasDurableMessageId(writeResult);
+      // #1940 R1: a failed archive write is never reported as durable;
+      // the gap is accepted — no outbox or retry subsystem.
+      // #1515: settle the asked CAS only after a durable assistant record.
+      if (assistantDurablyRecorded && bootQuestionDelivered) {
+        await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);
+      }
     }
 
-    // --- #1406: automatic durable compaction, scheduled once after the
-    // assistant row is durably recorded. Fire-and-forget: it must never delay
-    // or revoke the already delivered response. Deduplication happens in the
-    // control service and the daemon's generation CAS. No timer or heartbeat
-    // entry is added. ---
-    if (assistantDurablyRecorded) {
-      scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
-    }
+    // #1940: Pi owns threshold and overflow compaction; abmind
+    // conversation compaction is retired (R8). No automatic scheduling.
+
+    // #1724: terminal receipt — after all chunks were externally delivered
+    // (and the assistant record attempt completed), never for a
+    // reaction-only turn.
+    settle(reactionOnly ? "unknown" : (sentAnyChunk ? "sent" : "not_sent"));
 
     // --- TTS for voice notes ---
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+        const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : (cleanAnswer || response).replace(SUPPORT_STRIP_RE, ""), ttsConfig);
         if (audio) {
           await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
           logInfo(TAG, `🔊 Voice reply sent (${audio.length} bytes)`);
@@ -716,40 +906,12 @@ export async function handleInboundMessage(
 
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
-    updateBridgeLockField("lastPromptAt", Date.now());
+    updateOwnedBridgeLockField("lastPromptAt", Date.now());
 
     // #938: Update session metrics
     effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
     effectiveSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
     effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
-
-    // --- #824: Citation detection — did the agent use the recalled memories? ---
-    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && deps.memoryRuntime?.state === "ready") {
-      try {
-        const mod = abmind();
-        if (mod) {
-          const { detectCitations } = mod;
-          const citedIds = detectCitations(userResponse, recalledHits);
-          for (const memoryId of citedIds) {
-            const messageIdForFeedback = lastSentMsgId != null ? String(lastSentMsgId) : deliveryCorrelation?.executionId ?? `${activeSessionId}-${Date.now()}`;
-            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite");
-            await attemptMemoryMutation({
-              phase: "after_delivery",
-              family: "feedback",
-              operationKey,
-              run: () => deps.memoryRuntime!.recordFeedback({ userId, memoryId, feedbackType: "cite" }, operationKey),
-            });
-          }
-          logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
-          // Track recalledIds for emoji reaction feedback (1h TTL)
-          if (lastSentMsgId != null) {
-            recalledIdsPerMessage.set(String(lastSentMsgId), recalledHits.map(h => h.id));
-          }
-        }
-      } catch (err) {
-        logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
 
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {
@@ -761,6 +923,9 @@ export async function handleInboundMessage(
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } catch (err) {
+    // #1724: a failure after some content was externally delivered is
+    // ambiguous (partial send) — anything earlier is definitely not_sent.
+    settle(sentAnyChunk ? "unknown" : "not_sent");
     // #287: model not found — surface actionable message to user
     if (err instanceof ModelNotFoundError) {
       logWarn(TAG, `Model not found for ${activeSessionId}: ${err.message}`);
@@ -782,41 +947,28 @@ export async function handleInboundMessage(
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
 
-    // Auto-reset on context window overflow (ValidationException or actual context errors)
+    // #1745: context overflow is decided at the transport (typed code), not here.
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
     // #1294 + #1298: Synthetic internal prompts are system-initiated, not user requests.
     // If they fail (e.g. models exhausted), don't surface an ❌ error reply — the user sees
     // errors on their own messages, and deliver/announce notifications are queryable via /kanban.
-    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]"];
+    // #1724: scheduled-announcement events join the same convention; their
+    // delivery failure is owned by the Kanban retry/unknown state machine.
+    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]", "[SCHEDULED TASK COMPLETED]"];
     const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
-    const isContextOverflow = errStr.includes("ValidationException")
-      || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
 
-    if (isContextOverflow) {
-      logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
-      if (notifyUser) await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else if (isTimeout) {
+    // #1940: Pi owns overflow recovery (compact and retry); there is no
+    // pipeline overflow reset ahead of it.
+    if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else if (err instanceof DurableContextUnavailableError) {
-      // #1529: required durable context is unavailable — fail closed with a
-      // bounded, stable response. No session reset, no candidate-health impact.
-      logWarn(TAG, `Durable context unavailable for ${activeSessionId} (${err.reason}) — failing closed`);
-      if (notifyUser) await adapter.sendMessage(channelId, "Memory context is temporarily unavailable. Please retry.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else {
-      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
-      const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
-        : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
-        : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
-        : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
-        : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
-        : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
-        : `Error: ${errStr.slice(0, 80)}`;
+    } else {      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
+      const reason = describePipelineError(err);
       if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
+    takeToolEvidence(evidenceExecutionId);
     clearInterval(typingInterval);
     clearTimeout(typingTtlTimer);
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);
@@ -830,31 +982,35 @@ export async function handleInboundMessage(
 }
 
 /**
+ * #1724: receipt-bearing submission for TRUSTED internal events (scheduled
+ * announcements composed by MainConversationIngress). Unlike the fire-and-
+ * forget adapter inject path, the returned promise settles only when the
+ * turn reaches a terminal delivery outcome — queue acceptance is NOT
+ * delivery. External platform input can never reach this API with trusted
+ * metadata, because adapters never construct `msg.internal`.
+ */
+export async function submitTrustedInternalMessage(
+  msg: InboundMessage,
+  adapter: PlatformAdapter,
+  deps: PipelineDeps,
+): Promise<MainDeliveryResult> {
+  if (!isTrustedScheduledAnnouncement(msg.internal)) {
+    logWarn(TAG, "Rejected internal submission without the scheduler trust token");
+    return "not_sent";
+  }
+  return new Promise<MainDeliveryResult>((resolve) => {
+    const receipt: TurnReceipt = { settle: (outcome) => resolve(outcome) };
+    void handleInboundMessage(msg, adapter, deps, receipt).catch((err) => {
+      logWarn(TAG, `Internal submission failed before the pipeline: ${err instanceof Error ? err.message : String(err)}`);
+      resolve("not_sent");
+    });
+  });
+}
+
+/**
  * #1406: schedule one automatic durable compaction after the assistant row is
  * durably recorded. Fire-and-forget — never delays or revokes the delivered
  * response; failures are logged bounded and content-free. Deduplication lives
  * in the control service and the daemon's generation CAS.
  */
-function scheduleAutomaticCompaction(
-  deps: PipelineDeps,
-  userId: string,
-  sessionId: string,
-  durableContextIntent: { mode: string; beforeMessageId?: number },
-): void {
-  if (deps.memoryRuntime?.state !== "ready") return;
-  if (durableContextIntent?.mode !== "durable") return;
-  if (typeof durableContextIntent.beforeMessageId !== "number") return;
-  const sessionControl = getSessionControlService();
-  if (!sessionControl) return;
-  sessionControl.execute(
-    {
-      kind: "durable_conversation",
-      principalId: userId,
-      sessionId,
-      beforeMessageId: durableContextIntent.beforeMessageId,
-    },
-    { kind: "compact", reason: "automatic" },
-  ).catch(err => logAndSwallow(TAG, "automatic compaction", err));
-}
-
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */

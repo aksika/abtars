@@ -21,7 +21,8 @@ import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import { formatTaskLabel } from "../components/tasks/task-types.js";
-import { formatTaskFailureDetail, formatTaskFailureRootCause } from "../components/tasks/task-failure.js";
+import { formatTaskFailureDetail } from "../components/tasks/task-failure.js";
+import type { ScheduledFailureEvent } from "../components/sha/sha-types.js";
 import type { TaskFailureDiagnosticV1 } from "../components/tasks/task-failure.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
@@ -30,6 +31,7 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 
 import { getEnv } from "../components/env-schema.js";
 import { unavailable } from "../capabilities/sleep/index.js";
+import { requestReconcileForProject } from "../components/reconciler.js";
 
 /** #1297: credit exhaustion cannot be self-healed — SHA must stop before any
  *  state read/write. Identified by exact structured fields, never message text. */
@@ -38,7 +40,8 @@ export function skipSelfHealForDiagnostic(diagnostic: TaskFailureDiagnosticV1): 
 }
 
 /** #1588: operator failure notification — category/code + lane breakdown. */
-export function buildFailureNotification(entryId: string, diagnostic: TaskFailureDiagnosticV1): string {
+export function buildFailureNotification(event: ScheduledFailureEvent): string {
+  const { entryId, diagnostic } = event;
   // #1297: credit exhaustion is actionable, not self-healable — the operator
   // notification carries the remediation ask.
   const base = `[warn] ${formatTaskLabel(entryId)} failed - ${diagnostic.category}/${diagnostic.code}\n${formatTaskFailureDetail(diagnostic)}`;
@@ -48,31 +51,9 @@ export function buildFailureNotification(entryId: string, diagnostic: TaskFailur
   return base;
 }
 
-/** #1588: self-healer prompt — structured root cause, bounded remediation, FORBIDDEN block. */
-export function buildShaFailurePrompt(entryId: string, diagnostic: TaskFailureDiagnosticV1, pending: string): string {
-  return `[System] You ARE the self-healing agent. A scheduled task failed.\nTask: "${entryId}"   Category: ${diagnostic.category}/${diagnostic.code}${pending}\n\n${formatTaskFailureRootCause(diagnostic)}\n\nPermitted remediation: task_manage action=adjust (bounded) or action=escalate.\n\nDiagnose the root cause. If an autonomous adjust within the permitted fields fixes it, apply it. If the fix requires human action (manual browser login, external service down, fresh auth cookie), escalate with a concrete ask: "Requires human intervention: <reason>". Do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
-}
-
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
   if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return "skipped"; }
-
-  // #1527: a memory-enabled Pi route without the negotiated durable-context
-  // capability is context-blind by construction. Refuse to serve rather than
-  // let durable requests degrade to suffix-only answers. Throwing is required:
-  // bootGraph marks any non-throwing phase "ok" and replaces phaseHealth with
-  // its report, so a "skipped" return would let downstream nodes boot against
-  // a null pipelineDeps and hide the refusal from the degraded-boot report.
-  if (ctx.memoryRuntime.state === "ready" && !ctx.memoryRuntime.supports("durableContext")) {
-    const route = typeof transport.getRuntimeStatus === "function" ? transport.getRuntimeStatus().route : undefined;
-    if (route === "pi-ai") {
-      const { logError } = await import("../components/logger.js");
-      logError("boot", "memory-enabled Pi route negotiated no durable-context capability — refusing to boot context-blind");
-      try { await transport.destroy(); } catch (err) { logWarn("boot", `transport destroy during refusal failed: ${err instanceof Error ? err.message : String(err)}`); }
-      ctx.transport = null;
-      throw new Error("memory-enabled Pi route without durable context capability");
-    }
-  }
 
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
@@ -83,67 +64,41 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const wakeScheduler = new LifecycleWakeScheduler();
   const { ScheduledRunCoordinator, wireCardProgressProjection } = await import("../components/tasks/scheduled-run-coordinator.js");
 
-  let shaState: "idle" | "running" | "cooldown" = "idle";
-  const shaPending: string[] = [];
-  const shaDailyCounts = new Map<string, { date: string; count: number }>();
-  // #1588: the exactly-once failure cascade. Fires once per settled
-  // failed/timed_out run for every task kind, delivering the structured
-  // diagnostic to the operator and, when enabled, to the self-healer.
-  const onFailure = (entryId: string, diagnostic: TaskFailureDiagnosticV1): void => {
-    const label = formatTaskLabel(entryId);
+  // #1688: the SHA coordinator owns admission, classification, and the
+  // durable incident lifecycle. This phase wires it and the operator notice
+  // sink; it no longer owns SHA state or dispatches S sessions.
+  const { ShaIncidentCoordinator } = await import("../components/sha/sha-incident-coordinator.js");
+  const { shaAdmissionNotice } = await import("../components/sha/sha-admission-notice.js");
+  // R1: off mode must not even initialize the SHA store/schema. Scheduled
+  // history and its ordinary failure notice remain active, but SHA admission
+  // is absent until the next boot with a non-off mode.
+  const shaCoordinator = getEnv().selfhealMode === "off" ? null : new ShaIncidentCoordinator({
+    modeProvider: () => getEnv().selfhealMode,
+    noticeSink: {
+      send: (notice) => {
+        if (ctx.telegramAdapter) {
+          ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `[warn] ${notice.message}`);
+        }
+      },
+    },
+  });
+  ctx.shaCoordinator = shaCoordinator;
+  ctx._shaStageSubscriberDisposer = shaCoordinator?.subscribe();
+
+  // #1588/#1688: the exactly-once failure cascade. Fires once per settled
+  // failed/timed_out run, delivering the structured diagnostic to the
+  // operator; SHA admission runs through the coordinator and emits exactly
+  // one bounded outcome line after the durable decision.
+  const onFailure = (event: ScheduledFailureEvent): void => {
     if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(entryId, diagnostic));
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(event));
     }
-    // #1297: credit exhaustion cannot be self-healed by any code change. The
-    // one actionable operator notification above is sent, then this guard
-    // returns BEFORE any SHA state read/write — daily-attempt accounting,
-    // cooldown/pending handling, the self-healer notification, and the S
-    // session spin. A skipped credit failure must not consume SHA quota.
-    if (skipSelfHealForDiagnostic(diagnostic)) {
-      logInfo("main", `Skip self-heal for "${entryId}" — credits_exhausted requires human intervention`);
-      return;
+    if (!shaCoordinator) return;
+    const outcome = shaCoordinator.admit(event);
+    const notice = shaAdmissionNotice(event, outcome);
+    if (notice && ctx.telegramAdapter) {
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), notice);
     }
-    // Three-state SHA guard (#719). The operator notification above is still
-    // emitted for every settled failure; this guard only serializes SHA work.
-    if (shaState === "running") return;
-    if (!getEnv().selfhealEnabled) return;
-    // Per-day 2-attempt throttle, moved from the coordinator's tryInjectFailure.
-    const today = new Date().toISOString().slice(0, 10);
-    const fc = shaDailyCounts.get(entryId);
-    if (fc && fc.date === today && fc.count >= 2) {
-      logInfo("main", `Skip self-heal for "${entryId}" — already 2 attempts today`);
-      return;
-    }
-    shaDailyCounts.set(entryId, { date: today, count: (fc?.date === today ? fc.count : 0) + 1 });
-    if (shaState === "cooldown") {
-      shaPending.push(entryId);
-      return;
-    }
-    // SHA idle → fire
-    shaState = "running";
-    const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
-    shaPending.length = 0;
-    if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `[warn] Calling self-healer, reason: "${label}" failed`);
-    }
-    const msg = buildShaFailurePrompt(entryId, diagnostic, pending);
-    void (async () => {
-      try {
-        // #1271: SHA goes through the unified spin() chokepoint (S profile =
-        // coding agent, call-terminate — session is created and deleted).
-        await ctx.sessionManager.spin({
-          type: "S",
-          prompt: msg,
-          settlementOwner: "spin",
-          await: true,
-        });
-      } catch (err) {
-        logWarn("main", `SHA session failed: ${err}`);
-      } finally {
-        shaState = "cooldown";
-        setTimeout(() => { shaState = "idle"; }, 60_000);
-      }
-    })();
   };
   const onTaskPaused = (chatId: number, _title: string, _reason: string, notice: import("../components/tasks/task-run-settler.js").PauseNotice): void => {
     if (!ctx.telegramAdapter) return;
@@ -186,18 +141,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   const cronQueue = new CronQueue(coordinator);
   ctx.cronQueue = cronQueue;
+  ctx.scheduledRunCoordinator = coordinator;
 
-  // #1539: wire the wake scheduler into the reconciler (executor-lease source
-  // registers on startReconciler) and register the remaining due sources.
-  const { setWakeScheduler, setFailureCascade } = await import("../components/reconciler.js");
-  setWakeScheduler(wakeScheduler);
-  // #1588: the reconciler's last-resort scheduled settlements ride the same
-  // failure cascade as every other failed run.
-  setFailureCascade(coordinator.failureCallback);
+  // #1554: the wake scheduler and the scheduled-run projection ports are
+  // bridge-generation owned and stored on BootCtx. The Reconciler composes
+  // them in phase-reconciler — no setter wiring here.
+  ctx.lifecycleWakeScheduler = wakeScheduler;
+  ctx.reconcilerInputs = {
+    projectRunProgress: (cardId: number) => coordinator.projectCardProgress(cardId),
+    failureCascade: coordinator.failureCallback,
+  };
 
   const { createRunDeadlineSource, createTaskAdmissionSource, createKanbanRetrySource } = await import("../components/tasks/due-sources.js");
   wakeScheduler.register(createKanbanRetrySource((cardId: number) => {
-    const { requestReconcileForProject } = require("../components/reconciler.js") as typeof import("../components/reconciler.js");
     requestReconcileForProject(cardId);
   }, () => {
     const { spin } = require("../components/spin.js") as typeof import("../components/spin.js");
@@ -219,8 +175,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { setKanbanDueChangedHook } = await import("../components/tasks/kanban-board.js");
   setKanbanDueChangedHook(() => wakeScheduler.sourceChanged("kanban-retry"));
   wireCardProgressProjection(coordinator);
-  const { setRunProgressBridge } = await import("../components/reconciler.js");
-  setRunProgressBridge((cardId: number) => coordinator.projectCardProgress(cardId));
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
@@ -263,6 +217,22 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (masterUser && transport) {
     const masterChatId = masterUser.platforms.telegram ?? masterUser.platforms.discord;
     if (masterChatId) {
+      // #1515: preload at most one pending dream question BEFORE
+      // registerMasterSession() — either registration or the later
+      // setGreetingAdapter() may fire the automatic greeting, so the question
+      // must be installed first. Absent support, unavailable memory, or any
+      // failure produces an ordinary greeting and leaves the row pending.
+      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestionsNextPending")) {
+        try {
+          const pending = await ctx.memoryRuntime.dreamQuestions.nextPending(masterUser.userId);
+          if (pending) {
+            spin.setBootGreetingQuestion({ id: pending.id, text: pending.question });
+            logInfo("boot", `Dream question preloaded for automatic boot greeting (${pending.id})`);
+          }
+        } catch (err) {
+          logWarn("boot", `Dream question preload skipped: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       spin.registerMasterSession({
         userId: masterUser.userId,
         chatId: typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10),
@@ -270,30 +240,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         transport,
       });
     }
-  }
-
-  // #998: Set system prompt AFTER memory state is known
-  if (transport && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-    const { buildSoulBundle } = await import("../components/soul-bundle.js");
-    const masterUserId = registry.users.find(u => u.role === "master")?.userId ?? "master";
-    const sessionContext = ctx.memoryRuntime.state === "ready"
-      ? await ctx.memoryRuntime.assembleSessionContext({ identity: { principalId: masterUserId, executionId: "boot" }, maxChars: 4096 }).catch(() => null)
-      : null;
-    const bundle = buildSoulBundle("A", sessionContext?.soulBundle);
-    if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
-  }
-
-  // #1527: compose the durable context provider once memory state is known.
-  // Transport and memory boot in parallel, so the holder (captured by every
-  // Pi transport at construction) is populated here, after both resolved.
-  const { createDurableContextProvider } = await import("../components/transport/pi-core-context.js");
-  if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("durableContext")) {
-    ctx.durableContextProvider.current = createDurableContextProvider(ctx.memoryRuntime);
-    spin.setContextProvider(ctx.durableContextProvider);
-    ctx.runtime.setContextProvider(ctx.durableContextProvider);
-    logInfo("boot", "Durable context provider composed into Pi transports");
-  } else {
-    logWarn("boot", `Durable context provider not composed (memory=${ctx.memoryRuntime.state}) — durable Pi requests will fail closed`);
   }
 
   // #1552: compose the memory-tool dependency holder (runtime + durable
@@ -344,6 +290,17 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,
+    // #1468: same boot-owned instance the recovery handler uses; the service
+    // itself stays independent of every other dependency in this object.
+    emergencyExecution: ctx.emergencyExecution,
+    // #1515: optional question settlement after durable assistant recording.
+    // Must never throw through the pipeline; failure leaves the row pending
+    // and the server CAS makes a later retry safe.
+    settleDreamQuestion: async ({ id, userId, deliveryKey }) => {
+      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestions")) {
+        await ctx.memoryRuntime.dreamQuestions.markAsked(userId, id, deliveryKey);
+      }
+    },
     rebuildTransport: async () => {
       const { rebuildTransport } = await import("./phase-transport.js");
       await rebuildTransport(ctx);
@@ -379,24 +336,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { initChannelSync } = await import("../components/tasks/kanban-channel.js");
   initChannelSync();
 
-  // #1505/#1539: recover any active runs from a prior process crash BEFORE
-  // the wake scheduler starts, so new due occurrences are never admitted
-  // ahead of recovery.
-  const taskStoreModule = await import("../components/tasks/task-store.js");
-  const entries = taskStoreModule.readEntries();
-  await coordinator.recover(entries, (entry, run) => {
-    const enqueueResult = cronQueue.enqueue(entry, false, run);
-    if (enqueueResult) {
-      logWarn("boot", `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
-      return false;
-    }
-    return true;
-  });
-
-  // #1539: the initial scan is boot recovery — wake every overdue item, then
-  // arm the earliest future due item.
-  await wakeScheduler.start();
-
+  // #1554: scheduled-run recovery and the wake-scheduler start moved to
+  // phase-reconciler AFTER the Reconciler generation exists. Both trigger
+  // admission of scheduled projects, and a project admitted before the
+  // generation would fail its coordinator check. Recovery still completes
+  // before the scheduler starts, exactly as today.
   // Register Tier 3 heartbeat tasks (cron, housekeeping, self-healer, etc.)
   const { registerTier3Tasks } = await import("./heartbeat-tier3.js");
   await registerTier3Tasks(ctx);

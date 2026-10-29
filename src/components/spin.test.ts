@@ -69,6 +69,70 @@ describe("Spin — unified session router (#943)", () => {
     });
   });
 
+  describe("rebindBridgeTransports (#1699)", () => {
+    it("rebinds only bridge-owned sessions and returns the count", async () => {
+      const oldTransport = mockTransport();
+      const newTransport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: oldTransport });
+      const master = spin.getActiveSession("aksika", "telegram");
+
+      const worker = await spin.resolveSession("adrika", "telegram", 222);
+      const workerTransport = worker.transport;
+      expect(worker.transportOwner).toBe("runtime");
+
+      const guest = spin.getActiveSession("visitor", "telegram");
+      expect(guest.transport).toBeUndefined();
+
+      const count = spin.rebindBridgeTransports(newTransport);
+
+      expect(count).toBe(1);
+      expect(master.transport).toBe(newTransport);
+      expect(master.transportOwner).toBe("bridge");
+      expect(worker.transport).toBe(workerTransport);
+      expect(guest.transport).toBeUndefined();
+    });
+
+    it("refreshes pid and leaves lifecycle fields unchanged", () => {
+      const oldTransport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: oldTransport });
+      const master = spin.getActiveSession("aksika", "telegram");
+      master.busy = true;
+      master.queue = [{ kind: "injected" } as never];
+      master.seen = true;
+      master.pendingStart = true;
+
+      const newTransport = { ...mockTransport(), _rawClient: { pid: 4242 } } as unknown as IKiroTransport;
+      spin.rebindBridgeTransports(newTransport);
+
+      expect(master.transport).toBe(newTransport);
+      expect(master.pid).toBe(4242);
+      expect(master.status).toBe("ready");
+      expect(master.busy).toBe(true);
+      expect(master.queue).toHaveLength(1);
+      expect(master.seen).toBe(true);
+      expect(master.pendingStart).toBe(true);
+      expect(master.delivery).toBe("streaming");
+      expect(master.transportOwner).toBe("bridge");
+    });
+
+    it("is a no-op with no bridge-owned sessions", async () => {
+      await spin.resolveSession("adrika", "telegram", 222);
+      expect(spin.rebindBridgeTransports(mockTransport())).toBe(0);
+    });
+
+    it("consecutive rebuilds land on the latest instance", () => {
+      const t1 = mockTransport();
+      const t2 = mockTransport();
+      const t3 = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: t1 });
+      const master = spin.getActiveSession("aksika", "telegram");
+      spin.rebindBridgeTransports(t2);
+      expect(master.transport).toBe(t2);
+      spin.rebindBridgeTransports(t3);
+      expect(master.transport).toBe(t3);
+    });
+  });
+
   describe("resolveSession", () => {
     it("returns master session with transport when registered", async () => {
       const transport = mockTransport();
@@ -151,7 +215,7 @@ describe("Spin — unified session router (#943)", () => {
 
     it("injects synthetic message via the adapter so pipeline delivers response (#1106 regression)", async () => {
       const captured: any[] = [];
-      spin.setGreetingAdapter({ injectMessage: (msg) => captured.push(msg) } as any);
+      spin.setGreetingAdapter({ injectMessage: (msg: unknown) => captured.push(msg) } as any);
       const result = await spin.injectGreeting("adrika", "[SYSTEM] scheduled check-in");
       expect(result).toBe("routed");
       expect(captured).toHaveLength(1);
@@ -241,6 +305,31 @@ describe("Spin — unified session router (#943)", () => {
       spin.greetSession(session, 111, "aksika", adapter);
       expect(adapter.injectMessage).not.toHaveBeenCalled();
     });
+
+    it("boot greeting fires despite messageCount > 0 (in-process restart)", () => {
+      const session = spin.getActiveSession("aksika", "telegram");
+      session.transport = mockTransport();
+      session.messageCount = 5;
+      const adapter = { injectMessage: vi.fn() };
+      spin.greetSession(session, 111, "aksika", adapter, undefined, true);
+      expect(adapter.injectMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining("[SESSION START]"),
+      }));
+    });
+
+    it("resetBootGreeting re-arms the automatic greeting after a boot", () => {
+      const adapter = { injectMessage: vi.fn() };
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: mockTransport() });
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(1);
+      // Second boot without reset stays silent (the reported bug).
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(1);
+      // Re-arming fires exactly one more greeting.
+      spin.resetBootGreeting();
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("killSession (#1501)", () => {
@@ -265,6 +354,54 @@ describe("Spin — unified session router (#943)", () => {
     it("still returns platform-scoped error for non-background miss", () => {
       const result = spin.killSession("aksika", "telegram", 999);
       expect(result).toContain("not found on telegram");
+    });
+
+    it("killing one session keeps a shared runtime transport alive for the survivor (#1940 leftover)", () => {
+      const shared = mockTransport();
+      const releaseA = vi.fn();
+      const releaseB = vi.fn();
+      const a = spin.getActiveSession("aksika", "telegram");
+      const bResult = spin.createSubSession("aksika", "telegram", "W");
+      expect(typeof bResult).not.toBe("string");
+      const b = bResult as import("./spin-types.js").ManagedSession;
+      for (const s of [a, b]) {
+        s.transport = shared;
+        s.transportOwner = "runtime";
+      }
+      a.releaseTransport = releaseA as unknown as typeof a.releaseTransport;
+      b.releaseTransport = releaseB as unknown as typeof b.releaseTransport;
+
+      const killed = spin.killSession("aksika", "telegram", b.shortIndex);
+      expect(typeof killed).not.toBe("string");
+      expect((killed as import("./spin-types.js").ManagedSession).transport).toBeUndefined();
+      expect(releaseB).not.toHaveBeenCalled();
+      expect(releaseA).not.toHaveBeenCalled();
+      expect(a.transport).toBe(shared);
+      expect(a.status).not.toBe("ended");
+    });
+
+    it("killing a Pi-route session disposes only its Pi session, never the shared transport (#1940 leftover)", () => {
+      const shared = mockTransport() as unknown as IKiroTransport & { piAgentSessionRoute: boolean };
+      (shared as { piAgentSessionRoute: boolean }).piAgentSessionRoute = true;
+      const releaseA = vi.fn();
+      const releaseB = vi.fn();
+      const a = spin.getActiveSession("aksika", "telegram");
+      const bResult = spin.createSubSession("aksika", "telegram", "W");
+      expect(typeof bResult).not.toBe("string");
+      const b = bResult as import("./spin-types.js").ManagedSession;
+      for (const s of [a, b]) {
+        s.transport = shared;
+        s.transportOwner = "runtime";
+      }
+      a.releaseTransport = releaseA as unknown as typeof a.releaseTransport;
+      b.releaseTransport = releaseB as unknown as typeof b.releaseTransport;
+
+      const killed = spin.killSession("aksika", "telegram", b.shortIndex);
+      expect(typeof killed).not.toBe("string");
+      expect(shared.resetSession).toHaveBeenCalledWith(b.id);
+      expect((shared as unknown as { destroy: unknown }).destroy).not.toHaveBeenCalled();
+      expect(releaseB).not.toHaveBeenCalled();
+      expect(a.transport).toBe(shared);
     });
   });
 

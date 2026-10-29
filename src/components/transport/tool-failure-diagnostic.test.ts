@@ -11,6 +11,8 @@ import {
   summarizeToolFailure,
   renderDiagnostic,
   PiCoreToolExecutionError,
+  shouldThrowAfterToolFailure,
+  TERMINAL_TOOL_REASONS,
 } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
@@ -185,6 +187,106 @@ describe("parseToolResultToDiagnostic", () => {
     expect(d).not.toBeNull();
     expect(d!.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
   });
+
+  it("maps structured memory failures to their bridge reasons, never unknown (#1659)", () => {
+    const cases: Array<{ code: string; action: string; stage: string; retryable: boolean }> = [
+      { code: "memory_validation", action: "fix_input", stage: "pre_dispatch", retryable: false },
+      { code: "memory_not_found", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_conflict", action: "re_recall", stage: "pre_dispatch", retryable: false },
+      { code: "memory_unauthorized", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_idempotency_conflict", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_unavailable", action: "retry", stage: "pre_dispatch", retryable: true },
+      { code: "memory_outcome_unknown", action: "reconcile", stage: "response", retryable: false },
+    ];
+    for (const c of cases) {
+      const result = JSON.stringify({
+        stored: false, memoriesCount: 0, code: c.code, message: `${c.code} detail`,
+        requestId: "req-abc", retryable: c.retryable, action: c.action, stage: c.stage,
+      });
+      const d = parseToolResultToDiagnostic(result, execId, "memory_store");
+      expect(d).not.toBeNull();
+      expect(d!.reason).toBe(c.code);
+      expect(d!.memory_failure).toMatchObject({ code: c.code, request_id: "req-abc", retryable: c.retryable, action: c.action, stage: c.stage });
+      expect(d!.stderr_excerpt).toContain(`${c.code} detail`);
+    }
+  });
+
+  it("redacts and caps structured memory failure messages", () => {
+    const result = JSON.stringify({
+      stored: false, memoriesCount: 0, code: "memory_validation",
+      message: `secret sk-aaaaaaaaaaaaaaaaaaaaaa ${"x".repeat(900)}`,
+      requestId: "req-xyz", retryable: false, action: "fix_input", stage: "pre_dispatch",
+    });
+    const d = parseToolResultToDiagnostic(result, execId, "memory_store");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("memory_validation");
+    expect(d!.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+    expect(d!.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+    expect(d!.memory_failure!.request_id).toBe("req-xyz");
+  });
+
+  it("#1677 maps every enumerated Orc rejection code to its typed reason with prose in stderr_excerpt", () => {
+    const codes = [
+      "context_missing", "invalid_arguments", "project_mismatch",
+      "supervision_missing", "project_terminal", "project_not_reviewable",
+      "project_generation_mismatch", "review_case_unknown",
+      "review_case_project_mismatch", "review_case_generation_mismatch",
+      "review_case_not_open", "review_case_unreadable", "case_too_large",
+      "review_ownership_stale",
+      "settlement_lost", "peer_terminal_identity_missing", "peer_terminal_identity_mismatch",
+      "internal_error", "peer_relay_blocked", "peer_sandbox",
+    ];
+    for (const code of codes) {
+      const result = JSON.stringify({ error: `detail for ${code}`, reason: code });
+      const d = parseToolResultToDiagnostic(result, execId, "review_project");
+      expect(d).not.toBeNull();
+      expect(d!.reason).toBe(code);
+      expect(d!.stderr_excerpt).toBe(`detail for ${code}`);
+      expect(d!.command_preview).toBeUndefined();
+      expect(d!.command_fingerprint).toBeUndefined();
+      expect(renderDiagnostic(d!)).toContain(`reason: ${code}`);
+    }
+  });
+
+  it("#1677 an unrecognized reason still falls through to unknown", () => {
+    const result = JSON.stringify({ error: "some prose", reason: "not_a_known_code" });
+    const d = parseToolResultToDiagnostic(result, execId, "review_project");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("unknown");
+    expect(d!.stderr_excerpt).toContain("some prose");
+  });
+
+  it("#1677 a result with both bash fields and a reason takes the bash branch", () => {
+    const result = JSON.stringify({
+      exit_code: 1, stderr: "bash stderr", command_fingerprint: "abcd1234abcd1234",
+      command_preview: "false", error: "ignored", reason: "project_generation_mismatch",
+    });
+    const d = parseToolResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.reason).toBe("nonzero_exit");
+    expect(d!.exit_code).toBe(1);
+    expect(d!.stderr_excerpt).toBe("bash stderr");
+  });
+
+  it("#1677 an inverted envelope ({ error: code, reason: prose }) is never misread as a typed reason", () => {
+    // The sealed-secret tools emit the code in `error` and prose in `reason`;
+    // that prose is not a set member, so classification stays `unknown`.
+    const result = JSON.stringify({ error: "sealed_secrets_unavailable", reason: "sealed secret store rejected the request" });
+    const d = parseToolResultToDiagnostic(result, execId, "secret_get");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("unknown");
+    expect(d!.stderr_excerpt).toContain("sealed_secrets_unavailable");
+    expect(d!.command_preview).toBeUndefined();
+  });
+
+  it("#1772 case_too_large is typed with bounded detail and is not terminal", () => {
+    const result = JSON.stringify({ error: "Review case brief is 2000000 chars; limit is 1048576", reason: "case_too_large" });
+    const d = parseToolResultToDiagnostic(result, execId, "get_project_review_case");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("case_too_large");
+    expect(d!.stderr_excerpt).toContain("Review case brief is");
+    expect(d!.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+    expect(TERMINAL_TOOL_REASONS.has("case_too_large" as never)).toBe(false);
+  });
 });
 
 describe("buildUnknownDiagnostic", () => {
@@ -247,8 +349,7 @@ describe("buildTerminalDiagnostic (#1595 Finance-Daily regression)", () => {
   // The Finance-Daily trace: one malformed `2>&` bash command (shell_syntax_error)
   // followed by ~20 continued turns, ending at prompt_round_limit (25). The
   // final diagnostic must lead with the terminal cause and keep the stale bash
-  // failure as supporting context only — never present it as the primary reason
-  // and never claim candidate_exhausted for a run that continued past rotation.
+  // failure as supporting context only — never present it as the primary reason.
   const staleBashFailure: ToolFailureDiagnosticV1 = {
     version: 1,
     execution_id: "exec_1",
@@ -282,10 +383,10 @@ describe("buildTerminalDiagnostic (#1595 Finance-Daily regression)", () => {
     expect(rendered).not.toContain("candidate_exhausted:true");
   });
 
-  it("sets candidate_exhausted only when the terminal incident is candidate_round_limit", () => {
-    const d = buildTerminalDiagnostic("exec_1", { type: "candidate_round_limit" }, staleBashFailure);
-    expect(d.reason).toBe("candidate_round_limit");
-    expect(d.candidate_exhausted).toBe(true);
+  it("never reports candidate_exhausted from a safety termination", () => {
+    const d = buildTerminalDiagnostic("exec_1", { type: "prompt_round_limit" }, staleBashFailure);
+    expect(d.reason).toBe("prompt_round_limit");
+    expect(d.candidate_exhausted).toBe(false);
     expect(d.last_tool_failure?.tool).toBe("execute_bash");
   });
 
@@ -367,5 +468,56 @@ describe("PiCoreToolExecutionError", () => {
     expect(err.name).toBe("PiCoreToolExecutionError");
     expect(err.message).toContain("Tool execute_bash failed");
     expect(err.diagnostic.exit_code).toBe(127);
+  });
+});
+
+describe("#1716 cleanup_incomplete passthrough", () => {
+  it("preserves the flag into the typed diagnostic", () => {
+    const result = JSON.stringify({
+      stdout: "",
+      stderr: "",
+      exit_code: null,
+      timed_out: true,
+      aborted: false,
+      cleanup_incomplete: true,
+      command_fingerprint: fingerprintCommand("sleep infinity"),
+      command_preview: previewCommand("sleep infinity"),
+    });
+    const d = parseBashResultToDiagnostic(result, "exec-1716", "execute_bash");
+    expect(d?.reason).toBe("timeout");
+    expect(d?.cleanup_incomplete).toBe(true);
+  });
+
+  it("omits the field for clean completions", () => {
+    const result = JSON.stringify({
+      exit_code: 1,
+      timed_out: false,
+      aborted: false,
+      command_fingerprint: fingerprintCommand("exit 1"),
+      command_preview: previewCommand("exit 1"),
+    });
+    const d = parseBashResultToDiagnostic(result, "exec-1716b", "execute_bash");
+    expect(d?.reason).toBe("nonzero_exit");
+    expect(d?.cleanup_incomplete).toBeUndefined();
+  });
+});
+
+describe("shouldThrowAfterToolFailure (#1767)", () => {
+  it("terminal tool classes always throw, regardless of origin", () => {
+    for (const reason of ["repeated_failure", "spawn_error", "timeout", "aborted"] as const) {
+      for (const mode of ["interactive", "unattended-task", "unattended-sleep", "unverified", undefined] as const) {
+        expect(shouldThrowAfterToolFailure(reason, mode)).toBe(true);
+      }
+    }
+  });
+
+  it("non-terminal failures throw for every origin except sleep", () => {
+    for (const reason of ["nonzero_exit", "policy_rejected", "shell_syntax_error", "unknown"] as const) {
+      expect(shouldThrowAfterToolFailure(reason, "interactive")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unattended-task")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unverified")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, undefined)).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unattended-sleep")).toBe(false);
+    }
   });
 });

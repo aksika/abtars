@@ -1,5 +1,5 @@
-import type { CandidateSpec, ModelCandidate } from "./transport/model-candidates.js";
-import { buildCandidates } from "./transport/model-candidates.js";
+import type { ModelCandidate } from "./transport/model-candidates.js";
+import { resolveCandidateAuth } from "./transport/model-candidates.js";
 import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
@@ -7,6 +7,7 @@ import { getEnv } from "./env-schema.js";
  */
 
 import { AcpTransport } from "./transport/acp-transport.js";
+import { resolveAgent, loadTransport, getEnvFallback } from "./transport-config.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
@@ -32,7 +33,6 @@ const AGENT_ROLES: Record<string, AgentRoleConfig> = {
 
 function resolveModel(role: string): string | undefined {
   switch (role) {
-    case "dreamy": return getEnv().sleepModel;
     case "browsie": return getEnv().browsingAgent;
     case "coding": case "cody": return getEnv().codingModel;
     default: return undefined;
@@ -80,10 +80,43 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
   task: "task",
 };
 
+/** Runtime agent name -> transport-construction role (the inverse of the
+ *  mapping createSubagentTransport applies). */
+const AGENT_TO_SUBAGENT_ROLE: Record<import("./subagent-runtime.js").AgentName, SubagentRole> = {
+  professor: "task",
+  dreamy: "sleep",
+  browsie: "browse",
+  coding: "coding",
+  task: "task",
+};
+
+/**
+ * #1940: does this agent resolve to the Pi route? Spin needs the answer
+ * BEFORE a one-shot transport exists (the SOUL decorator must not duplicate
+ * a bundle the transport will install as its session system prompt). This
+ * mirrors createSubagentTransport's resolution exactly — same role mapping,
+ * same configured-agent fallback — so route decisions cannot drift.
+ */
+export function subagentAgentUsesPiTransport(
+  agent: import("./subagent-runtime.js").AgentName,
+): boolean {
+  try {
+    const tc = loadTransport();
+    const agentName = SUBAGENT_TO_AGENT[AGENT_TO_SUBAGENT_ROLE[agent]];
+    const resolved = (tc ? resolveAgent(agentName, tc) : null) ?? (tc ? resolveAgent("main", tc) : null);
+    if (resolved) return resolved.provider.transport === "api";
+    return getEnvFallback().provider.transport === "api";
+  } catch {
+    // Unreadable/invalid config cannot build a Pi transport either; the
+    // decorator keeps its ACP default and transport construction reports the
+    // real configuration failure.
+    return false;
+  }
+}
+
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain"): Promise<{ transport: IKiroTransport; model: string }> {
-  const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
+export async function createSubagentTransport(role: SubagentRole, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string): Promise<{ transport: IKiroTransport; model: string }> {
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
   const resolved = tc ? resolveAgent(agentName, tc) : null;
@@ -98,75 +131,33 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
   if (agent.provider.transport === "api") {
     const { PiCoreTransport } = await import("./transport/pi-core-transport.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
+    // #1757: Pi-managed mode rides the candidate; no key is resolved here.
+    const primaryAuth = resolveCandidateAuth(agent.provider, (name) => getEnv().getApiKey(name), apiKey);
 
     const primaryEndpoint = agent.provider.endpoint ?? "http://localhost:11434/v1";
 
-    const configured: ModelCandidate = {
+    // #1932: exactly one candidate per transport — the role's configured
+    // model. No Main inheritance, no route fallbacks, no rotation.
+    const candidate: ModelCandidate = {
       model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
-      apiKey, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
-      thinking: agent.provider.thinking, source: "primary",
+      apiKey: primaryAuth.apiKey, authSource: primaryAuth.authSource, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
+      // #1770: thread the resolved ceiling (pi catalog wins, models.json floor).
+      maxOutput: agent.maxOutput,
+      thinking: agent.provider.thinking,
+      cacheRetention: agent.provider.cacheRetention ?? "short", source: "primary",
     };
-
-    // #1611: configured-only transports never inherit Main or route fallbacks —
-    // the candidate set is exactly the configured Dreamy candidate.
-    let candidates: ModelCandidate[];
-    if (candidatePolicy === "configured-only") {
-      candidates = [configured];
-    } else {
-      const mainAgent = tc ? resolveAgent("main", tc) : null;
-      const configuredMainSpec: CandidateSpec | null = mainAgent
-        ? {
-          model: mainAgent.model,
-          provider: mainAgent.providerName,
-          endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
-          maxContext: mainAgent.contextWindow,
-          apiFormat: mainAgent.provider.apiFormat,
-          thinking: mainAgent.provider.thinking,
-        }
-        : null;
-      const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
-      let inheritedCandidate: ModelCandidate | null = null;
-      if (inheritedSpec) {
-        const inheritedProvider = tc?.providers[inheritedSpec.provider];
-        inheritedCandidate = {
-          model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
-          apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
-          maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
-          thinking: inheritedSpec.thinking, source: "inherited_chain",
-        };
-      }
-
-      const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
-      const fallbackCandidates: ModelCandidate[] = (ra?.fallbacks ?? []).map(fb => {
-        const fbProvider = tc!.providers[fb.provider];
-        return {
-          model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
-          apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
-          maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
-          thinking: fbProvider?.thinking, source: "agent_fallback",
-        };
-      });
-
-      candidates = buildCandidates({ role: "specialist", configured, lastSuccessfulMain: inheritedCandidate, fallbacks: fallbackCandidates });
-    }
-
-    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
 
     const transport = new PiCoreTransport({
       role: "specialist",
       systemPrompt: `You are an abtars ${agentName} agent.`,
-      candidates,
-      healthRegistry: registry ?? new ModelHealthRegistry(),
+      candidate,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
-      maxCandidateRounds: tc?.maxFallbackToolRounds,
-      // #1527: late-bound shared provider holder from boot composition.
-      contextProvider: contextProvider ?? { current: null },
       // #1552: late-bound memory-tool deps holder from boot composition.
       memoryToolDeps: memoryToolDeps ?? { current: null },
     });
     await transport.initialize();
-    logInfo("subagent", `${role} transport: PiCore ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates)`);
+    logInfo("subagent", `${role} transport: PiCore ${agent.providerName} (model=${agent.model})`);
     return { transport, model: agent.model };
   }
 
@@ -185,7 +176,9 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const model = modelsToTry[i]!;
     const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
       cliPath: agent.provider.cli ?? config.transport.agentCliPath,
-      workingDir: config.transport.workingDir,
+      // #1807: an explicit sleep scope overrides the configured working dir
+      // so CLI session creation honors the same root as tool execution.
+      workingDir: workingDir ?? config.transport.workingDir,
       agentCli: agent.provider.cli ?? "kiro-cli",
       model,
     });

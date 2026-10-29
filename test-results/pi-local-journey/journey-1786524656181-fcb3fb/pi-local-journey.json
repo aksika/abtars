@@ -1,0 +1,135 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-xxNQQU",
+  "startedAt": 1786523853915,
+  "durationMs": 802267,
+  "passed": 22,
+  "failed": 3,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=d03e1562-385 card=#1 session=1786523920_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786523920_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=1473614 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "run1-cancel-accepted",
+      "ok": false,
+      "detail": "run reached terminal status completed before cancel could be issued"
+    },
+    {
+      "step": "no-orphan-session-after-complete",
+      "ok": false,
+      "detail": "STILL LISTED: #3 Code (pi, ready) ← attached"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file in workspace (steer applied during run)"
+    },
+    {
+      "step": "bridge-restart-1",
+      "ok": true,
+      "detail": "bridge respawned (pid 1501963)"
+    },
+    {
+      "step": "restart-preserves-terminal",
+      "ok": true,
+      "detail": "status after restart=completed (terminal stays terminal)"
+    },
+    {
+      "step": "stale-steer-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run d03e1562-385 is not active (status: completed)"
+    },
+    {
+      "step": "stale-reply-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run d03e1562-385 is not active (status: completed)"
+    },
+    {
+      "step": "run2-start",
+      "ok": true,
+      "detail": "runId=7e2aa89a-87c gen=1"
+    },
+    {
+      "step": "run2-first-turn-settled",
+      "ok": true,
+      "detail": "first output file present — pi session flushed"
+    },
+    {
+      "step": "run2-running",
+      "ok": true,
+      "detail": "run2 active before crash"
+    },
+    {
+      "step": "bridge-crash",
+      "ok": true,
+      "detail": "bridge pid 1501963 SIGKILLed"
+    },
+    {
+      "step": "crash-orphan-pi-child",
+      "ok": true,
+      "detail": "no orphan pi child after crash"
+    },
+    {
+      "step": "bridge-reboot-after-crash",
+      "ok": true,
+      "detail": "bridge respawned (pid 1527268)"
+    },
+    {
+      "step": "run2-recovery-on-boot",
+      "ok": true,
+      "detail": "run2 status after crash+reboot=interrupted (expected interrupted)"
+    },
+    {
+      "step": "run2-resume",
+      "ok": true,
+      "detail": "generation=2 new session=1786524022_C_03"
+    },
+    {
+      "step": "run2-resume-running",
+      "ok": true,
+      "detail": "post-resume status=running"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run 7e2aa89a-87c status completed/failed after 600000ms\n"
+    }
+  ]
+}

@@ -1,11 +1,14 @@
-import { logInfo } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { ExecutionSupervisor } from "./execution-control.js";
 import { logSwarmTrace } from "./swarm-trace.js";
+import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
+import type { ToolExecutionScope } from "./tasks/task-package.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
+import { makeExecutionOutcomeEnvelope } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
 
@@ -43,24 +46,85 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
+    const executionRef = `${claim.attemptId}:${claim.generation}`;
     const ctrl = this.executions.open({
-      executionRef: `${claim.attemptId}:${claim.generation}`,
+      executionRef,
       attemptId: claim.attemptId,
       generation: claim.generation,
       cardId: claim.cardId,
       type: "W",
     });
 
-    const sup = new WorkerSupervisionService();
-    const contract = sup.getContract(claim.contractId);
-    if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
-
-    logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
-    logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
-
-    this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
-
     try {
+      const sup = new WorkerSupervisionService();
+      const contract = sup.getContract(claim.contractId);
+      if (!contract) {
+        this.executions.remove(executionRef);
+        return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
+      }
+
+      // #1656: resolve the root project scope and thread it into the Worker
+      // dispatch. #1844: every supervised root has a bound workspace — a root
+      // admitted before that invariant heals here to its deterministic
+      // project directory (the same value admission would have bound), so
+      // legacy rows never fail closed at dispatch. Only a heal failure itself
+      // fails the start.
+      const supStore = new WorkerSupervisionStore();
+      const attempt = supStore.getAttempt(claim.attemptId);
+      const rootCardId = attempt?.root_project_card_id ?? card.parent_id;
+      let executionScope: ToolExecutionScope | undefined;
+      if (rootCardId !== undefined && rootCardId !== null) {
+        const scopeStore = new ProjectReviewStore();
+        let scope = scopeStore.getWorkspaceScope(rootCardId);
+        if (!scope) {
+          try {
+            // #1844: runner-owned heal (see orc-workflow-runner.ts) — the
+            // binding transition stays in the runner module; delegates never
+            // touch the phase mutators directly.
+            const { ensureProjectWorkspace } = await import("./orc-project/orc-workflow-runner.js");
+            ensureProjectWorkspace(scopeStore.db, rootCardId);
+          } catch (err) {
+            this.executions.remove(executionRef);
+            return { kind: "start_failed", reason: `project workspace unavailable: ${err instanceof Error ? err.message : String(err)}`, retryable: false };
+          }
+          scope = scopeStore.getWorkspaceScope(rootCardId);
+        }
+        if (!scope) {
+          this.executions.remove(executionRef);
+          return { kind: "start_failed", reason: "project workspace not bound", retryable: false };
+        }
+        executionScope = scope;
+      }
+
+      logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
+      logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+
+      this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
+
+      // #1850: resolve the durable root origin for the relay guard at
+      // dispatch, next to the workspace scope above. An unresolvable origin
+      // resolves unknown (never undefined) so the guard denies relay
+      // fail-closed; dispatch itself still proceeds.
+      const originRootId = attempt?.root_project_card_id ?? card.parent_id ?? claim.cardId;
+      let workOrigin: import("./transport/tool-registry.js").WorkOrigin;
+      try {
+        const { resolveWorkOrigin } = await import("./transport/orc-tools.js");
+        const { kanbanGetCard } = await import("./tasks/kanban-board.js");
+        const { WorkflowStore } = await import("./orc-project/orc-workflow-store.js");
+        const workflowStore = new WorkflowStore(supStore.db);
+        workOrigin = resolveWorkOrigin(originRootId, {
+          getCardSource: (id) => {
+            const row = kanbanGetCard(id);
+            if (!row) return undefined;
+            return { source: row.source ?? null, sourcePeer: row.source_peer ?? null };
+          },
+          getRunKind: (id) => workflowStore.findLatestRunByCard(id)?.rootKind ?? null,
+        });
+      } catch (err) {
+        workOrigin = { rootCardId: originRootId, rootKind: "unknown", sourcePeer: null };
+        logWarn(TAG, `Worker ${claim.cardId}: origin resolution failed, relay denies fail-closed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       spin.dispatch({
         type: "W",
         goal: contract.goal,
@@ -72,9 +136,11 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         executionControl: ctrl,
         settlementOwner: "spin",
         deadlineAt: claim.hardDeadlineAt ? new Date(claim.hardDeadlineAt).getTime() : undefined,
+        executionScope,
+        workOrigin,
       });
     } catch (err) {
-      this.executions.remove(`${claim.attemptId}:${claim.generation}`);
+      this.executions.remove(executionRef);
       return { kind: "start_failed", reason: String(err), retryable: true };
     }
 
@@ -82,9 +148,10 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
-    const ctrl = this.executions.get(`${claim.attemptId}:${claim.generation}`);
+    const executionRef = `${claim.attemptId}:${claim.generation}`;
+    const ctrl = this.executions.get(executionRef);
+    const store = new WorkerSupervisionStore();
     if (!ctrl) {
-      const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);
       if (!attempt) return { kind: "not_found" };
       if (store.isAttemptTerminal(attempt.lifecycle)) {
@@ -94,10 +161,15 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     }
 
     if (ctrl.generation !== claim.generation) {
-      return { kind: "already_terminal", lifecycle: "failed" };
+      // A live control for another generation owns this card now — report
+      // its truthful lifecycle instead of a fabricated one.
+      const attempt = store.getAttempt(claim.attemptId);
+      const latest = attempt ? store.getLatestAttempt(attempt.card_id) : undefined;
+      return { kind: "already_terminal", lifecycle: latest?.lifecycle ?? attempt?.lifecycle ?? "cancelled" };
     }
 
-    const store = new WorkerSupervisionStore();
+    // Physical interrupt intent first: requestCancel only signals the running
+    // process, it never writes a durable verdict.
     store.requestCancel(claim.attemptId, reason);
 
     const result = await ctrl.requestCancel(reason);
@@ -108,10 +180,71 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       return { kind: "already_terminal", lifecycle: attempt?.lifecycle ?? "cancelled" };
     }
 
-    ctrl.markTerminal("cancelled");
-    store.cancelAttempt(claim.attemptId);
+    // #1778: the durable cancellation verdict goes through the attempt
+    // owner — terminalSettlement with the expected generation — never a
+    // direct lifecycle write that could settle a replacement attempt. The
+    // handoff envelope is the observational seam record: physical cleanup is
+    // not confirmed by this path, so cleanup stays unknown and the lease,
+    // workspace, and capacity remain held until the owner observes cleanup.
+    const handoff = makeExecutionOutcomeEnvelope({
+      source: "worker",
+      executionRef,
+      attemptId: claim.attemptId,
+      attemptGeneration: claim.generation,
+      observation: "terminal",
+      outcome: "cancelled",
+      cleanup: "unknown",
+      correlationKey: `cancel:${claim.attemptId}:${claim.generation}`,
+      detail: `adapter cancel: ${reason}`,
+    });
+    if (!handoff.ok) {
+      logWarn(TAG, `Cancel handoff envelope rejected for ${claim.attemptId}: ${handoff.error}`);
+    }
+    const correlationKey = handoff.ok ? handoff.envelope.correlationKey : `cancel:${claim.attemptId}:${claim.generation}`;
+    const settlement = store.terminalSettlement({
+      attemptId: claim.attemptId,
+      expectedGeneration: claim.generation,
+      desiredState: "cancelled",
+      stableReason: `adapter_cancel:${reason} (${correlationKey})`,
+    });
+    logSwarmTrace({
+      event: "adapter_cancel_handoff",
+      card: claim.cardId,
+      attempt: claim.attemptId,
+      generation: claim.generation,
+      to: settlement.kind,
+      reason: `${reason} outcome=cancelled cleanup=unknown key=${correlationKey}`,
+    });
 
-    return { kind: "cancelled", attemptId: claim.attemptId };
+    switch (settlement.kind) {
+      case "settled":
+      case "budget_violation":
+        ctrl.markTerminal("cancelled");
+        return { kind: "cancelled", attemptId: claim.attemptId };
+      case "replayed": {
+        // Another writer settled first — mirror the truthful durable
+        // lifecycle on the in-memory control, never overwrite the verdict.
+        const attempt = store.getAttempt(claim.attemptId);
+        const lifecycle = attempt?.lifecycle ?? "cancelled";
+        ctrl.markTerminal(
+          lifecycle === "completed" ? "completed"
+            : lifecycle === "failed" ? "failed"
+              : lifecycle === "timed_out" ? "timed_out" : "cancelled",
+        );
+        return { kind: "already_terminal", lifecycle };
+      }
+      case "stale": {
+        // This generation no longer owns the card. Fence the dead control
+        // so its late callbacks stay inert, and report the live owner's
+        // lifecycle when one can be read.
+        ctrl.markTerminal("cancelled");
+        const attempt = store.getAttempt(claim.attemptId);
+        const latest = attempt ? store.getLatestAttempt(attempt.card_id) : undefined;
+        return { kind: "already_terminal", lifecycle: latest?.lifecycle ?? attempt?.lifecycle ?? "cancelled" };
+      }
+      case "conflict":
+        return { kind: "cancel_failed", reason: "conflicting terminal state" };
+    }
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {

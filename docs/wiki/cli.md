@@ -5,20 +5,19 @@ The `abtars` command manages installation, updates, and lifecycle of the bridge.
 ## Usage
 
 ```
-abtars install    [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
+abtars install    [--non-interactive --accept-risk --user-name ...] [--force] [--mode=simple|daemon] [--restore <backup.zip>]
 abtars uninstall  [--yes]
-abtars update     [--source local|npm|github] [--from-local]
-abtars rollback   [--to <version>]
+abtars update     [--dev [DIR] | --alpha | --stable]
+abtars rollback   [--to <slot>]
 abtars backup
 abtars start
-abtars stop       [--force]
-abtars restart
+abtars stop
+abtars restart    [--cold]
 abtars status
 abtars logs
 abtars config
-abtars doctor     [<args passed to doctor.sh>...]
-abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
-abtars daemon     install|uninstall|start|stop|restart|status
+abtars doctor     [<doctor args>...]
+abtars daemon     install|uninstall|start|stop|restart
 abtars deps       install|list|update|remove
 ```
 
@@ -26,11 +25,15 @@ abtars deps       install|list|update|remove
 
 ### install
 
-First-time setup. Creates `~/.abtars/`, installs the bridge, sets up the watchdog.
+First-time setup. Creates `~/.abtars/`, installs the bridge, runs the
+interactive first-run wizard (agent name, install mode, security settings,
+messaging credentials), sets up the watchdog.
 
 - `--force` — overwrite existing installation
-- `--mode` — `simple` (no watchdog), `supervised` (watchdog, manual start), `supervised-daemon` (watchdog + auto-start on boot)
+- `--mode` — `simple` or `daemon`
 - `--restore <backup.zip>` — restore config/state from a backup archive
+- `--non-interactive` — skip prompts, use flags instead (requires `--user-name`, owner identity, and `--accept-risk`)
+- `--default-provider` / `--default-model` — override the shipped pi-stack defaults
 
 ### uninstall
 
@@ -40,16 +43,17 @@ Removes the bridge installation. Stops running processes first.
 
 ### update
 
-Builds and deploys a new version. Stages alongside the running instance, then performs a quick restart (< 2s downtime).
+Builds and deploys a new version from the selected channel.
 
-- `--from-local` — build from the local repo (default for dev workflow)
-- `--source` — choose source: `local`, `npm`, or `github`
+- `--dev [DIR]` — deploy the dev channel, optionally from a local checkout
+- `--alpha` — deploy the alpha channel
+- `--stable` — deploy the stable channel
 
 ### rollback
 
 Revert to a previous version.
 
-- `--to <version>` — specific version to roll back to (defaults to previous)
+- `--to <slot>` — choose a previous release slot (defaults to the latest previous release)
 
 ### backup
 
@@ -57,21 +61,15 @@ Creates a zip archive of config and state (`~/.abtars/config/`, secrets, task DB
 
 ### start
 
-Starts the bridge (and watchdog if in supervised mode).
-
-### start
-
-Starts the bridge (and watchdog if in supervised mode). If already running, prints "already running" and exits.
+Starts the bridge in simple mode or starts its watchdog service in daemon mode.
 
 ### stop
 
 Stops the bridge and watchdog.
 
-- `--force` — required on supervised-daemon installs (kills watchdog first to prevent respawn)
-
 ### restart
 
-Stop + start in sequence.
+Restarts the bridge. Use `--cold` to start a fresh bridge process.
 
 ### status
 
@@ -83,14 +81,15 @@ Diagnoses common issues (stale locks, missing config, port conflicts, dependency
 
 - `--fix` — attempt automatic repair of detected issues
 
-### onboard
+### First-run wizard
 
-Interactive first-run wizard. Sets up Telegram bot token, chat ID, and initial config.
+`abtars install` ends with an interactive wizard (agent name, install mode,
+security settings, messaging credentials). Unattended installs pass the same
+values as flags:
 
-- `--non-interactive` — skip prompts, use flags instead
-- `--telegram-token` — bot token
-- `--telegram-chat-id` — owner chat ID
-- `--accept-risk` — acknowledge security implications
+```bash
+abtars install --non-interactive --accept-risk --user-name "yourname" ...
+```
 
 ### logs
 
@@ -106,30 +105,33 @@ Manage the systemd/launchd service.
 
 | Subcommand | Description |
 |------------|-------------|
-| `daemon install` | Install and start the system service (requires sudo) |
+| `daemon install` | Install and start the system-scope service (requires sudo) |
 | `daemon uninstall` | Remove the service |
 | `daemon start` | Start the service |
 | `daemon stop` | Stop the service |
 | `daemon restart` | Restart the service |
 
+Use `abtars status` to inspect bridge and service state.
+
 ### deps
 
-Manage optional npm package groups (native, twitter, pdf, youtube, image, pi) and system binaries (ollama, bwrap, lightpanda). See [Dependencies](./dependencies.md) for the full reference.
+Manage optional CLI npm package groups (native, twitter, pdf, youtube, image), auto-managed browser runtimes (`lightpanda`, `cloak`), and manual system binaries (`ollama`, `bwrap`). Pi is not an npm group — it is a separate distribution managed via `abtars deps install pi` / `abtars deps update pi` (pinned to the tested line, with a compatibility check). Skill-script dependencies are lifecycle-managed separately; see [Dependencies](./dependencies.md#skill-script-dependencies).
 
 | Subcommand | Description |
 |------------|-------------|
 | `deps list` | List every group + system binary + install status |
-| `deps install [name\|all]` | Install a group (default: native) |
+| `deps install [name\|all]` | Install a group (default: all) |
 | `deps update [name\|all]` | Refresh an installed group |
 | `deps remove <name>` | Uninstall a group |
 
 ### tui
 
-Attach a terminal UI to a running bridge over a unix-domain socket (#1315).
-The bridge must have been started with `TUI_ENABLED=true` (or `--tui`).
+Attach a terminal UI to a running bridge over a unix-domain socket.
+The TUI socket server is enabled by default — only an explicit
+`TUI_ENABLED=false` disables it.
 
 ```bash
-abtars deps install tui                # one-time: install the pi-tui client dep
+abtars deps install pi                 # install Pi, including its TUI library
 abtars tui                              # attach to the active tui session (auto-creates Main if none)
 abtars tui --session 2                  # switch to existing tui session #2
 abtars tui --new C                      # create a new Code session and attach

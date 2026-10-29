@@ -1,79 +1,21 @@
-# Why abTARS
+# What is abTARS
 
-What makes abTARS different from other agentic frameworks.
+abTARS is a personal agent you run on your own machine and configure yourself. It connects Pi to the chat and terminal interfaces you already use, then adds tools, provider selection, scheduled work, memory integration, and process supervision around it.
 
-## Private by Default
+## Built around Pi
 
-Most agent frameworks are designed for open access — anyone who knows the endpoint can interact. abTARS flips this:
+On the API route, Pi's agent core runs the model and tool loop and Pi's provider engine connects to API providers. abTARS supplies everything product-specific around that engine: sessions and message delivery, tool definitions with per-execution filtering and in-process execution, permission and sandbox policy around every call, turn safety and loop guards, single-model dispatch with availability admission, Pi-owned compaction, abmind session hydration, and usage telemetry. The ACP route connects to a compatible agent CLI instead and does not use Pi.
 
-- **Pre-configured user allowlist** — only explicitly approved platform IDs can talk to the agent
-- **Role-based access** — master, user, guest with different permission levels
-- **Memory classification** — 4 tiers (UNCLASSIFIED → SECRET), encrypted at rest for sensitive data
-- **No cloud dependency** — everything runs on your hardware, nothing leaves your machine
+## Use it where you already work
 
-You decide who talks to your agent. Not the other way around.
+Talk to the agent through Telegram or Discord, or connect the optional local terminal interface. The same abTARS service handles sessions, configuration, and tools across those interfaces.
 
-## Memory-Native Architecture
+## Choose your integrations
 
-Memory isn't a plugin or afterthought — it's built into the core loop:
+Configure the model for the API route (one configured model per conversation — fallback lists apply to boot-time selection and the ACP route only), or use an ACP-compatible CLI. Add persistent memory with abmind, which installs separately and remains an independent product — abTARS also runs without it. Delegate larger coding goals to supervised Pi coding sessions, and extend behavior with skills, scheduled tasks, and MCP servers.
 
-- **Every turn is recorded** — automatic, no configuration needed
-- **Recall on every prompt** — relevant memories injected before the model sees your message
-- **Sleep cycles** — background maintenance extracts facts, consolidates knowledge, detects contradictions
-- **Cross-session persistence** — the agent remembers yesterday, last week, last month
+## Operate the service yourself
 
-Other frameworks offer memory as an optional add-on. In abTARS, the agent is useless without memory — and powerful because of it.
+Configuration and runtime data live on your machine. You choose the interfaces, provider, integrations, and supervision mode: a supervised install that recovers after failures, or a simple run you start and stop yourself.
 
-## Autonomous Operation
-
-abTARS runs unattended 24/7:
-
-- **Scheduled tasks** — cron-style jobs the agent executes on schedule
-- **Self-healing** — watchdog restarts on crash, health monitoring, auto-fallback on model failure
-- **Sleep/wake cycles** — the agent sleeps during quiet hours, processes memories, wakes up fresh
-- **Multi-provider fallback** — if one model goes down, the next one picks up automatically
-
-No babysitting. Deploy, configure, walk away.
-
-## Security-First Tool Execution
-
-The agent can run tools (bash, browser, MCP servers) — but with guardrails:
-
-- **Per-user tool allowlist** — guests can't execute bash, only master can access secrets
-- **Classified memory** — the agent knows secrets exist but can't leak them to unauthorized users
-- **Outbound scanning** — (planned) detect and block secret/PII exfiltration in responses
-- **Audit trail** — every tool call logged with user, timestamp, result
-
-## Multi-Platform, Single Brain
-
-One agent, multiple interfaces — same memory, same personality:
-
-- Telegram (full-featured: voice, reactions, inline keyboards)
-- Discord (slash commands, threads, streaming)
-- Peer-to-peer (agent-to-agent communication over Tailscale)
-
-Switch platforms mid-conversation. The agent remembers everything regardless of where you talk to it.
-
-## Operator-Owned Configuration
-
-Everything is a JSON file you control:
-
-- `transport.json` — providers, models, fallback chains, health tuning
-- `users.json` — who can access, what they can do
-- `tasks.json` — scheduled jobs
-- `hooks.json` — lifecycle event handlers
-- `models.json` — curated model catalog with validation status
-
-No web dashboard required to configure. No account to create. No subscription. Edit a file, restart, done.
-
-## What's Different
-
-| Capability | Typical frameworks | abTARS |
-|---|---|---|
-| User access | Open or API-key gated | Pre-approved platform IDs only |
-| Memory | Optional plugin, basic recall | Core architecture — extract, consolidate, sleep, age |
-| Autonomy | Responds when prompted | Runs 24/7 with scheduled tasks + self-healing |
-| Model failure | Error or single retry | Leaky-bucket health tracking + ordered fallback chain |
-| Security | Trust the user | Classify, encrypt, gate per-role |
-| Configuration | Web UI or env vars | JSON files, version-controlled, operator-owned |
-| Deployment | Cloud service | Your hardware, your rules |
+See the [installation](/abtars/install), [transport](/abtars/transport), and [supervision](/abtars/supervision) guides for the current setup, and [Pi integration](/abtars/pi) for what abTARS adds over Pi.

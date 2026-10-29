@@ -184,38 +184,6 @@ export class DashboardServer implements IDashboardSlot {
         return;
       }
 
-      // GET /api/memory/chats — auth gate → list stored chat IDs
-      if (method === "GET" && pathname === "/api/memory/chats") {
-        if (!this.deps.authGate.guard(req, res)) return;
-
-        if (!this.deps.memorySearchController) {
-          res.writeHead(409, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "memory not enabled" }));
-          return;
-        }
-
-        const result = this.deps.memorySearchController.listChats();
-        res.writeHead(result.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result.body));
-        return;
-      }
-
-      // GET /api/memory/all — auth gate → all extracted memories for visualization
-      if (method === "GET" && pathname === "/api/memory/all") {
-        if (!this.deps.authGate.guard(req, res)) return;
-
-        if (!this.deps.memorySearchController) {
-          res.writeHead(409, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "memory not enabled" }));
-          return;
-        }
-
-        const result = this.deps.memorySearchController.listAll();
-        res.writeHead(result.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result.body));
-        return;
-      }
-
       // POST /api/services/:name/start|stop — auth gate → service registry
       const svcMatch = method === "POST" && pathname?.match(/^\/api\/services\/([^/]+)\/(start|stop)$/);
       if (svcMatch) {
@@ -285,9 +253,17 @@ export class DashboardServer implements IDashboardSlot {
       if (method === "GET" && pathname === "/api/cron") {
         if (!this.deps.authGate.guard(req, res)) return;
         try {
-          const { readEntries } = await import("../tasks/task-store.js");
+          const { readTaskCatalog } = await import("../tasks/task-store.js");
+          const catalog = readTaskCatalog();
+          if (catalog.kind === "unavailable") {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "task catalog unavailable", reason: catalog.reason }));
+            return;
+          }
+          const { initializeState } = await import("../tasks/task-state-store.js");
+          initializeState(catalog.entries);
           const { getAllViews } = await import("../tasks/task-service.js");
-          const views = getAllViews(readEntries());
+          const views = getAllViews(catalog.entries);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, entries: views.map(v => ({
             definition: v.definition,

@@ -11,7 +11,8 @@
  */
 
 import { logDebug, logWarn } from "./logger.js";
-import { kanbanQueuedDispatchOrder, kanbanFail, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
@@ -86,7 +87,7 @@ class ExecutionControlImpl implements ExecutionControl {
     if (this._cancelled && this._cancelReason) {
       const reason = this._cancelReason;
       queueMicrotask(() => {
-        void Promise.resolve(this._cancelFn!(reason)).catch(() => {});
+        void Promise.resolve(this._cancelFn!(reason)).catch(err => logAndSwallow(TAG, `cancel execution bound after cancellation`, err));
       });
     }
     return true;
@@ -97,7 +98,7 @@ class ExecutionControlImpl implements ExecutionControl {
     this._cancelled = true;
     this._cancelReason = reason;
     if (this._cancelFn) {
-      await Promise.resolve(this._cancelFn(reason)).catch(() => {});
+      await Promise.resolve(this._cancelFn(reason)).catch(err => logAndSwallow(TAG, `request cancel execution`, err));
     }
     return "cancelled";
   }
@@ -107,7 +108,7 @@ class ExecutionControlImpl implements ExecutionControl {
     this._cancelled = true;
     this._cancelReason = reason;
     if (this._cancelFn) {
-      queueMicrotask(() => { void Promise.resolve(this._cancelFn!(reason)).catch(() => {}); });
+      queueMicrotask(() => { void Promise.resolve(this._cancelFn!(reason)).catch(err => logAndSwallow(TAG, `signal cancel execution`, err)); });
     }
     return "cancelled";
   }
@@ -159,9 +160,19 @@ export interface ExecutionSupervisor {
   remove(executionRef: string): boolean;
   /** #987/#1274: per-type admission gate (capacity + Healer cooldown). */
   canAdmit(type: SessionType, cardId?: number): boolean;
-  /** Admit a card: gate check + occupancy mark in one step. */
-  admit(type: SessionType, cardId: number): boolean;
-  /** Release occupancy for a card; records Healer completion time. */
+  /**
+   * Admit a card: gate check + occupancy mark in one step. The optional
+   * executionRef records which generation owns the slot; admission order
+   * defines the live generation (last writer wins), so a stale generation's
+   * later release can never free its successor's slot — see close().
+   */
+  admit(type: SessionType, cardId: number, executionRef?: string): boolean;
+  /**
+   * Release occupancy for a card; records Healer completion time.
+   * Legacy blind primitive — kept for tests and control-less paths.
+   * Production Spin turns release through close(), which proves the closing
+   * generation still owns the execution.
+   */
   release(type: SessionType, cardId: number): void;
   /** #1439: full set of card IDs Spin considers running, across all types. */
   runningCardIds(): readonly number[];
@@ -175,6 +186,12 @@ export interface ExecutionSupervisor {
    * `kanban-retry` due source alongside Reconciler dispatch.
    */
   drainLegacyQueued(dispatch: (request: SpinRequest) => void): void;
+  /**
+   * #1801: capacity-release subscription. Notifies after an actual occupancy
+   * deletion with the released SessionType. Returns an unsubscribe function.
+   * No notification for admit, duplicate/stale release, or clear.
+   */
+  subscribeCapacityReleased(listener: (type: SessionType) => void): () => void;
   clear(): void;
 }
 
@@ -202,7 +219,7 @@ export class SpinBindRejectionError extends Error {
 function cardHasSupervision(cardId: number): boolean {
   try {
     const store = new WorkerSupervisionStore();
-    return store.contractExists(cardId) && store.hasLiveClaim(cardId);
+    return store.contractExists(cardId);
   } catch { return false; }
 }
 
@@ -221,16 +238,52 @@ function isSupervisedRootIdentity(card: KanbanCard): boolean {
   }
 }
 
+/**
+ * #1778: true when a card is owned by the Reconciler/Orc driver rather than
+ * legacy Spin dispatch — a supervised worker child or an actively supervised
+ * project root. Pre-execution dispatch failures for such cards must leave the
+ * card queued for its owner instead of failing it from Spin.
+ */
+export function isReconcilerOwnedCard(cardId: number): boolean {
+  try {
+    if (cardHasSupervision(cardId)) return true;
+    const card = kanbanGetCard(cardId);
+    if (!card) return false;
+    return isSupervisedRootIdentity(card);
+  } catch {
+    return false;
+  }
+}
+
 export function createExecutionSupervisor(options: ExecutionSupervisorOptions): ExecutionSupervisor {
   const controls = new Map<string, ExecutionControlImpl>();
   const sessionBindings = new Map<string, string>();   // sessionId → executionRef
   const refSessions = new Map<string, string>();       // executionRef → sessionId
   const running = new Map<SessionType, Set<number>>();
+  /** #1778: occupancy ownership — `${type}:${cardId}` → owning executionRef.
+   * Admission order defines the live generation: a re-admit transfers
+   * ownership to the successor, so a stale generation's release is a no-op
+   * instead of freeing a slot it no longer owns. */
+  const occupancyOwner = new Map<string, string>();
   const maxConcurrent = options.maxConcurrent;
   const now = options.now ?? (() => Date.now());
   const onOccupancyChanged = options.onOccupancyChanged;
 
   let lastHealerDoneAt = 0;
+
+  /** #1801: capacity-release listeners — notified once per actual slot free. */
+  const capacityReleasedListeners = new Set<(type: SessionType) => void>();
+
+  function notifyCapacityReleased(type: SessionType): void {
+    for (const listener of [...capacityReleasedListeners]) {
+      try {
+        listener(type);
+      } catch (err) {
+        // Contained: a failing listener must never interrupt cleanup.
+        logWarn(TAG, `capacity-release listener failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
 
   function activeCardIds(): number[] {
     const ids: number[] = [];
@@ -255,18 +308,48 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
     return true;
   }
 
-  function admit(type: SessionType, cardId: number): boolean {
+  function admit(type: SessionType, cardId: number, executionRef?: string): boolean {
     if (!canAdmit(type, cardId)) return false;
     if (!running.has(type)) running.set(type, new Set());
     running.get(type)!.add(cardId);
+    if (executionRef !== undefined) occupancyOwner.set(`${type}:${cardId}`, executionRef);
     publishActiveCardIds();
     return true;
   }
 
   function release(type: SessionType, cardId: number): void {
-    running.get(type)?.delete(cardId);
+    const deleted = running.get(type)?.delete(cardId) ?? false;
+    // Preserve the legacy side effects on a duplicate/blind release (owner
+    // cleanup, Healer completion stamp, health publish) — only the #1801
+    // notification is gated on an actual occupancy deletion.
+    occupancyOwner.delete(`${type}:${cardId}`);
     if (type === "H") lastHealerDoneAt = now();
     publishActiveCardIds();
+    if (deleted) {
+      // #1801: notify after the occupancy mutation, once per released slot.
+      notifyCapacityReleased(type);
+    }
+  }
+
+  /**
+   * #1778: release one occupancy slot for a proven owner. A slot releases
+   * only when no newer generation re-admitted the card after this one —
+   * silently skipping a successor-owned slot instead of freeing it.
+   */
+  function releaseOwnedCard(cardId: number, executionRef: string): void {
+    for (const [type, set] of running) {
+      if (!set.has(cardId)) continue;
+      const owner = occupancyOwner.get(`${type}:${cardId}`);
+      if (owner !== undefined && owner !== executionRef) continue;
+      set.delete(cardId);
+      occupancyOwner.delete(`${type}:${cardId}`);
+      if (type === "H") lastHealerDoneAt = now();
+      publishActiveCardIds();
+      // #1801: notify after the mutation — close() delegates here and must
+      // not notify again.
+      notifyCapacityReleased(type);
+      break;
+    }
   }
 
   function drainLegacyQueued(dispatch: (request: SpinRequest) => void): void {
@@ -276,6 +359,18 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       // supervised project root — scheduled, peer, CLI) go through the
       // Reconciler/Orc coordinator — skip them here
       if (cardHasSupervision(card.id) || isSupervisedRootIdentity(card)) continue;
+      // #1638/#1648: Pi cards are Reconciler-owned — never dispatch or fail
+      // them from the Spin legacy drain. Standalone Pi cards start only via
+      // the Reconciler Pi lane after shared admission.
+      if (card.type === "pi") continue;
+      // #1750: an O root is Orc/Reconciler-owned by identity. The
+      // `project_supervision` row that isSupervisedRootIdentity() reads is
+      // written when the Reconciler adopts the project, which can be minutes
+      // after kanban_manage created the card — draining in that window raced
+      // a live O execution into the shared session and crashed the bridge.
+      // reconcileProject starts these cards (legacyOrcDispatch); this drain
+      // never should.
+      if (card.type === "O" && card.parent_id === null) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.
@@ -356,15 +451,11 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       // (binding dropped by remove()) resolves to a no-op.
       if (refSessions.get(executionRef) === undefined) return false;
       const transitioned = ctrl.markTerminal(outcome);
-      if (transitioned && ctrl.cardId !== undefined) {
-        for (const [type, set] of running) {
-          if (set.delete(ctrl.cardId)) {
-            if (type === "H") lastHealerDoneAt = now();
-            publishActiveCardIds();
-            break;
-          }
-        }
-      }
+      // #1778: binding proves this generation still owns the execution, so
+      // the slot releases even when the control already terminalized through
+      // another path (a deadline or cancel that won before completion).
+      // releaseOwnedCard additionally refuses a slot a successor re-admitted.
+      if (ctrl.cardId !== undefined) releaseOwnedCard(ctrl.cardId, executionRef);
       return transitioned;
     },
 
@@ -383,8 +474,8 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       return canAdmit(type, cardId);
     },
 
-    admit(type, cardId) {
-      return admit(type, cardId);
+    admit(type, cardId, executionRef) {
+      return admit(type, cardId, executionRef);
     },
 
     release(type, cardId) {
@@ -411,12 +502,21 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       drainLegacyQueued(dispatch);
     },
 
+    subscribeCapacityReleased(listener) {
+      capacityReleasedListeners.add(listener);
+      return () => {
+        capacityReleasedListeners.delete(listener);
+      };
+    },
+
     clear() {
       controls.clear();
       sessionBindings.clear();
       refSessions.clear();
       running.clear();
+      occupancyOwner.clear();
       lastHealerDoneAt = 0;
+      // #1801: shutdown clear notifies nothing — releases are explicit.
     },
   };
 }

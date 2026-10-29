@@ -13,6 +13,8 @@
  */
 
 import { logInfo, logWarn } from "./logger.js";
+import { parseSelfHealMode } from "./sha/sha-types.js";
+import type { SelfHealMode } from "./sha/sha-types.js";
 
 // ── Schema definition ───────────────────────────────────────────────────────
 
@@ -50,6 +52,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "WATCHDOG_TOOL_TIMEOUT_SEC", type: "int", default: "180", description: "Watchdog tool call timeout (seconds)" },
   { env: "WATCHDOG_SILENT_SEC", type: "int", default: "300", description: "Watchdog silent timeout (seconds)" },
   { env: "WATCHDOG_ENDLESS_SEC", type: "int", default: "600", description: "Watchdog endless loop timeout (seconds)" },
+  { env: "BASH_TOOL_TIMEOUT_SEC", type: "int", default: "120", description: "execute_bash hard cap (seconds)" },
 
   // ── Telegram ──
   { env: "TELEGRAM_BOT_TOKEN", type: "string", description: "Telegram bot token" },
@@ -79,7 +82,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Memory ──
   { env: "MEMORY", type: "string", default: "abmind", description: "Memory provider: 'abmind' (default) or 'none'" },
   { env: "ACTIVE_MEMORY", type: "bool", default: "true", description: "Enable ambient recall on every turn" },
-  { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 
   // ── ABM-L rendering (abmind, read by abmind directly) ──
   { env: "ABML_VERSION", type: "string", default: "plain", description: "ABM-L codec: plain | v0 | v1" },
@@ -92,7 +94,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "COMPACTION_LLM_ENABLED", type: "bool", default: "false", description: "LLM refinement for middle-tier rendering (#348 Phase 2)" },
 
   // ── Sleep ──
-  { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
 
   // ── Voice ──
@@ -101,8 +102,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "TTS_ENABLED", type: "bool", default: "true", description: "Enable text-to-speech voice replies" },
   { env: "TTS_VOICE", type: "string", default: "alloy", description: "TTS voice name" },
 
-  // ── Self-healer ──
-  { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
+  // ── Self-healer (#1688) ──
+  { env: "SELFHEAL_MODE", type: "string", default: "off", description: "Self-healing mode: off | investigation | full" },
 
   // ── Browser ──
   { env: "BROWSING_AGENT", type: "string", description: "Model override for browsing agent" },
@@ -113,8 +114,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "DASHBOARD_MODULE", type: "string", description: "Custom dashboard module path" },
   { env: "NOTEBOOKLM_ENABLED", type: "bool", default: "false", description: "Enable NotebookLM integration" },
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
-  { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
-  { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | seatbelt | docker" },
   { env: "MAX_AGENT_CALL_PER_HOUR", type: "int", required: true, description: "Agent API rate limit: max requests per caller per hour" },
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
@@ -163,6 +162,7 @@ export interface EnvConfig {
   watchdogToolTimeoutSec: number;
   watchdogSilentSec: number;
   watchdogEndlessSec: number;
+  bashToolTimeoutSec: number;
 
   // Telegram
   telegramBotToken: string | undefined;
@@ -192,10 +192,8 @@ export interface EnvConfig {
   // Memory
   memory: string;
   activeMemory: boolean;
-  primingModelTopics: boolean;
 
-  // Sleep (scheduling is owned by tasks.json #1321; only model/quality remain)
-  sleepModel: string | undefined;
+  // Sleep (scheduling is owned by tasks.json #1321; only quality remains; sleep model removed per #1752)
   sleepQuality: string | undefined;
 
   // Voice
@@ -204,8 +202,8 @@ export interface EnvConfig {
   ttsEnabled: boolean;
   ttsVoice: string;
 
-  // Self-healer
-  selfhealEnabled: boolean;
+  // Self-healer (#1688)
+  selfhealMode: SelfHealMode;
 
   // Browser
   browsingAgent: string | undefined;
@@ -220,8 +218,6 @@ export interface EnvConfig {
   // Scheduled runs (#1600)
   taskRunCeilingMs: number;
   taskRunIdleBudgetMs: number;
-  permissionTimeoutMs: number;
-  trustMode: boolean;
   securityMode: string;
   enableDashboard: boolean;
   enableAgentApi: boolean;
@@ -239,6 +235,17 @@ export interface EnvConfig {
 function parseIntSafe(raw: string, varName: string): number {
   const n = parseInt(raw, 10);
   if (isNaN(n)) throw new Error(`Invalid ${varName}: "${raw}" — expected integer`);
+  return n;
+}
+
+function parseIntSafeBounded(raw: string, varName: string, min: number, max: number): number {
+  if (!/^[+-]?\d+$/.test(raw)) {
+    throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
+  }
   return n;
 }
 
@@ -324,6 +331,7 @@ export function initEnv(): Readonly<EnvConfig> {
     watchdogToolTimeoutSec: parseIntSafe(readOr("WATCHDOG_TOOL_TIMEOUT_SEC", "180"), "WATCHDOG_TOOL_TIMEOUT_SEC"),
     watchdogSilentSec: parseIntSafe(readOr("WATCHDOG_SILENT_SEC", "300"), "WATCHDOG_SILENT_SEC"),
     watchdogEndlessSec: parseIntSafe(readOr("WATCHDOG_ENDLESS_SEC", "600"), "WATCHDOG_ENDLESS_SEC"),
+    bashToolTimeoutSec: parseIntSafeBounded(readOr("BASH_TOOL_TIMEOUT_SEC", "120"), "BASH_TOOL_TIMEOUT_SEC", 1, 3600),
 
     telegramBotToken: read("TELEGRAM_BOT_TOKEN"),
     telegramTimeoutMs: parseIntSafe(readOr("TELEGRAM_TIMEOUT_SEC", "10"), "TELEGRAM_TIMEOUT_SEC") * 1000,
@@ -347,9 +355,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     activeMemory: parseBool(readOr("ACTIVE_MEMORY", "true")),
     memory: readOr("MEMORY", "auto"),
-    primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
-    sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),
 
     sttEnabled: parseBool(readOr("STT_ENABLED", "false")),
@@ -357,7 +363,12 @@ export function initEnv(): Readonly<EnvConfig> {
     ttsEnabled: parseBool(readOr("TTS_ENABLED", "false")),
     ttsVoice: readOr("TTS_VOICE", "alloy"),
 
-    selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
+    selfhealMode: (() => {
+      const rawMode = read("SELFHEAL_MODE");
+      const parsedMode = parseSelfHealMode(rawMode);
+      if (parsedMode.warned) warnings.push(`Invalid SELFHEAL_MODE "${rawMode}" — behaving as "off"`);
+      return parsedMode.mode;
+    })(),
 
     browsingAgent: read("BROWSING_AGENT"),
 
@@ -366,8 +377,6 @@ export function initEnv(): Readonly<EnvConfig> {
     dashboardModule: read("DASHBOARD_MODULE"),
     notebooklmEnabled: parseBool(readOr("NOTEBOOKLM_ENABLED", "false")),
     notebooklmDefaultNotebook: readOr("NOTEBOOKLM_DEFAULT_NOTEBOOK", ""),
-    permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_SEC", "60"), "PERMISSION_TIMEOUT_SEC") * 1000,
-    trustMode: parseBool(readOr("TRUST_MODE", "false")),
     securityMode: readOr("SECURITY_MODE", "off"),
     enableDashboard: parseBool(readOr("ENABLE_DASHBOARD", "false")),
     enableAgentApi: parseBool(readOr("ENABLE_AGENT_API", "false")),

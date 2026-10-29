@@ -28,6 +28,7 @@ import { getInstanceName } from "./soul-bundle.js";
 import { packagePaths, readManifest } from "../cli/deploy-lib-import.js";
 import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 import type { ServiceState } from "./service-registry.js";
+import type { AbtarsMemoryRuntime, RuntimeState } from "./memory-runtime.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,7 +57,6 @@ export interface RuntimeView {
   uptimeMs: number;
   watchdog: { pid: number | null; alive: boolean };
   securityMode: string;
-  trustMode: boolean;
   transport: { ready: boolean; type: string; provider: string; model: string };
   contextPercent: number | null;
   platformStates: Record<string, boolean>;
@@ -70,7 +70,18 @@ export interface RuntimeView {
   kanban: { active: number; total: number } | null;
   shaPolicyConfigured: boolean;
   skillsActive: number;
+  /** #1706: live memory truth from the bridge-owned runtime reference. Null
+   *  when the caller has no in-process runtime (CLI status). */
+  memory: {
+    state: RuntimeState;
+    composing: boolean;
+    attempts?: number;
+    lastFailure?: string;
+  } | null;
   soulBundle: { available: number; total: number } | null;
+  // #1869 — daemon MEMORY_TEST state. False means off or unknown; the view
+  // renders a line only when true, so the default path gains no noise.
+  memoryTestMode: boolean;
   a2a: { running: boolean; port: number | null };
   peersConfigured: number;
   tasks: { recurring: number; pending: number; paused: number };
@@ -113,6 +124,10 @@ export interface BridgeStatusCtx {
   startedAt: number;
   bridgeLockPath: string;
   heartbeatIntervalMs: number;
+  /** #1706: the bridge-owned memory runtime (the stable facade when memory
+   *  is composing late). Optional for CLI callers. getStatus is picked for
+   *  the #1869 test-mode line, queried live only against a ready runtime. */
+  memoryRuntime?: Pick<AbtarsMemoryRuntime, "state" | "compositionDiagnostics" | "getStatus">;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -156,12 +171,29 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
     logAndSwallow("status", "pi", err);
   }
 
+  // #1711 R2.1: unattributable relative-spelled processes block supervision and
+  // must be visible on every status surface with operator recovery text — a
+  // silent freeze is a spec violation (B13).
+  try {
+    const { potentialHomeBridgeProcesses } = await import("../supervisor/identity.js");
+    const scope = potentialHomeBridgeProcesses(home);
+    if (scope.complete && scope.unattributable.length > 0) {
+      for (const u of scope.unattributable) {
+        warnings.push(
+          `blocked-unattributable PID ${u.pid} (${u.argv.join(" ")}): ${u.reason} — this process predates the canonical spawn target and cannot be attributed to a home; restart or terminate it to restore supervision`,
+        );
+      }
+    }
+  } catch (err) {
+    logAndSwallow("status", "spawn-scope", err);
+  }
+
   // Rollback count
   let rollbackAvailable = 0;
   try {
     const history: string[] = JSON.parse(readFileSync(paths.releasesHistory, "utf-8"));
     rollbackAvailable = Math.min(history.length - 1, 3);
-  } catch {}
+  } catch { /* history.json may be absent or corrupt; a zero rollback count is the safe display default */ }
 
   // Bridge state from bridge.lock
   const bridgeState = readBridgeLock(ctx?.bridgeLockPath ?? join(home, "bridge.lock"));
@@ -327,7 +359,6 @@ export function renderChatStatus(view: StatusView): string {
   }
 
   lines.push(`  Security: ${r.securityMode}`);
-  if (r.trustMode) lines.push("  Trust: (trusted)");
 
   // Body
   lines.push("", "Body:");
@@ -382,10 +413,24 @@ export function renderChatStatus(view: StatusView): string {
 
   // Soul
   lines.push("", "Soul:");
-  if (r.soulBundle) {
+  const mem = r.memory;
+  if (mem?.composing) {
+    // #1706: truthful composing state — never claim "abmind working" while
+    // late composition is still pending.
+    const last = mem.lastFailure !== undefined ? `, last=${mem.lastFailure}` : "";
+    lines.push(`  ~ memory: composing (attempts=${mem.attempts ?? 0}${last})`);
+  } else if (r.soulBundle) {
     const allPresent = r.soulBundle.available === r.soulBundle.total;
     lines.push(`  ${allPresent ? "✓" : "~"} memory: abmind working`);
     lines.push(`    soul bundle: ${r.soulBundle.available}/${r.soulBundle.total} available`);
+    // #1869 — a host left in test mode is observable, not silent.
+    if (r.memoryTestMode) {
+      lines.push("    ! memory test mode: ON (MEMORY_TEST=ON — standing rules withheld, probes valid)");
+    }
+  } else if (mem?.state === "unavailable") {
+    lines.push("  ✗ memory: unavailable");
+  } else if (mem?.state === "disabled") {
+    lines.push("  - memory: disabled");
   } else {
     lines.push("  ✗ memory: none");
   }
@@ -608,7 +653,7 @@ function collectTui(bridgePid: number | null): TuiInfo {
     const envContent = readFileSync(envPath, "utf-8");
     const tuiLine = envContent.split("\n").find(l => l.startsWith("TUI_ENABLED="));
     if (tuiLine) tuiEnabled = !/=(false|0)$/i.test(tuiLine.trim());
-  } catch {}
+  } catch { /* .env may be absent; TUI is enabled by default (#1352) */ }
 
   // #1352: removed onTuiBranch gate — TUI is stable, no need to restrict to dev branches.
   const present = tuiEnabled;
@@ -662,7 +707,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   try {
     const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8")) as Record<string, unknown>;
     if (typeof lock["sleepStatus"] === "string") sleepStatus = lock["sleepStatus"] as string;
-  } catch {}
+  } catch { /* bridge.lock may be absent or partially written; "awake" is the safe display default */ }
 
   // Watchdog
   const wdPidEnv = process.env["ABTARS_WATCHDOG_PID"];
@@ -679,16 +724,14 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     return { pid, alive };
   })();
 
-  // Security + trust
+  // Security mode (configured provenance; enforced behavior is resolved in authorization.ts)
   let securityMode = "off";
-  let trustMode = false;
   try {
-    const { getSecurityMode } = await import("./guardrails.js");
-    const { getEnv } = await import("./env-schema.js");
-    securityMode = getSecurityMode();
-    trustMode = (getEnv() as { trustMode?: boolean }).trustMode === true;
+    const { resolveSecurityMode } = await import("./authorization.js");
+    const resolved = resolveSecurityMode();
+    securityMode = resolved.fallback ? `${resolved.configured} (fallback: guardrails)` : resolved.configured;
   } catch (err) {
-    logAndSwallow("status", "trust", err);
+    logAndSwallow("status", "security mode", err);
   }
 
   // Platform running states
@@ -708,6 +751,22 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     const v = process.env["AGENT_API_PORT"];
     return v ? parseInt(v, 10) : null;
   })();
+
+  // #1706: live memory truth from the bridge-owned runtime reference (the
+  // stable facade while composition is pending).
+  const memRt = ctx.memoryRuntime;
+  const memDiag = memRt?.compositionDiagnostics;
+  const memory: RuntimeView["memory"] = memRt ? {
+    state: memRt.state,
+    composing: !!memDiag && memDiag.state !== "upgraded",
+    ...(memDiag
+      ? {
+          attempts: memDiag.attempts,
+          ...(memDiag.lastFailure !== undefined ? { lastFailure: memDiag.lastFailure } : {}),
+        }
+      : {}),
+  } : null;
+
   const a2a: RuntimeView["a2a"] = {
     running: (() => {
       try {
@@ -729,7 +788,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
       hbRunning = hb.isRunning;
       hbInternalTaskCount = hb.getTaskNames().length;
     }
-  } catch {}
+  } catch { /* heartbeat module may be unavailable in a partial boot; the status view falls back to not-running */ }
   const heartbeat: RuntimeView["heartbeat"] = {
     running: hbRunning,
     intervalSec: Math.round(ctx.heartbeatIntervalMs / 1000),
@@ -739,7 +798,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
         if (typeof lock["lastHeartbeat"] === "number") {
           return Math.max(0, Math.round((Date.now() - (lock["lastHeartbeat"] as number)) / 1000));
         }
-      } catch {}
+      } catch { /* bridge.lock may be absent or partially written; the last-tick age falls back to null */ }
       return null;
     })(),
     internalTaskCount: hbInternalTaskCount,
@@ -770,7 +829,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   try {
     const { abtarsHome } = await import("../paths.js");
     shaPolicyConfigured = existsSync(join(abtarsHome(), "config", "sha-policy.json"));
-  } catch {}
+  } catch { /* abtars home may be unavailable in a partial boot; the flag falls back to false */ }
 
   // Skills
   let skillsActive = 0;
@@ -778,34 +837,50 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     const { getSkillCache } = await import("../capabilities/hotskills/index.js");
     const skills = getSkillCache() as unknown as Array<{ skipped?: boolean }>;
     skillsActive = skills.filter(s => !s.skipped).length;
-  } catch {}
+  } catch { /* skills cache may be unavailable in a partial boot; the count falls back to zero */ }
 
-  // Soul bundle
+  // Soul bundle — counted only against a LIVE ready runtime. A soul-bundle
+  // directory on disk must never imply "abmind working" while composition is
+  // pending (#1706).
   let soulBundle: RuntimeView["soulBundle"] = null;
   try {
-    const { getEnv } = await import("./env-schema.js");
-    const { abmindHome, abtarsHome, abtarsRoot } = await import("../paths.js");
-    const { describeSoulInputs } = await import("./soul-input-manifest.js");
-    const memoryProvider =
-      (getEnv() as { memory?: string }).memory ?? "abmind";
-    if (memoryProvider === "abmind" || memoryProvider === "auto") {
-      const coreDir = join(abmindHome(), "memory", "core");
-      if (existsSync(coreDir)) {
-        // #1439: shared manifest is the single source of truth for which
-        // abmind core inputs count toward the Soul bundle — do not
-        // duplicate the file list here.
-        const coreInputs = describeSoulInputs({
-          memoryMode: "available",
-          abtarsHome: abtarsHome(),
-          abtarsRoot: abtarsRoot(),
-          abmindHome: abmindHome(),
-        }).filter(i => i.id.startsWith("main.") && i.id !== "main.minimal-fallback");
-        const available = coreInputs.filter(i => existsSync(i.path)).length;
-        soulBundle = { available, total: coreInputs.length };
+    if (ctx.memoryRuntime?.state === "ready") {
+      const { getEnv } = await import("./env-schema.js");
+      const { abmindHome, abtarsHome, abtarsRoot } = await import("../paths.js");
+      const { describeSoulInputs } = await import("./soul-input-manifest.js");
+      const memoryProvider =
+        (getEnv() as { memory?: string }).memory ?? "abmind";
+      if (memoryProvider === "abmind" || memoryProvider === "auto") {
+        const coreDir = join(abmindHome(), "memory", "core");
+        if (existsSync(coreDir)) {
+          // #1439: shared manifest is the single source of truth for which
+          // abmind core inputs count toward the Soul bundle — do not
+          // duplicate the file list here.
+          const coreInputs = describeSoulInputs({
+            memoryMode: "available",
+            abtarsHome: abtarsHome(),
+            abtarsRoot: abtarsRoot(),
+            abmindHome: abmindHome(),
+          }).filter(i => i.id.startsWith("main.") && i.id !== "main.minimal-fallback");
+          const available = coreInputs.filter(i => existsSync(i.path)).length;
+          soulBundle = { available, total: coreInputs.length };
+        }
       }
     }
   } catch (err) {
     logAndSwallow("status", "soul", err);
+  }
+
+  // #1869 — daemon test-mode state for the status view. Queried live (one
+  // RPC) only against a ready runtime; unknown or unreachable stays false
+  // and renders no line.
+  let memoryTestMode = false;
+  try {
+    if (ctx.memoryRuntime?.state === "ready") {
+      memoryTestMode = (await ctx.memoryRuntime.getStatus()).memoryTest === true;
+    }
+  } catch (err) {
+    logAndSwallow("status", "memory-test-mode", err);
   }
 
   // Peers configured
@@ -868,7 +943,6 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     uptimeMs: Date.now() - ctx.startedAt,
     watchdog,
     securityMode,
-    trustMode,
     transport: {
       ready: transportReady,
       type: transportType,
@@ -882,7 +956,9 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     kanban,
     shaPolicyConfigured,
     skillsActive,
+    memory,
     soulBundle,
+    memoryTestMode,
     a2a,
     peersConfigured,
 
@@ -905,7 +981,7 @@ function countRuntimeFailures(
     for (const svc of Object.values(states)) {
       if (svc.retrying) n++;
     }
-  } catch {}
+  } catch { /* registry may be unavailable in a partial boot; the retrying count stays as-is */ }
   for (const [, running] of Object.entries(platformStates)) {
     if (!running) n++;
   }

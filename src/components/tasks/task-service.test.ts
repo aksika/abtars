@@ -122,6 +122,7 @@ describe("autoResumeIfDue #1609 bounded cooldown recovery", () => {
       occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000,
     });
     expect(reserved.ok).toBe(true);
+    if (!reserved.ok) throw new Error("expected reserveRun to succeed");
     const { settleRunOnce } = await import("./task-run-settler.js");
     settleRunOnce({ entry: ENTRY, run: reserved.run, outcome: "success" });
     expect(store.readState(ENTRY.id)!.autoResumeCount).toBe(0);

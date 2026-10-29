@@ -1,0 +1,162 @@
+/**
+ * orc-workflow-driver.ts — #1792 Task 5: production driver for the runner.
+ *
+ * Owns ONE WorkflowRunner plus its ports, subscribes the nerve wake events,
+ * and exposes the drain + audit entry points used by boot recovery and the
+ * heartbeat audit job. Event-driven (nerve wakes + audit redrive); the audit
+ * job from the approved heartbeat packet calls auditOnce, never dispatches
+ * model work itself.
+ *
+ * Safe pre-cutover: every handler resolves the workflow run first and returns
+ * silently for unmapped cards (legacy flows untouched — no workflow runs
+ * exist until admission routing lands).
+ */
+import { nerve } from "../nerve.js";
+import { logWarn } from "../logger.js";
+import { WorkflowRunner, boundText, type DrainPorts, type ExecutionPort } from "./orc-workflow-runner.js";
+import { WorkflowStore } from "./orc-workflow-store.js";
+import {
+  ChannelDeliverySender,
+  RoutingWorkflowWorkerPort,
+  SpinPlannerBackend,
+  SpinReviewerBackend,
+  workflowCapabilities,
+  type ModelCall,
+} from "./orc-workflow-ports.js";
+import { ModelJobRegistry, MODEL_JOB_SHUTDOWN_REASON, subscribeWorkflowTerminal } from "./orc-workflow-model-jobs.js";
+import type { TaskDatabase } from "../tasks/kanban-board.js";
+
+export interface WorkflowDriver {
+  readonly runner: WorkflowRunner;
+  /** Generation-owned model-call registry (diagnostics/tests). */
+  readonly modelJobs: ModelJobRegistry;
+  drainWake(reason: string): number;
+  auditOnce(cursor?: number): {
+    nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
+    recovered: number; inspections: number; projected: number;
+  };
+  recover(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number; recoveredCompletions: number };
+  stop(): void;
+}
+
+const DRAIN_BATCH = 50;
+const INSPECTION_CAP_PER_TICK = 100;
+
+export function startWorkflowDriver(deps: {
+  db?: TaskDatabase;
+  callModel: ModelCall;
+  ports?: DrainPorts;
+  cursor?: number;
+}): WorkflowDriver {
+  const store = new WorkflowStore(deps.db);
+  // Pi-capable admission: the planner may propose Pi execution (generic
+  // pi-coding/pi names plus configured Pi workspace aliases) alongside
+  // general Spin work. Capability validation stays in the runner; routing
+  // stays capability-based and explicit (isPiCapability).
+  const runner = new WorkflowRunner(store, workflowCapabilities());
+  // #1935: one registry per driver generation. Terminal transitions revoke
+  // call authority immediately; shutdown aborts everything still live.
+  const modelJobs = new ModelJobRegistry();
+  const offTerminal = subscribeWorkflowTerminal((runId) => { modelJobs.abortRun(runId); });
+  const ports: DrainPorts = deps.ports ?? {
+    executor: new RoutingWorkflowWorkerPort({ runner }),
+    reviewer: new SpinReviewerBackend({ runner, modelJobs, callModel: deps.callModel, onSettled: () => drainWake("model:verdict") }),
+    planner: new SpinPlannerBackend({ runner, modelJobs, callModel: deps.callModel, onSettled: () => drainWake("model:proposal") }),
+    // AstraMaster-2: production delivery is connected — without a sender the
+    // drain routes deliver commands into the worker executor, which throws
+    // (a review node is in no plan revision) and wedges the run.
+    delivery: new ChannelDeliverySender({ runner }),
+  };
+  let cursor = deps.cursor ?? 0;
+  let stopped = false;
+
+  function drainWake(reason: string): number {
+    if (stopped) return 0;
+    try {
+      return runner.drain(DRAIN_BATCH, ports);
+    } catch (err) {
+      logWarn("workflow-driver", `drain (${reason}) contained: ${boundText(err instanceof Error ? err.message : String(err), 300)}`);
+      return 0;
+    }
+  }
+
+  const onQueued = (): void => { drainWake("card:queued"); };
+  const onDone = (): void => { drainWake("card:done"); };
+  const onFailed = (): void => { drainWake("card:failed"); };
+  nerve.on("card:queued", onQueued);
+  nerve.on("card:done", onDone);
+  nerve.on("card:failed", onFailed);
+
+  function auditOnce(fromCursor?: number): {
+    nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
+    recovered: number; inspections: number; projected: number;
+  } {
+    if (stopped) {
+      return { nextCursor: cursor, checked: 0, lawful: [], ownerless: [], recovered: 0, inspections: 0, projected: 0 };
+    }
+    if (fromCursor !== undefined) cursor = fromCursor;
+    // #1792 live-fix: the audit redrives persisted commands (checkpoint §6).
+    // Admission queues the initial planning command without a guaranteed
+    // nerve wake after it (enqueue fires before the command exists), so a
+    // drain here is the backstop that starts every run. Bounded like all
+    // drains; nerve stays the fast path.
+    drainWake("audit");
+    const tick = runner.auditTick(cursor);
+    cursor = tick.nextCursor;
+    const recovered = runner.recoverUnconsumedCompletions(50);
+    let projected = 0;
+    for (const row of runner.store.findTerminalUnprojected(50)) {
+      try {
+        if (runner.projectTerminalProjections(row.runId)) projected++;
+      } catch (err) {
+        logWarn("workflow-driver", `projection recovery contained: ${boundText(err instanceof Error ? err.message : String(err), 200)}`);
+      }
+    }
+    let inspections = 0;
+    for (const item of tick.dueInspections) {
+      if (inspections >= INSPECTION_CAP_PER_TICK) break;
+      try {
+        const cmd = runner.store.findCommandByToken(item.claimToken);
+        if (cmd && (cmd.action === "plan" || cmd.action === "review")) {
+          // #1935: consult this generation's ownership before classifying a
+          // model claim. Active calls extend within their deadline; expired
+          // calls enter their timeout settlement; absent ownership fails
+          // explicitly (never a blind retry or five inconclusive guesses).
+          const disposition = modelJobs.classify(item.claimToken);
+          if (disposition === "expired") modelJobs.abort(item.claimToken, "deadline");
+          runner.submitModelJobInspection(
+            item.runId, item.claimToken, item.inspectGen + 1, disposition,
+            disposition === "active" ? modelJobs.remainingMs(item.claimToken) : undefined,
+          );
+        } else {
+          runner.submitClaimInspection(item.runId, item.claimToken, item.inspectGen + 1);
+        }
+        inspections++;
+      } catch (err) {
+        logWarn("workflow-driver", `inspection submit contained: ${boundText(err instanceof Error ? err.message : String(err), 200)}`);
+      }
+    }
+    return {
+      nextCursor: tick.nextCursor, checked: tick.checked,
+      lawful: tick.lawful, ownerless: tick.ownerless, recovered, inspections, projected,
+    };
+  }
+
+  return {
+    runner,
+    modelJobs,
+    drainWake,
+    auditOnce,
+    recover: (port?: ExecutionPort) => runner.startupRecovery(port),
+    stop: () => {
+      stopped = true;
+      offTerminal();
+      // Generation shutdown revokes callback authority before aborting the
+      // provider executions (Spin interrupts on the signal).
+      modelJobs.abortAll(MODEL_JOB_SHUTDOWN_REASON);
+      nerve.off("card:queued", onQueued);
+      nerve.off("card:done", onDone);
+      nerve.off("card:failed", onFailed);
+    },
+  };
+}

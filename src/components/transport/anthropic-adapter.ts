@@ -44,15 +44,3 @@ export function toAnthropicRequest(
   const anthropicTools = tools?.map(t => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
   return { model, ...(system ? { system } : {}), messages: msgs, max_tokens: maxTokens, ...(anthropicTools?.length ? { tools: anthropicTools } : {}) } as AnthropicRequest & { tools?: unknown[] };
 }
-
-export function buildAnthropicHeaders(apiKey: string): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
-    "x-api-key": apiKey,
-    "anthropic-version": "2023-06-01",
-  };
-}
-
-export function fromAnthropicResponse(resp: AnthropicResponse): string {
-  return resp.content?.find(c => c.type === "text")?.text ?? "";
-}

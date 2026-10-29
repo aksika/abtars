@@ -12,7 +12,7 @@
  * remains green in environments without the dev dependency.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +26,28 @@ const hasDevBinary = existsSync(CLI_PATH);
 let homeDir: string | undefined;
 let workspaceDir: string | undefined;
 
-describe.skipIf(!hasDevBinary)("SupervisedPiRpcClient real-binary contract (#1426)", () => {
+function isolatedEnv(): Record<string, string> {
+  return {
+    HOME: homeDir!,
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    LANG: process.env.LANG ?? "C.UTF-8",
+  };
+}
+
+/** Bounded poll for the session file to appear on disk. */
+async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (statSync(path).isFile()) return true;
+    } catch { /* not yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return existsSync(path) && statSync(path).isFile();
+}
+
+describe.skipIf(!hasDevBinary)("SupervisedPiRpcClient real-binary contract (#1426/#1647)", () => {
   beforeAll(() => {
     homeDir = mkdtempSync(join(tmpdir(), "pi-rpc-home-"));
     workspaceDir = mkdtempSync(join(tmpdir(), "pi-rpc-ws-"));
@@ -35,12 +56,7 @@ describe.skipIf(!hasDevBinary)("SupervisedPiRpcClient real-binary contract (#142
   it("boots RPC mode offline and resolves an official correlated get_state response", async () => {
     const client = new SupervisedPiRpcClient();
     const args = [CLI_PATH, "--mode", "rpc", "--no-approve"];
-    const env = {
-      HOME: homeDir!,
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      TMPDIR: process.env.TMPDIR ?? tmpdir(),
-      LANG: process.env.LANG ?? "C.UTF-8",
-    };
+    const env = isolatedEnv();
     try {
       await client.launch(process.execPath, args, workspaceDir!, env);
       expect(typeof client.pid).toBe("number");
@@ -65,6 +81,54 @@ describe.skipIf(!hasDevBinary)("SupervisedPiRpcClient real-binary contract (#142
     expect(clientSrc).not.toContain(`--rpc-version`);
     expect(clientSrc).not.toContain(`--session-storage-root`);
   });
+
+  it("#1647 offline process-A/process-B switch_session identity verification", async () => {
+    const env = isolatedEnv();
+    const processA = new SupervisedPiRpcClient();
+    let sessionAFile: string;
+    let persistedId: string;
+    try {
+      await processA.launch(process.execPath, [CLI_PATH, "--mode", "rpc", "--no-approve"], workspaceDir!, env);
+      const stateA = await processA.getState();
+      expect(stateA.sessionId).toBeTruthy();
+      sessionAFile = stateA.sessionFile!;
+      expect(sessionAFile).toContain(homeDir);
+
+      // Initialize a persisted session file WITHOUT a model call: switching to
+      // an empty file makes Pi write the {"type":"session","id":...} header
+      // immediately. This is the header validatePersistedSession() reads.
+      mkdirSync(dirname(sessionAFile), { recursive: true });
+      writeFileSync(sessionAFile, "", "utf-8");
+      const switched = await processA.switchSession(sessionAFile);
+      expect(switched.cancelled).toBe(false);
+      expect(await waitForFile(sessionAFile, 10_000)).toBe(true);
+      const header = JSON.parse(readFileSync(sessionAFile, "utf-8").split("\n", 1)[0]!) as { type?: string; id?: string };
+      expect(header.type).toBe("session");
+      expect(header.id).toBeTruthy();
+      persistedId = header.id!;
+      const stateAfter = await processA.getState();
+      expect(stateAfter.sessionId).toBe(persistedId);
+      expect(stateAfter.sessionFile).toBe(sessionAFile);
+
+      // A SECOND process verifies the saved identity cross-process: switch to
+      // A's file and get_state must report the SAME id/file.
+      const processB = new SupervisedPiRpcClient();
+      try {
+        await processB.launch(process.execPath, [CLI_PATH, "--mode", "rpc", "--no-approve"], workspaceDir!, env);
+        const stateB = await processB.getState();
+        expect(stateB.sessionId).not.toBe(persistedId);
+        const switchedB = await processB.switchSession(sessionAFile);
+        expect(switchedB.cancelled).toBe(false);
+        const stateAfterB = await processB.getState();
+        expect(stateAfterB.sessionId).toBe(persistedId);
+        expect(stateAfterB.sessionFile).toBe(sessionAFile);
+      } finally {
+        await processB.close();
+      }
+    } finally {
+      await processA.close();
+    }
+  }, 30000);
 });
 
 afterAll(() => {

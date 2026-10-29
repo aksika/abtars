@@ -12,7 +12,7 @@ Inject messages into a running agent without interrupting it, or hard-stop a gen
 ## How `/wait` works
 
 1. You send `/wait Don't forget to also check the logs`
-2. The busy-guard stashes your text in `pendingWait` on the session
+2. The busy-guard queues your text into the session's generation-bound instruction queue
 3. Between the agent's next tool calls, it sees: `[USER] Wait! Don't forget to also check the logs`
 4. The agent incorporates your guidance and continues working
 
@@ -22,8 +22,8 @@ The agent is NOT interrupted — it finishes its current tool call, reads your i
 
 | Transport | Injection timing |
 |-----------|-----------------|
-| Direct API | Between tool calls (true mid-run) |
-| ACP | After prompt completes (best-effort, injected as follow-up) |
+| Pi API route | Between tool calls (true mid-run), via session steering with native bounds |
+| ACP | After prompt completes (best-effort, injected as follow-up; ACP session steering is not maintained) |
 
 ## Multiple `/wait` messages
 
@@ -31,7 +31,10 @@ If you send several `/wait` before the agent drains them, they're concatenated w
 
 ## `/wait` while idle
 
-If the agent isn't busy, `/wait` is treated as a normal message — no special handling needed.
+If the agent isn't busy, there is no queue to inject into:
+
+- `/wait` with no text while idle replies that nothing is running
+- `/wait <message>` with text while idle is treated as a normal message
 
 ## `/stop` behavior
 
@@ -39,4 +42,4 @@ Immediately kills the current generation. The agent stops, and you can send a ne
 
 ## Legacy
 
-Bare `wait` (without slash) is a hard interrupt for backward compatibility. Use `/wait` for the non-interrupting version.
+There is no bare `wait` command — steering goes through `/wait` and `/steer`.

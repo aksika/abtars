@@ -13,26 +13,31 @@ describe("boot-memory integration", () => {
     h = await createHarness();
     const db = memoryDb(h.memory);
 
-    // Verify critical columns exist
-    const cols = db.prepare("PRAGMA table_info(extracted_memories)").all() as Array<{ name: string }>;
+    // Verify the new-model durable columns exist (#1939: legacy table gone).
+    const cols = db.prepare("PRAGMA table_info(long_term_memories)").all() as Array<{ name: string }>;
     const colNames = cols.map(c => c.name);
-    for (const expected of ["cited_count", "rejected_count", "recall_timestamps", "created_by", "emotion_tags", "topic", "tier"]) {
+    for (const expected of ["content", "content_original", "classification", "revision", "semantic_revision", "provenance", "evidence"]) {
       expect(colNames).toContain(expected);
     }
 
-    // Verify FTS indexes exist
+    // Verify the recall projection tables and FTS indexes exist.
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
     const tableNames = tables.map(t => t.name);
-    expect(tableNames).toContain("extracted_memories_fts");
-    expect(tableNames).toContain("content_en_trigram");
-    expect(tableNames).toContain("content_original_trigram");
+    expect(tableNames).toContain("long_term_memories");
+    expect(tableNames).toContain("recall_documents");
+    expect(tableNames).toContain("recall_fts");
+    expect(tableNames).toContain("recall_trigram_en");
+    expect(tableNames).toContain("recall_trigram_orig");
+    expect(tableNames).not.toContain("extracted_memories");
 
-    // Verify functional round-trip
+    // Verify functional round-trip through the owned contract
     await h.memory.editor.instantStore({
       userId: "u1", contentEn: "Boot test memory", contentOriginal: "boot",
-      memoryType: "fact", emotionScore: 0, emotionTags: "trust",
+      memoryType: "fact", emotionScore: 0,
     });
-    const result = await h.memory.recallSearch({ translated: ["boot", "test"], userId: "u1" });
-    expect(result.results.length).toBeGreaterThan(0);
+    const result = await h.recallOwned("recall_normal", "Boot test memory");
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items[0]!.excerpt).toContain("Boot test memory");
+    expect(result.status).toBe("evidence");
   });
 });

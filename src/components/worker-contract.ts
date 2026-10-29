@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ExecutorKind } from "./worker-executor-identity.js";
 
 export type CriterionStatus = "passed" | "failed" | "not_run" | "inconclusive";
 export type WorkerOutcome = "completed" | "failed" | "cancelled" | "timed_out";
@@ -23,6 +24,19 @@ export const MAX_WORKER_CLAIMS_COUNT = 30;
 export const MAX_WORKER_RISKS_COUNT = 20;
 export const MAX_CONTRACT_JSON_BYTES = 50_000;
 export const MAX_ENVELOPE_JSON_BYTES = 150_000;
+export const MAX_WORKSPACE_ALIAS_LENGTH = 128;
+
+/** #1638: bounded workspace-alias syntax. Rejects path separators, traversal,
+ * absolute paths, and NUL/control characters — the alias is a name, never a
+ * locator. */
+export function isValidWorkspaceAlias(alias: string): boolean {
+  if (typeof alias !== "string") return false;
+  if (alias.length === 0 || alias.length > MAX_WORKSPACE_ALIAS_LENGTH) return false;
+  if (/[\x00-\x1f\x7f/\\]/.test(alias)) return false;
+  if (alias.includes("..")) return false;
+  if (alias.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(alias)) return false;
+  return true;
+}
 
 export type ArtifactKind = "file" | "directory" | "report" | "logical";
 
@@ -62,6 +76,10 @@ export interface RetryContext {
   readonly prior_evidence_ids: readonly string[];
   readonly failed_criterion_ids: readonly string[];
   readonly unresolved_risks: readonly string[];
+  /** #1686: the repair item's required-evidence prose carried into the derived
+   * contract lineage. Explanatory only — it never substitutes for an artifact
+   * or verification command (worker evidence validation stays fail-closed). */
+  readonly required_evidence?: string;
 }
 
 export interface WorkerContractRevisionV1 {
@@ -83,6 +101,9 @@ export interface WorkerAcceptanceContractV1 {
   readonly verification_commands: readonly VerificationCommand[];
   readonly required_capabilities: readonly string[];
   readonly supports_root_criteria?: readonly string[];
+  /** #1638: typed coding marker. Present routes every attempt in this
+   * contract lineage to the Pi executor; absent routes to Spin. */
+  readonly workspace_alias?: string;
   readonly limits: {
     readonly max_duration_ms?: number;
     readonly max_tokens?: number;
@@ -121,7 +142,7 @@ export interface WorkerResultEnvelopeV1 {
     readonly ordinal: number;
     readonly contract_id: string;
     readonly contract_digest: string;
-    readonly executor_kind: "local_worker" | "remote_worker";
+    readonly executor_kind: ExecutorKind;
     readonly executor_id: string;
     readonly started_at: string;
     readonly finished_at: string;
@@ -195,8 +216,39 @@ function isShellString(s: string): boolean {
   return /[;&|`$(){}<>]/.test(s);
 }
 
-function hasTraversal(p: string): boolean {
-  return p.includes("..") || p.startsWith("/");
+/** #1656: one workspace-relative path language for contract refs and cwds. */
+
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function hasTraversalComponent(p: string): boolean {
+  const parts = p.replace(/\\/g, "/").split("/");
+  return parts.includes("..");
+}
+
+/** Leading-home forms that execFileSync/`path.resolve` never expand. */
+function hasHomeForm(p: string): boolean {
+  return p === "~" || p.startsWith("~/") || p.startsWith("~\\");
+}
+
+function hasControlChars(p: string): boolean {
+  return /[\x00-\x1f\x7f]/.test(p);
+}
+
+/**
+ * #1656: validate a workspace-relative path (artifact ref or command cwd).
+ * Rejects absolute POSIX/Windows paths, `..` components (not innocent
+ * filename substrings), leading-home forms, and NUL/control characters.
+ * The caller receives exactly one message naming the offending form.
+ */
+function workspacePathIssues(p: string): string[] {
+  const issues: string[] = [];
+  if (isAbsolutePath(p)) issues.push("absolute paths are not allowed — use a workspace-relative path");
+  if (hasTraversalComponent(p)) issues.push("path traversal is not allowed — use a workspace-relative path");
+  if (hasHomeForm(p)) issues.push("home paths are not expanded in verification — use a workspace-relative path");
+  if (hasControlChars(p)) issues.push("control characters are not allowed in paths");
+  return issues;
 }
 
 function sortedKeys(obj: Record<string, unknown>): Record<string, unknown> {
@@ -237,6 +289,35 @@ export function computeDigest(contract: Record<string, unknown>): string {
 export function computeEnvelopeDigest(envelope: Record<string, unknown>): string {
   const canonical = canonicalJson(sortedKeys(envelope));
   return createHash("sha256").update(canonical, "utf-8").digest("hex");
+}
+
+/**
+ * #1656: exact-contract acceptance predicate — the single W-card projection.
+ * True only when the envelope is completed, names the exact contract
+ * (id + digest), represents every contract criterion exactly once with no
+ * unknown criterion, and every criterion is `passed`. A completed execution
+ * never implies acceptance; this predicate decides the W card's terminal
+ * projection for both Spin and supervised Pi.
+ */
+export function acceptancePassed(
+  contract: WorkerAcceptanceContractV1,
+  envelope: WorkerResultEnvelopeV1 | undefined,
+): boolean {
+  if (!envelope) return false;
+  if (envelope.outcome !== "completed") return false;
+  if (envelope.attempt.contract_id !== contract.id || envelope.attempt.contract_digest !== contract.digest) return false;
+
+  const contractIds = new Set(contract.criteria.map(c => c.id));
+  if (envelope.criteria.length !== contract.criteria.length) return false;
+
+  const seen = new Set<string>();
+  for (const c of envelope.criteria) {
+    if (!contractIds.has(c.criterion_id)) return false;
+    if (seen.has(c.criterion_id)) return false;
+    seen.add(c.criterion_id);
+    if (c.status !== "passed") return false;
+  }
+  return true;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -350,8 +431,8 @@ export function validateContract(raw: unknown): ValidationResult {
           if ((aObj["ref"] as string).length > MAX_ARTIFACT_REF_LENGTH) {
             e.push(error("too_long", `${path}.ref`, `ref exceeds ${MAX_ARTIFACT_REF_LENGTH} characters`));
           }
-          if (hasTraversal(aObj["ref"] as string)) {
-            e.push(error("traversal", `${path}.ref`, "path traversal detected"));
+          for (const issue of workspacePathIssues(aObj["ref"] as string)) {
+            e.push(error("traversal", `${path}.ref`, `artifact ref rejected: ${issue}`));
           }
         }
         if (typeof aObj["required"] !== "boolean") {
@@ -421,6 +502,8 @@ export function validateContract(raw: unknown): ValidationResult {
               e.push(error("too_long", `${path}.argv[${j}]`, `argv element exceeds ${MAX_ARGV_LENGTH} characters`));
             } else if (isShellString(arg)) {
               e.push(error("shell_string", `${path}.argv[${j}]`, "shell metacharacters are not allowed in argv"));
+            } else if (hasHomeForm(arg)) {
+              e.push(error("bad_format", `${path}.argv[${j}]`, "home paths are not expanded in argv — use a workspace-relative path"));
             }
           }
         }
@@ -428,12 +511,8 @@ export function validateContract(raw: unknown): ValidationResult {
           if (!isNonEmptyString(cmdObj["cwd"] as string)) {
             e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
           } else {
-            const cwd = cmdObj["cwd"] as string;
-            if (hasTraversal(cwd)) {
-              e.push(error("traversal", `${path}.cwd`, "cwd must be a relative path without traversal"));
-            }
-            if (cwd.startsWith("/")) {
-              e.push(error("bad_format", `${path}.cwd`, "cwd must be a relative path, not absolute"));
+            for (const issue of workspacePathIssues(cmdObj["cwd"] as string)) {
+              e.push(error("traversal", `${path}.cwd`, `cwd rejected: ${issue}`));
             }
           }
         }
@@ -502,6 +581,20 @@ export function validateContract(raw: unknown): ValidationResult {
     }
   }
 
+  // #1638: workspace_alias is a typed bounded identifier when present.
+  if (obj["workspace_alias"] !== undefined) {
+    if (typeof obj["workspace_alias"] !== "string") {
+      errors.push(error("type_error", "$.workspace_alias", "workspace_alias must be a string when present"));
+    } else {
+      const trimmed = (obj["workspace_alias"] as string).trim();
+      if (trimmed.length === 0) {
+        errors.push(error("bad_format", "$.workspace_alias", "workspace_alias must be non-empty when present"));
+      } else if (!isValidWorkspaceAlias(trimmed)) {
+        errors.push(error("bad_format", "$.workspace_alias", `invalid workspace_alias "${trimmed}" — bounded alias required (no separators, traversal, or control characters)`));
+      }
+    }
+  }
+
   if (obj["limits"] !== undefined) {
     if (typeof obj["limits"] !== "object" || obj["limits"] === null) {
       errors.push(error("type_error", "$.limits", "limits must be an object"));
@@ -512,6 +605,9 @@ export function validateContract(raw: unknown): ValidationResult {
       }
       if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isInteger(limits["max_tokens"] as number) || (limits["max_tokens"] as number) <= 0)) {
         errors.push(error("type_error", "$.limits.max_tokens", "must be a positive integer"));
+      }
+      if (limits["max_cost"] !== undefined && (typeof limits["max_cost"] !== "number" || !Number.isFinite(limits["max_cost"] as number) || (limits["max_cost"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_cost", "must be a positive number"));
       }
     }
   }
@@ -614,6 +710,18 @@ export function normalizeContract(raw: unknown): NormalizeResult {
 
   const capabilitiesRaw = Array.isArray(obj["required_capabilities"]) ? (obj["required_capabilities"] as string[]) : [];
   const supportsRootCriteriaRaw = Array.isArray(obj["supports_root_criteria"]) ? (obj["supports_root_criteria"] as string[]) : undefined;
+  // #1686: revision lineage is part of the contract vocabulary — preserve it
+  // through normalization when present so repair/retry children keep their
+  // parent-contract and retry-context lineage instead of silently dropping it.
+  const revisionMetaRaw = (typeof obj["revision_meta"] === "object" && obj["revision_meta"] !== null)
+    ? (obj["revision_meta"] as Record<string, unknown>)
+    : undefined;
+  // Keep an explicitly supplied non-string value in the normalized object so
+  // validation rejects it instead of silently dropping the typed routing
+  // marker and accidentally turning a malformed coding contract into Spin.
+  const workspaceAliasRaw = typeof obj["workspace_alias"] === "string"
+    ? (obj["workspace_alias"] as string).trim()
+    : obj["workspace_alias"];
   const limitsRaw = (typeof obj["limits"] === "object" && obj["limits"] !== null) ? (obj["limits"] as Record<string, unknown>) : {};
   const provenanceRaw = (typeof obj["provenance"] === "object" && obj["provenance"] !== null) ? (obj["provenance"] as Record<string, unknown>) : undefined;
 
@@ -627,7 +735,11 @@ export function normalizeContract(raw: unknown): NormalizeResult {
     verification_commands,
     required_capabilities: capabilitiesRaw,
     limits: Object.keys(limitsRaw).length > 0
-      ? { max_duration_ms: limitsRaw["max_duration_ms"] as number | undefined, max_tokens: limitsRaw["max_tokens"] as number | undefined }
+      ? {
+          max_duration_ms: limitsRaw["max_duration_ms"] as number | undefined,
+          max_tokens: limitsRaw["max_tokens"] as number | undefined,
+          max_cost: limitsRaw["max_cost"] as number | undefined,
+        }
       : {},
     provenance: provenanceRaw
       ? {
@@ -640,6 +752,14 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   };
   if (supportsRootCriteriaRaw !== undefined && supportsRootCriteriaRaw.length > 0) {
     built["supports_root_criteria"] = supportsRootCriteriaRaw;
+  }
+  if (revisionMetaRaw !== undefined) {
+    built["revision_meta"] = revisionMetaRaw;
+  }
+  // An explicitly present alias — even whitespace-only — must reach the
+  // validator so "non-empty when present" is enforced, not silently dropped.
+  if (workspaceAliasRaw !== undefined) {
+    built["workspace_alias"] = workspaceAliasRaw;
   }
 
   const digest = computeDigest(built);
@@ -675,7 +795,7 @@ export function validateEnvelope(raw: unknown): ValidationResult {
     if (!isNonEmptyString(a["contract_id"])) errors.push(error("missing_field", "$.attempt.contract_id", "contract_id is required"));
     if (!isNonEmptyString(a["contract_digest"])) errors.push(error("missing_field", "$.attempt.contract_digest", "contract_digest is required"));
     const ek = a["executor_kind"];
-    if (ek !== "local_worker" && ek !== "remote_worker") errors.push(error("type_error", "$.attempt.executor_kind", 'must be "local_worker" or "remote_worker"'));
+    if (ek !== "agent" && ek !== "pi" && ek !== "remote") errors.push(error("type_error", "$.attempt.executor_kind", 'must be "agent", "pi" or "remote"'));
     if (!isNonEmptyString(a["executor_id"])) errors.push(error("missing_field", "$.attempt.executor_id", "executor_id is required"));
     if (!isNonEmptyString(a["started_at"])) errors.push(error("missing_field", "$.attempt.started_at", "started_at is required"));
     if (!isNonEmptyString(a["finished_at"])) errors.push(error("missing_field", "$.attempt.finished_at", "finished_at is required"));

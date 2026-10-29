@@ -65,8 +65,14 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
       startedAt: ctx.startedAt,
       bridgeLockPath: ctx.bridgeLockPath ?? "",
       heartbeatIntervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000,
+      // #1706: the already-captured live runtime (stable facade while
+      // composing) drives truthful memory rendering.
+      memoryRuntime: ctx.memoryRuntime,
     });
     let text = renderChatStatus(view);
+    // #1468: live emergency state from the service snapshot (not transport casts).
+    const emergency = ctx.emergencyExecution?.describeForOperator();
+    if (emergency) text += `\n\n${emergency}`;
     // #255: append sanitized env dump on /status full
     if (_text.trim().toLowerCase() === "full") {
       const { envDump } = await import("../env-schema.js");
@@ -157,38 +163,35 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   const arg = text.replace(/^\/healing\s*/, "").trim();
   const cmd = arg.toLowerCase().split(/\s+/)[0] ?? "";
 
-  if (cmd === "on") {
-    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = true;
-    await ctx.reply("🩺 Self-healing: ON");
-    logInfo(TAG, "Self-healer ON by user");
-    return true;
-  }
-  if (cmd === "off") {
-    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = false;
-    await ctx.reply("🩺 Self-healing: OFF");
-    logInfo(TAG, "Self-healer OFF by user");
+  // #1688 R1: no process-local on|off mutation — mode is configuration plus
+  // restart. Keep the bounded policy actions.
+  if (cmd === "on" || cmd === "off") {
+    await ctx.reply("🩺 Mode changes require configuration (`SELFHEAL_MODE=off|investigation|full`) plus restart. Status is read-only here.");
     return true;
   }
   if (cmd === "reset") {
-    const { resetAutofixState } = await import("../sha-tracker.js");
-    resetAutofixState();
-    await ctx.reply("🩺 Autofix state reset — all suppressed faults re-enabled.");
+    const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+    const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+    const { loadMergedFixes } = await import("../sha/sha-policy.js");
+    const store = new ShaIncidentStore(requireTaskDatabase());
+    const removed = store.resetFaultState("autofix-known") + store.resetFaultState("autofix-unknown");
+    await ctx.reply(`🩺 Autofix state reset — ${removed} cooldown row(s) cleared. ${loadMergedFixes().length} fix rules remain.`);
     return true;
   }
   if (cmd === "list") {
-    const { loadFixes } = await import("../sha-tracker.js");
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const fixes = loadFixes();
+    const { loadMergedFixes } = await import("../sha/sha-policy.js");
+    const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+    const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+    const fixes = loadMergedFixes();
+    const store = new ShaIncidentStore(requireTaskDatabase());
     if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
-    let state: Record<string, { totalRuns?: number }> = {};
-    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch {}
     const lines = fixes.map(f => {
       const v = f.verified === false ? " ⚠️" : "";
       const src = f.createdAt ? "(self)" : "(core)";
-      const runs = state[`autofix-known:${f.pattern}`]?.totalRuns ?? 0;
-      const runsText = runs > 0 ? ` [${runs}x]` : "";
-      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${runsText}`;
+      const hasVerifier = Array.isArray(f.verifyCommand) && f.verifyCommand.length > 0 ? " [verified]" : " [no verifier]";
+      const state = store.faultState("autofix-known", f.pattern);
+      const runs = state ? ` [${state.totalRuns}x]` : "";
+      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${hasVerifier}${runs}`;
     });
     await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
     return true;
@@ -196,7 +199,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   if (cmd === "approve") {
     const pattern = arg.slice(8).trim();
     if (!pattern) { await ctx.reply("Usage: /healing approve <pattern>"); return true; }
-    const { approveFix } = await import("../sha-tracker.js");
+    const { approveFix } = await import("../sha/sha-policy.js");
     const ok = approveFix(pattern);
     await ctx.reply(ok ? `✓ Approved: "${pattern}"` : `❌ Pattern not found in self-rules.`);
     return true;
@@ -204,15 +207,60 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   if (cmd === "disable") {
     const pattern = arg.slice(8).trim();
     if (!pattern) { await ctx.reply("Usage: /healing disable <pattern>"); return true; }
-    const { disableFix } = await import("../sha-tracker.js");
+    const { disableFix } = await import("../sha/sha-policy.js");
     const ok = disableFix(pattern);
     await ctx.reply(ok ? `✓ Disabled: "${pattern}"` : `❌ Pattern not found in self-rules.`);
     return true;
   }
+  if (cmd === "reload") {
+    // #1708: owner-only no-restart policy application. Re-resolves both files,
+    // atomically publishes the replacement snapshot, and reports bounded
+    // statuses plus effective guardrail values. Never prints raw policy JSON,
+    // paths, evidence, or secrets; never mutates SELFHEAL_MODE.
+    const { reloadEffectiveShaPolicy } = await import("../sha/sha-policy.js");
+    const { snapshot, diagnostics } = reloadEffectiveShaPolicy();
+    const fallbacks = diagnostics.fallbackFields;
+    const lines = [
+      "Policy reloaded (runtime mode unchanged).",
+      `Core: ${diagnostics.coreStatus} | Self: ${diagnostics.selfStatus}`,
+      fallbacks.length === 0
+        ? "Guardrail fallbacks: none"
+        : `Guardrail fallbacks (${fallbacks.length}): ${fallbacks.slice(0, 5).join(", ")}${fallbacks.length > 5 ? ", ..." : ""}`,
+      `Orc limits: card failed/no-progress ${snapshot.orc.sameCard.failedOrNoProgress.max}/${snapshot.orc.sameCard.failedOrNoProgress.windowMinutes}m`
+        + `, no-progress starts ${snapshot.orc.sameCard.startsWithoutProgress.max}/${snapshot.orc.sameCard.startsWithoutProgress.windowMinutes}m`,
+      `Orc bridge: ${snapshot.orc.bridge.starts5m}/5m, ${snapshot.orc.bridge.starts1h}/1h, ${snapshot.orc.bridge.newRunRows5m} rows/5m`,
+      `Log anomaly: notifyMain=${snapshot.logAnomaly.notifyMain ? "on" : "off"}`
+        + ` shaAllowed=${snapshot.logAnomaly.shaAllowed ? "on" : "off"}`
+        + ` minimumMode=${snapshot.logAnomaly.minimumMode}`
+        + ` cooldown=${snapshot.logAnomaly.cooldownMinutes}m`,
+    ];
+    if (!snapshot.logAdmissionAllowed) {
+      lines.push("Note: core policy problem — line-level and anomaly SHA admission disabled until a valid reload/restart.");
+    }
+    await ctx.reply(lines.join("\n"));
+    return true;
+  }
 
-  // Default: show status
-  const status = ctx.selfHealerTask?.enabled ? "ON" : "OFF";
-  await ctx.reply(`🩺 Self-healing: ${status}\nCommands: /healing [on|off|list|reset|approve|disable]`);
+  // Default: read-only operational status (R9).
+  const { getEnv } = await import("../env-schema.js");
+  const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+  const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+  const { isPolicyCorrupt } = await import("../sha/sha-policy.js");
+  const mode = getEnv().selfhealMode;
+  const store = new ShaIncidentStore(requireTaskDatabase());
+  const active = store.listNonTerminal();
+  const scanner = ctx.selfHealerTask ? "registered" : "not registered";
+  const lines = [
+    `🩺 Self-healing mode: ${mode}`,
+    `Log scanner: ${scanner} (mode must not be off)`,
+    `Policy: ${isPolicyCorrupt() ? "corrupt — log admission disabled" : "ok"}`,
+    `Active incidents: ${active.length}`,
+  ];
+  for (const incident of active.slice(0, 5)) {
+    lines.push(`  #${incident.id} ${incident.state} (${incident.mode}, ${incident.sourceScope.slice(0, 30)}, occ ${incident.occurrenceCount}${incident.rootCardId ? `, root #${incident.rootCardId}` : ""})`);
+  }
+  lines.push("Commands: /healing [list|reset|reload|approve|disable] — mode changes need config + restart.");
+  await ctx.reply(lines.join("\n"));
   return true;
 }
 
@@ -336,6 +384,19 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       const bk = readdirSync(bd).filter(f => f.startsWith("abtars-")).sort();
       if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
+  }
+
+  // #1664: quarantined reconcile cards — one line, only when non-empty.
+  // Best-effort store access: unavailability degrades to a bounded line and
+  // never fails the rest of /status. Signatures are redacted before storage.
+  try {
+    const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+    const quarantined = new ReconcileQuarantineStore().listQuarantined();
+    if (quarantined.length > 0) {
+      lines.push(`Quarantined: ${quarantined.map(r => `card ${r.cardId} (${r.failureCount} failures, ${r.errorSignature})`).join("; ")}`);
+    }
+  } catch {
+    lines.push("Quarantine: unavailable");
   }
 
   lines.push("");
@@ -555,6 +616,10 @@ export async function runDevUpdate(
 
     const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 180_000 });
     if (!build.ok) throw new Error(`build failed: ${build.stderr.slice(-400) || build.stdout.slice(-400)}`);
+    // #1746: preserve the established direct build flow while checking the
+    // emitted artifact before this update can deploy it.
+    const boundary = await execP("node", ["scripts/check-bundle-boundary.mjs"], { cwd: abtarsDir, timeout: 30_000 });
+    if (!boundary.ok) throw new Error(`build failed: ${boundary.stderr.slice(-400) || boundary.stdout.slice(-400)}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logWarn("update", `update aborted: ${msg}`);
@@ -600,7 +665,7 @@ export async function runNpmUpdate(
       ? `x Update timed out after 180s:\n${tail}`
       : "x Update timed out after 180s";
     logWarn("update", `npm ${channel} timed out`);
-    ctx.reply(msg).catch(() => {});
+    ctx.reply(msg).catch(err => logAndSwallow("update", "reply update timeout notice", err));
   }, 180_000);
 
   child.on("error", (err) => {
@@ -610,7 +675,7 @@ export async function runNpmUpdate(
     const code = (err as NodeJS.ErrnoException).code;
     const msg = `x Update failed to start${code ? ` (${code})` : ""}: ${err.message}`;
     logWarn("update", `npm ${channel} spawn error: ${err.message}`);
-    ctx.reply(msg).catch(() => {});
+    ctx.reply(msg).catch(err2 => logAndSwallow("update", "reply update spawn-error notice", err2));
   });
 
   child.on("close", (code, signal) => {
@@ -621,9 +686,9 @@ export async function runNpmUpdate(
     if (code === 0) return;
 
     if (code !== null && code !== 0) {
-      ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+      ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(err => logAndSwallow("update", "reply update exit-failure notice", err));
     } else if (code === null && signal) {
-      ctx.reply(`x Update terminated (signal ${signal})`).catch(() => {});
+      ctx.reply(`x Update terminated (signal ${signal})`).catch(err => logAndSwallow("update", "reply update signal notice", err));
     }
   });
 
@@ -691,11 +756,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       // else → exit code + stderr tail. Closes the class where ENOENT used to
       // route to the success branch.
       if (code === 0) {
-        ctx.reply("+ abmind update complete — check /software").catch(() => {});
+        ctx.reply("+ abmind update complete — check /software").catch(err => logAndSwallow("update", "reply abmind update success", err));
       } else if (code === null && !stderr) {
-        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(() => {});
+        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(err => logAndSwallow("update", "reply abmind binary-not-found notice", err));
       } else {
-        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(err => logAndSwallow("update", "reply abmind update failure", err));
       }
     });
     return true;

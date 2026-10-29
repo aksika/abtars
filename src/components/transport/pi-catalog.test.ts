@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Model, Api, Models } from "@earendil-works/pi-ai";
 
 // Mock pi-installation so loadPiModels() never hits the real filesystem.
@@ -7,10 +7,12 @@ vi.mock("../../components/pi-installation.js", () => ({ resolvePiInstallation: v
 import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
   piCostRatesByModel,
-  loadPiModels, getWarmedModels, isWarmed,
+  loadPiModels, refreshPiCatalog, getWarmedModels, isWarmed,
+  logUnmappedProviderOnce, _resetUnmappedWarnForTest,
   _resetForTest, _setWarmedForTest,
 } from "./pi-catalog.js";
 import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
+import * as logger from "../logger.js";
 
 function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   return {
@@ -26,8 +28,21 @@ function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
  * pi-catalog uses. The official Models interface has ~13 methods (stream/complete/
  * getProviders etc.) but the catalog only calls getModel/getModels/getProvider/
  * getAuth/refresh. The `as unknown as Models` cast skips implementing the
- * uncovered methods — they are never reached from the production code path. */
-function fakeModels(opts: Partial<Models> = {}): Models {
+ * uncovered methods — they are never reached from the production code path.
+ * `list` is the helper's own inventory (not a Models member) feeding the
+ * default method implementations below. */
+interface FakeModelsOpts {
+  list?: Model<Api>[];
+  getModel?: Models["getModel"];
+  getModels?: Models["getModels"];
+  getProvider?: Models["getProvider"];
+  // Model-form only: pi-catalog calls getAuth(model), never getAuth(providerId).
+  // The auth value is opaque to the catalog (truthiness + rejection only), so
+  // the fake returns unknown rather than a fabricated AuthResult.
+  getAuth?: (model: Model<Api>) => Promise<unknown>;
+  refresh?: Models["refresh"];
+}
+function fakeModels(opts: FakeModelsOpts = {}): Models {
   const list = opts.list ?? [fakeModel()];
   return {
     getModel: opts.getModel ?? ((_p: string, id: string) => list.find(m => m.id === id)),
@@ -49,6 +64,46 @@ describe("mapProviderName (C2)", () => {
     expect(mapProviderName("kiro")).toBeNull();
     expect(mapProviderName("9router")).toBeNull();
   });
+  it("covers every pi 0.85.1 KnownProvider id (#1747 set completion)", () => {
+    for (const id of ["baseten", "radius", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"]) {
+      expect(mapProviderName(id)).toBe(id);
+    }
+  });
+});
+
+describe("logUnmappedProviderOnce (#1747 diagnostic)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetUnmappedWarnForTest();
+    warnSpy = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("warns exactly once per unmapped provider per process", () => {
+    logUnmappedProviderOnce("my-custom-gateway");
+    logUnmappedProviderOnce("my-custom-gateway");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/my-custom-gateway/);
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/no pi mapping/);
+  });
+
+  it("warns separately for distinct providers", () => {
+    logUnmappedProviderOnce("a");
+    logUnmappedProviderOnce("b");
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not warn for a known pi provider", () => {
+    logUnmappedProviderOnce("openai");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("never throws", () => {
+    expect(() => logUnmappedProviderOnce("weird name")).not.toThrow();
+  });
 });
 
 describe("resolveModelMeta (C1)", () => {
@@ -64,8 +119,8 @@ describe("resolveModelMeta (C1)", () => {
   it("returns pi metadata (source=pi) when resolvable", () => {
     const m = fakeModel({ contextWindow: 200000, maxTokens: 12000, cost: { input: 0.6, output: 2.2, cacheRead: 0.1, cacheWrite: 3 } });
     const out = resolveModelMeta("glm-4.6", "zai", fakeModels({ list: [m] }));
-    // #1614: pi rates are $/1M; resolveModelMeta normalizes to $/token.
-    expect(out).toEqual({ contextWindow: 200000, maxOutput: 12000, cost: { input: 0.6 / 1_000_000, output: 2.2 / 1_000_000 }, source: "pi" });
+    // #1830: pi rates are $/1M and pass through untouched.
+    expect(out).toEqual({ contextWindow: 200000, maxOutput: 12000, cost: { input: 0.6, output: 2.2 }, source: "pi" });
   });
 });
 
@@ -100,16 +155,16 @@ describe("modelsForProviderSync (C5 picker)", () => {
     }));
     const out = modelsForProviderSync("zai");
     expect(out?.map(m => m.id)).toEqual(["glm-4.6", "glm-4.5"]);
-    expect(out?.[0]?.cost).toEqual({ input: 0.6 / 1_000_000, output: 2.2 / 1_000_000 });
+    expect(out?.[0]?.cost).toEqual({ input: 0.6, output: 2.2 });
   });
-  it("normalizes pi $/1M rates to $/token — the ModelCost contract (#1614)", () => {
+  it("passes pi $/1M rates through untouched — the ModelCost contract (#1830)", () => {
     // deepseek-v4-flash on opencode-go: $0.14/1M input, $0.28/1M output.
     _setWarmedForTest(fakeModels({
       list: [fakeModel({ id: "deepseek-v4-flash", provider: "opencode-go", cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 } })],
     }));
     const out = modelsForProviderSync("opencode-go");
-    expect(out?.[0]?.cost.input).toBe(0.14 / 1_000_000);
-    expect(out?.[0]?.cost.output).toBe(0.28 / 1_000_000);
+    expect(out?.[0]?.cost.input).toBe(0.14);
+    expect(out?.[0]?.cost.output).toBe(0.28);
   });
   it("returns null for an unmapped provider or cold cache", () => {
     _setWarmedForTest(fakeModels());
@@ -174,7 +229,7 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
@@ -193,7 +248,7 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
@@ -203,5 +258,69 @@ describe("loadPiModels (C8)", () => {
     await loadPiModels();
     await loadPiModels();
     expect(mockedResolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("refreshPiCatalog (#1875)", () => {
+  const mockedResolve = vi.mocked(resolvePiInstallation);
+  const mockedLoadModule = vi.mocked(loadPiModule);
+  const compatibleInstallation = {
+    executable: "/usr/bin/pi",
+    packageRoot: "/usr/lib/pi-coding-agent",
+    version: "0.85.1",
+    source: "path",
+    pinStatus: "at-pin",
+    moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
+  } as const;
+
+  beforeEach(() => {
+    _resetForTest();
+    mockedResolve.mockReset();
+    mockedLoadModule.mockReset();
+  });
+
+  it("picks up new models without a restart", async () => {
+    const v1 = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
+    const v2 = fakeModels({
+      list: [fakeModel({ id: "glm-4.6" }), fakeModel({ id: "glm-4.7" })],
+    });
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => v1 });
+    await loadPiModels();
+    expect(modelsForProviderSync("zai")?.map(m => m.id)).toEqual(["glm-4.6"]);
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => v2 });
+    await refreshPiCatalog();
+    expect(modelsForProviderSync("zai")?.map(m => m.id)).toEqual(["glm-4.6", "glm-4.7"]);
+    expect(mockedLoadModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds local-only: passes allowNetwork:false to the catalog refresh", async () => {
+    const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => fakeModels({ refresh }) });
+    await refreshPiCatalog();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith({ allowNetwork: false });
+  });
+
+  it("shares one in-flight rebuild across concurrent callers", async () => {
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    let loads = 0;
+    mockedLoadModule.mockImplementation(async () => {
+      loads++;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      return { builtinModels: () => fakeModels() };
+    });
+    const [a, b] = await Promise.all([refreshPiCatalog(), refreshPiCatalog()]);
+    expect(a).toBe(b);
+    expect(loads).toBe(1);
+  });
+
+  it("keeps the previous snapshot when the re-warm fails", async () => {
+    const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
+    _setWarmedForTest(fm);
+    mockedResolve.mockReturnValue({ state: "absent" });
+    await expect(refreshPiCatalog()).resolves.toBe(fm);
+    expect(getWarmedModels()).toBe(fm);
   });
 });

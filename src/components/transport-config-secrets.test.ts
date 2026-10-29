@@ -238,3 +238,63 @@ describe("#1354 — writer + backup safety", () => {
     expect(all).not.toContain(SENTINEL);
   });
 });
+
+describe("#1757 — Pi-managed authSource mode", () => {
+  const PI_MANAGED = {
+    ...SAFE,
+    routes: {
+      "pi-ai": {
+        agents: { main: { model: "pi-test-model", provider: "piman" } },
+        fallbacks: [],
+      },
+    },
+    providers: {
+      piman: { transport: "api", endpoint: "https://pi.test/v1", authSource: "pi" },
+    },
+  };
+
+  it("accepts authSource pi on api providers without apiKeyEnv", () => {
+    const r = validateTransportConfig(PI_MANAGED as unknown as Record<string, unknown>);
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects non-pi authSource values", () => {
+    const r = validateTransportConfig({
+      ...PI_MANAGED,
+      providers: { piman: { transport: "api", endpoint: "https://pi.test/v1", authSource: "keys" } },
+    } as unknown as Record<string, unknown>);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.issues.some(i => i.code === "invalid_provider_field" && i.path === "providers.piman.authSource")).toBe(true);
+    }
+  });
+
+  it("rejects authSource pi combined with apiKeyEnv", () => {
+    const r = validateTransportConfig({
+      ...PI_MANAGED,
+      providers: { piman: { transport: "api", endpoint: "https://pi.test/v1", authSource: "pi", apiKeyEnv: "PI_KEY" } },
+    } as unknown as Record<string, unknown>);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.issues.some(i => i.code === "invalid_provider_field" && i.path === "providers.piman.authSource")).toBe(true);
+    }
+  });
+
+  it("rejects authSource pi on non-api transports", () => {
+    for (const transport of ["acp", "tmux"]) {
+      const r = validateTransportConfig({
+        ...PI_MANAGED,
+        providers: { piman: { transport, authSource: "pi" } },
+      } as unknown as Record<string, unknown>);
+      expect(r.ok, transport).toBe(false);
+      if (!r.ok) {
+        expect(r.issues.some(i => i.code === "invalid_provider_field" && i.path === "providers.piman.authSource"), transport).toBe(true);
+      }
+    }
+  });
+
+  it("serializer preserves authSource", () => {
+    const out = serializeTransportConfig(PI_MANAGED as unknown as Parameters<typeof serializeTransportConfig>[0]);
+    expect(JSON.parse(out).providers.piman.authSource).toBe("pi");
+  });
+});

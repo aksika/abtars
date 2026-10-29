@@ -1,15 +1,17 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { busyGuardMiddleware } from "./busy-guard.js";
 import type { ManagedSession } from "../spin-types.js";
+import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../../types/platform.js";
 
 function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   return {
     id: "1_A_01", userId: "master", platform: "tg", chatId: 100,
     delivery: "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
-    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
     ...overrides,
   };
 }
@@ -62,14 +64,6 @@ describe("busyGuardMiddleware", () => {
     expect(ctx._session.queue).toHaveLength(1);
   });
 
-  it("shows coffee message when compacting", async () => {
-    const ctx = makeCtx({ busy: true, compacting: true });
-    await mockSpin(ctx._session);
-    const next = vi.fn();
-    await busyGuardMiddleware(ctx, next);
-    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("coffee"), expect.any(Object));
-  });
-
   it("bare wait interrupts through the session-aware Spin operation (legacy compat)", async () => {
     const ctx = makeCtx({ busy: true }, { text: "wait" });
     ctx.text = "wait";
@@ -96,6 +90,40 @@ describe("busyGuardMiddleware", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("/wait queues into the generation-bound instruction queue while busy (#1768)", async () => {
+    const ctx = makeCtx(
+      { busy: true, activeExecutionId: "exec_1", steeringAccepting: true, instructionQueue: [] },
+      { text: "/wait check the logs" },
+    );
+    ctx.text = "/wait check the logs";
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx._session.instructionQueue).toHaveLength(1);
+    expect(ctx._session.instructionQueue[0]!.text).toBe("[USER] Wait! check the logs");
+    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", "📌 Noted.", expect.any(Object));
+    // Proves the consumer path: spin's steering drain can lease it.
+    const { leaseInstructions } = await import("../session-instruction-queue.js");
+    expect(leaseInstructions(ctx._session, "steer")).not.toBeNull();
+  });
+
+  it("/wait reports rejection instead of a false ack when not steerable (#1768)", async () => {
+    const ctx = makeCtx(
+      { busy: true, steeringAccepting: false, instructionQueue: [] },
+      { text: "/wait check the logs" },
+    );
+    ctx.text = "/wait check the logs";
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx._session.instructionQueue).toHaveLength(0);
+    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Wait not accepted"), expect.any(Object));
+  });
+
   it("skips generic notification when ctx.deferReply is set", async () => {
     const ctx = makeCtx({ busy: true });
     await mockSpin(ctx._session);
@@ -105,5 +133,30 @@ describe("busyGuardMiddleware", () => {
     expect(ctx.handled).toBe(true);
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
     expect(ctx._session.queue).toHaveLength(1);
+  });
+
+  // #1724: trusted scheduled-announcement events use an immediate, no-queue
+  // admission policy — a busy Main session rejects without queue mutation so
+  // the Kanban delivery poll keeps ownership of retry semantics.
+  it("rejects a trusted scheduled announcement on a busy session without queueing (#1724)", async () => {
+    const ctx = makeCtx({ busy: true });
+    ctx.msg = { ...ctx.msg, internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: "saved form" } };
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx._session.queue).toHaveLength(0);
+    expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("passes a trusted scheduled announcement through when the session is not busy", async () => {
+    const ctx = makeCtx({ busy: false });
+    ctx.msg = { ...ctx.msg, internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: "saved form" } };
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(next).toHaveBeenCalled();
+    expect(ctx.handled).toBe(false);
   });
 });

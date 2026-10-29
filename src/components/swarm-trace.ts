@@ -15,6 +15,10 @@ export interface SwarmTraceEvent {
   reviewCase?: string;
   decision?: string;
   reason?: string;
+  /** #1644: rejected-mutation operation label (bounded). */
+  operation?: string;
+  /** #1644: scheduled run identity when present. */
+  run?: string;
 }
 
 function cap(s: string | undefined | null, max: number): string | undefined {
@@ -36,6 +40,8 @@ export function logSwarmTrace(event: SwarmTraceEvent): void {
   if (event.reviewCase != null) safeEvent.reviewCase = cap(event.reviewCase, MAX_FIELD_LEN);
   if (event.decision != null) safeEvent.decision = cap(event.decision, MAX_FIELD_LEN);
   if (event.reason != null) safeEvent.reason = cap(event.reason, MAX_FIELD_LEN);
+  if (event.operation != null) safeEvent.operation = cap(event.operation, MAX_FIELD_LEN);
+  if (event.run != null) safeEvent.run = cap(event.run, MAX_FIELD_LEN);
   let serialized = JSON.stringify(safeEvent);
   if (serialized.length > MAX_SERIALIZED) {
     safeEvent._truncated = true;

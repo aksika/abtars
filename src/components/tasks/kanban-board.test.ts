@@ -7,6 +7,13 @@ import { vi } from "vitest";
 let TEST_HOME: string;
 let mod: typeof import("./kanban-board.js");
 
+// #1742: noUncheckedIndexedAccess — narrow before property access (R5).
+function first<T>(arr: T[]): T {
+  const v = arr[0];
+  if (v === undefined) throw new Error("expected a non-empty result");
+  return v;
+}
+
 beforeEach(async () => {
   vi.resetModules();
   TEST_HOME = join(tmpdir(), `kanban-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -25,10 +32,10 @@ describe("kanban-board", () => {
     const id = mod.kanbanEnqueue("My task", "task", "finance-daily");
     expect(id).toBe(1);
     const cards = mod.kanbanList("*");
-    expect(cards[0].title).toBe("My task");
-    expect(cards[0].status).toBe("queued");
-    expect(cards[0].source).toBe("task");
-    expect(cards[0].source_id).toBe("finance-daily");
+    expect(first(cards).title).toBe("My task");
+    expect(first(cards).status).toBe("queued");
+    expect(first(cards).source).toBe("task");
+    expect(first(cards).source_id).toBe("finance-daily");
   });
 
   it("transitions queued → running → done", () => {
@@ -39,9 +46,9 @@ describe("kanban-board", () => {
     mod.kanbanComplete(id, "/tmp/result.md", "Report generated successfully");
     const cards = mod.kanbanList("done");
     expect(cards).toHaveLength(1);
-    expect(cards[0].result_path).toBe("/tmp/result.md");
-    expect(cards[0].result_summary).toBe("Report generated successfully");
-    expect(cards[0].completed_at).not.toBeNull();
+    expect(first(cards).result_path).toBe("/tmp/result.md");
+    expect(first(cards).result_summary).toBe("Report generated successfully");
+    expect(first(cards).completed_at).not.toBeNull();
   });
 
   it("does not emit a second completion for an already-done card", () => {
@@ -69,7 +76,7 @@ describe("kanban-board", () => {
 
     const cards = mod.kanbanList("failed");
     expect(cards).toHaveLength(1);
-    expect(cards[0].error).toBe("timeout after 30min");
+    expect(first(cards).error).toBe("timeout after 30min");
   });
 
   it("kanbanPending returns done cards with < 3 attempts", () => {
@@ -79,7 +86,7 @@ describe("kanban-board", () => {
 
     const pending = mod.kanbanPending();
     expect(pending).toHaveLength(1);
-    expect(pending[0].id).toBe(id);
+    expect(first(pending).id).toBe(id);
   });
 
   it("delivery flow: delivering → delivered", () => {
@@ -93,7 +100,7 @@ describe("kanban-board", () => {
 
     mod.kanbanMarkDelivered(id);
     expect(mod.kanbanList("delivered")).toHaveLength(1);
-    expect(mod.kanbanList("delivered")[0].delivered_at).not.toBeNull();
+    expect(first(mod.kanbanList("delivered")).delivered_at).not.toBeNull();
   });
 
 
@@ -107,7 +114,7 @@ describe("kanban-board", () => {
 
     const active = mod.kanbanList();
     expect(active).toHaveLength(1);
-    expect(active[0].title).toBe("Active");
+    expect(first(active).title).toBe("Active");
   });
 
   it("kanbanList with * returns everything", () => {
@@ -126,9 +133,9 @@ describe("kanban-board", () => {
     mod.kanbanUpdate(id, { priority: "HIGH", labels: "urgent,finance", due_at: "2026-06-10T12:00:00" });
 
     const cards = mod.kanbanList("*");
-    expect(cards[0].priority).toBe("HIGH");
-    expect(cards[0].labels).toBe("urgent,finance");
-    expect(cards[0].due_at).toBe("2026-06-10T12:00:00");
+    expect(first(cards).priority).toBe("HIGH");
+    expect(first(cards).labels).toBe("urgent,finance");
+    expect(first(cards).due_at).toBe("2026-06-10T12:00:00");
   });
 
   it("rejects runtime lifecycle-field updates even when type checks are bypassed", () => {
@@ -185,6 +192,40 @@ describe("kanban-board", () => {
     expect(mod.kanbanList("*")).toHaveLength(2);
   });
 
+  it("kanbanCleanup retains pi_runs-linked and live-child parents under FK enforcement (#1918)", () => {
+    // Production enforces PRAGMA foreign_keys = ON (phase-pi-executor) —
+    // the old single-statement purge aborted here with FOREIGN KEY failed.
+    mod._kanbanExecForTest("PRAGMA foreign_keys = ON");
+    mod._kanbanExecForTest(
+      "CREATE TABLE pi_runs (id TEXT PRIMARY KEY, card_id INTEGER UNIQUE NOT NULL REFERENCES kanban_board(id))",
+    );
+
+    const lone = mod.kanbanEnqueue("Old lone", "task");
+    const linked = mod.kanbanEnqueue("Old linked", "task");
+    const parent = mod.kanbanEnqueue("Old parent", "task");
+    const child = mod.kanbanEnqueue("Old child", "task");
+    const liveParent = mod.kanbanEnqueue("Old live-parent", "task");
+    const liveChild = mod.kanbanEnqueue("Live child", "task");
+    for (const id of [lone, linked, parent, child, liveParent]) {
+      mod.kanbanRunning(id);
+      mod.kanbanComplete(id, null, "x");
+    }
+    mod.kanbanRunning(liveChild);
+    mod._kanbanExecForTest("UPDATE kanban_board SET parent_id = ? WHERE id = ?", [parent, child]);
+    mod._kanbanExecForTest("UPDATE kanban_board SET parent_id = ? WHERE id = ?", [liveParent, liveChild]);
+    mod._kanbanExecForTest(
+      "UPDATE kanban_board SET completed_at = datetime('now', '-10 days') WHERE id IN (?, ?, ?, ?, ?)",
+      [lone, linked, parent, child, liveParent],
+    );
+    mod._kanbanExecForTest("INSERT INTO pi_runs (id, card_id) VALUES ('run-1', ?)", [linked]);
+
+    expect(mod.kanbanCleanup(7)).toBe(3);
+    const remaining = mod.kanbanList("*").map(c => c.id).sort((a, b) => a - b);
+    expect(remaining).toEqual([linked, liveParent, liveChild].sort((a, b) => a - b));
+    // Retained links stay intact: pi_runs row and live child's parent survive.
+    expect(mod.kanbanGetCard(liveChild)!.parent_id).toBe(liveParent);
+  });
+
   it("enqueue with options sets priority, labels, type", () => {
     mod.kanbanEnqueue("Rich card", "user", undefined, {
       priority: "HIGH",
@@ -193,7 +234,7 @@ describe("kanban-board", () => {
       due_at: "2026-06-09T00:00:00",
       notes: "Do this carefully",
     });
-    const card = mod.kanbanList("*")[0];
+    const card = first(mod.kanbanList("*"));
     expect(card.priority).toBe("HIGH");
     expect(card.type).toBe("research");
     expect(card.labels).toBe("ai,finance");
@@ -203,19 +244,19 @@ describe("kanban-board", () => {
 
   it("enqueue accepts lowercase priority and normalizes to uppercase", () => {
     mod.kanbanEnqueue("Lowercase priority", "task", undefined, { priority: "medium" });
-    const card = mod.kanbanList("*")[0];
+    const card = first(mod.kanbanList("*"));
     expect(card.priority).toBe("MEDIUM");
   });
 
   it("enqueue accepts mixed-case priority and normalizes to uppercase", () => {
     mod.kanbanEnqueue("Mixed case priority", "task", undefined, { priority: "High" });
-    const card = mod.kanbanList("*")[0];
+    const card = first(mod.kanbanList("*"));
     expect(card.priority).toBe("HIGH");
   });
 
   it("enqueue falls back to MEDIUM for an invalid priority value", () => {
     mod.kanbanEnqueue("Invalid priority", "task", undefined, { priority: "urgent" });
-    const card = mod.kanbanList("*")[0];
+    const card = first(mod.kanbanList("*"));
     expect(card.priority).toBe("MEDIUM");
   });
 });
@@ -270,9 +311,11 @@ describe("kanbanRetryOrFail (#1411)", () => {
     const result = mod.kanbanRetryOrFail(id, "token budget exceeded");
     expect(result).toBe("retrying");
     const card = mod.kanbanList("*")[0]!;
-    expect((card as any).retry_count).toBe(1);
-    expect((card as any).next_retry_at).toBeTruthy();
-    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+    expect(card.retry_count).toBe(1);
+    const retryAt = card.next_retry_at;
+    expect(retryAt).toBeTruthy();
+    if (retryAt === null) throw new Error("expected next_retry_at to be set");
+    expect(new Date(retryAt).getTime()).toBeGreaterThan(Date.now());
     expect(card.status).toBe("queued");
   });
 
@@ -281,13 +324,17 @@ describe("kanbanRetryOrFail (#1411)", () => {
     mod.kanbanRunning(id);
     mod.kanbanRetryOrFail(id, "first");
     const c1 = mod.kanbanList("*")[0]!;
-    const d1 = new Date((c1 as any).next_retry_at).getTime();
+    const d1raw = c1.next_retry_at;
+    if (d1raw === null) throw new Error("expected next_retry_at to be set");
+    const d1 = new Date(d1raw).getTime();
     // Run again
     mod.kanbanRunning(id);
     mod.kanbanRetryOrFail(id, "second");
     const c2 = mod.kanbanList("*")[0]!;
-    const d2 = new Date((c2 as any).next_retry_at).getTime();
-    expect((c2 as any).retry_count).toBe(2);
+    const d2raw = c2.next_retry_at;
+    if (d2raw === null) throw new Error("expected next_retry_at to be set");
+    const d2 = new Date(d2raw).getTime();
+    expect(c2.retry_count).toBe(2);
     expect(d2 - d1).toBeGreaterThanOrEqual(9_000); // 10s backoff vs 20s backoff
   });
 
@@ -317,9 +364,11 @@ describe("kanbanRetryOrFail (#1411)", () => {
     vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
     const mod2 = await import("./kanban-board.js");
     const card = mod2.kanbanList("*")[0]!;
-    expect((card as any).retry_count).toBe(1);
-    expect((card as any).next_retry_at).toBeTruthy();
-    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+    expect(card.retry_count).toBe(1);
+    const reopenRetryAt = card.next_retry_at;
+    expect(reopenRetryAt).toBeTruthy();
+    if (reopenRetryAt === null) throw new Error("expected next_retry_at to survive reopen");
+    expect(new Date(reopenRetryAt).getTime()).toBeGreaterThan(Date.now());
   });
 });
 
@@ -335,7 +384,7 @@ describe("kanbanPromoteDueRetry (#1546)", () => {
     const card = mod.kanbanGetCard(id)!;
     expect(card.status).toBe("running");
     expect(card.next_retry_at).toBeNull();
-    expect(card.retry_count).toBe(before.retry_count); // preserved
+    expect(card.retry_count).toBe(before.retry_count); // #1546: promotion clears only the marker
     expect(card.error).toBe(before.error); // preserved
   });
 
@@ -454,10 +503,10 @@ describe("kanbanSearch (#1298)", () => {
 });
 
 describe("kanban-board #1516 bounded agent orchestration", () => {
-  it("rejects an invalid maxAgents at the write boundary", () => {
-    const id = mod.kanbanEnqueue("Capped", "task", undefined, { type: "O", maxAgents: 5 });
-    expect(id).toBe(0);
-    expect(mod.kanbanList("*")).toHaveLength(0);
+  it("clamps an over-configured maxAgents at the write boundary instead of rejecting the card", () => {
+    const id = mod.kanbanEnqueue("Capped", "task", undefined, { type: "O", maxAgents: 7 });
+    expect(id).toBeGreaterThan(0);
+    expect(mod.kanbanGetCard(id)!.max_agents).toBe(6);
   });
 
   it("admits up to maxAgents-1 concurrent workers and refuses the next", () => {
@@ -768,7 +817,7 @@ describe("#1590 transition matrix", () => {
     // one database file must serialize on the CAS predicate.
     const { resolveNativeDep } = await import("../../utils/lazy-require.js");
     const Database = resolveNativeDep("better-sqlite3") as new (p: string) => {
-      prepare(sql: string): { run(...p: unknown[]): { changes: number }; get(...p: unknown[]): Record<string, unknown> | undefined; all(...p: unknown[]): unknown[] };
+      prepare(sql: string): { run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint }; get(...p: unknown[]): Record<string, unknown> | undefined; all(...p: unknown[]): unknown[] };
       exec(sql: string): void;
       transaction<T>(fn: () => T): () => T;
       close(): void;
@@ -780,7 +829,7 @@ describe("#1590 transition matrix", () => {
       // Seed a queued card through the module singleton, then race two
       // transitions from separate connections.
       const id = mod.kanbanEnqueue("two-conn", "test");
-      const wrap = (d: { prepare(sql: string): { run(...p: unknown[]): { changes: number }; get(...p: unknown[]): unknown; all(...p: unknown[]): unknown[] }; exec(sql: string): void; transaction<T>(fn: () => T): unknown }) =>
+      const wrap = (d: { prepare(sql: string): { run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint }; get(...p: unknown[]): unknown; all(...p: unknown[]): unknown[] }; exec(sql: string): void; transaction<T>(fn: () => T): unknown }) =>
         mod.wrapTaskDatabase(d);
       const tx1 = wrap(conn);
       const outcome1 = mod.kanbanTransition({

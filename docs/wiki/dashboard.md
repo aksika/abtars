@@ -9,7 +9,7 @@ A localhost web UI for monitoring your bridge in real-time.
 ENABLE_DASHBOARD=true
 ```
 
-Starts automatically on boot. Default port: 3000 (override with `DASHBOARD_PORT`).
+Starts automatically on boot. Default port: 3000 (override with `WEB_PORT`).
 
 ## Features
 
@@ -44,12 +44,13 @@ The dashboard serves data via HTTP:
 | Endpoint | Data |
 |----------|------|
 | `/api/status` | Bridge health, uptime, model |
-| `/api/memory/stats` | Memory counts by type |
-| `/api/memory/all` | Full memory set (for 3D viz) |
+| `/api/memory/search` | Memory search |
 | `/api/cron` | Task list with status |
 | `/api/logs` | Recent log entries |
 
-WebSocket pushes live updates (ctx%, new messages, task completions).
+Task pause/resume/trigger and service start/stop are `POST` endpoints
+under the same paths. WebSocket pushes live updates (ctx%, new messages,
+task completions).
 
 ## Access
 

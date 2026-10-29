@@ -4,18 +4,20 @@
  * active recall, large-message interception, injection scan.
  */
 
-import { logInfo, logDebug, logTrace } from "../logger.js";
+import { logInfo, logDebug, logTrace, logWarn } from "../logger.js";
+import { estimateTokensFromChars } from "../transport/token-budget.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation } from "../memory-runtime.js";
+import { attemptMemoryMutation, asSessionSoulBundle } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
-import type { InboundMessage } from "../../types/platform.js";
+import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
-import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
+import { sessionTypeOf } from "../spin-types.js";
+
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -28,15 +30,19 @@ export interface BuildPromptDeps {
   contextPercent: number;
   maxContext?: number;
   isAcp?: boolean;
+  /** #1940: the turn runs on the Pi AgentSession route (role SOUL lives in
+   *  the Pi session system prompt, never in turn text). */
+  piRoute?: boolean;
+  /** #1940: the Pi route already holds a live Pi session for this key. A
+   *  missing one is a session start: its first message carries hydration. */
+  piSessionLive?: boolean;
 }
 
 export interface BuildPromptResult {
   prompt: string;
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
-  recalledHits?: Array<{ id: number; contentEn: string }>;
-  /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
-  durableContextIntent: DurableContextIntent;
+  recalledHits?: Array<{ ref: string; contentEn: string }>;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
   currentTurn?: {
     rawText: string;
@@ -95,7 +101,7 @@ export async function buildPrompt(
           const b64 = buf.toString("base64");
           const maxCtxPct = parseInt(process.env["IMAGE_MAX_CONTEXT_PCT"] ?? "30", 10);
           const maxContext = deps.maxContext ?? 128000;
-          const imgTokens = Math.ceil(b64.length / 4);
+          const imgTokens = estimateTokensFromChars(b64.length);
           if (imgTokens <= maxContext * (maxCtxPct / 100)) {
             imageContent = { mime, base64: b64, path: msg.mediaPath };
           } else {
@@ -122,17 +128,38 @@ export async function buildPrompt(
 
   // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
-  const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  const isSessionStart = !entry || entry.pendingStart || !entry.seen
+    || (deps.piRoute === true && deps.piSessionLive === false);
+  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  // #1940: on the Pi route the role SOUL bundle is the Pi session system
+  // prompt (captured once at session creation, surviving Pi compaction), so
+  // turn text never repeats it. Other routes keep the session-start bundle.
+  const omitSoulForPiRoute = deps.piRoute === true;
   if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
         identity: { principalId: userId, executionId: sessionKey },
-        maxChars: deps.maxContext ? Math.floor(deps.maxContext * 0.15) : undefined,
+        modelContextTokens: deps.maxContext,
       });
-      const sessionParts = [sessionCtx.coreKnowledge, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
+      // #1869 — split by mutability: session-start owns profile/notes/
+      // coreFacts via the addressable parts map (fresh read every session),
+      // while SOUL.md + memory-tools.md stay in the boot system prompt.
+      // Older daemons omit parts: fall back to the legacy joined field, which
+      // still yields a working full bundle.
+      const parts = asSessionSoulBundle(sessionCtx.parts);
+      // #1940: on the Pi route the SOUL core blocks live in the session
+      // system prompt — session-start carries only hydration (recall +
+      // wake-up). The ACP route keeps the full bundle.
+      const coreBlocks = omitSoulForPiRoute
+        ? []
+        : (parts !== undefined
+          ? [parts.profile, parts.notes, parts.coreFacts]
+          : [sessionCtx.coreKnowledge]);
+      const sessionParts = [...coreBlocks, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
       if (sessionParts.length > 0) volatileContext.push({ kind: "session_start", content: sessionParts.join("\n\n") });
+      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=${sessionParts.length > 0 ? "ok" : "empty"} parts=${parts !== undefined ? "parts" : "legacy"} coreChars=${parts !== undefined ? coreBlocks.join("").length : sessionCtx.coreKnowledge.length} recallChars=${sessionCtx.recall.length} wakeChars=${sessionCtx.wakeUp.length}`);
     } catch (err) {
+      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=failed`);
       logDebug(TAG, `Session context unavailable: ${err instanceof Error ? err.message : String(err)}`);
     }
     // Rebuild combined prompt with session context
@@ -144,21 +171,26 @@ export async function buildPrompt(
     entry.pendingStart = false;
   }
 
-  // #1529: classify durable-context intent from configuration and message
-  // policy, independently of the memory runtime's instantaneous readiness.
-  // A required-but-unavailable intent must never degrade to ephemeral.
+  // #1940 R1: memory is decided at abtars start. The inbound archive write is
+  // attempted when memory applies to this turn; a failure is reported and
+  // logged, never turned into a turn rejection or a retry subsystem.
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
-  const durableRequired =
+  const recordInbound =
     deps.memoryConfig.memoryEnabled
+    && memoryRuntime?.state === "ready"
     && memoryMode !== "skill-isolated"
     && userRole !== "guest"
     && !text.startsWith("[SESSION START]");
-  let durableContextIntent: DurableContextIntent = { mode: "not_required" };
-  if (durableRequired && memoryRuntime?.state !== "ready") {
-    durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
-  } else if (durableRequired) {
-    const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
+  if (recordInbound) {
+    // #1724: a trusted scheduled-announcement event carries its durable,
+    // card-derived identity — delivery retries must deduplicate against the
+    // same inbound row instead of recording a fresh turn per attempt.
+    // #1873: that row records the historical form from trusted metadata; the
+    // live text (one-time announcement instruction) is never persisted.
+    const trustedAnnouncement = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal : undefined;
+    const messageIdStr = trustedAnnouncement?.eventId
+      ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
     const messageTimestamp = msg.timestamp;
     const operationKey = messageIdStr
       ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)
@@ -169,53 +201,40 @@ export async function buildPrompt(
       family: "inbound",
       operationKey,
       run: () => memoryRuntime!.recordMessage(
-        { role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
+        { role: "user", content: trustedAnnouncement?.savedText ?? text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
         operationKey,
       ),
     });
-    if (result.ok) {
-      const r = result as { ok: true; value: { id: number | null } };
-      const id = r.value.id;
-      durableContextIntent = typeof id === "number"
-        ? { mode: "durable", beforeMessageId: id }
-        : { mode: "required_unavailable", reason: "cursor_missing" };
-    } else {
-      durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
-    }
+    if (!result.ok) logWarn(TAG, `Inbound archive write failed for ${sessionKey} — not recorded`);
   }
 
   // --- Active recall (skipped for K — skill-isolated memory boundary) ---
-  let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
+  let recalledHits: Array<{ ref: string; contentEn: string }> | undefined;
   if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {
+        // #1928 M4 — the verbatim turn rides as the fast raw turn with host
+        // capacity; the owner packet is injected verbatim. No floors,
+        // numeric-ref selection, or local rendering: citations name the
+        // owner ref keys carried on each hit.
         const t0 = performance.now();
-        const priming = pSession?.primingTerms ?? [];
-        const recall = await memoryRuntime.recall({ query: [...new Set([text, ...priming])].join(" "), userId, limit: ACTIVE_MEMORY_LIMIT });
-        const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
-        const nowMs = Date.now();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const hits = recall.hits.filter((h: any) => {
-          if (h.score <= 0.70) return false;
-          if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
-            if (!h.emotionTags && !h.importanceFlags) return false;
-          }
-          return true;
+        const recall = await memoryRuntime.recall({
+          query: text,
+          profile: "recall_fast",
+          rawTurn: text,
+          userId,
+          limit: ACTIVE_MEMORY_LIMIT,
         });
-        if (hits.length > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lines = hits.map((h: any) => abmind()?.renderMemory({
-            content_en: h.content,
-          }) ?? h.content);
-          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
+        if (recall.hits.length > 0) {
+          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${recall.context}\n(Reference keys are shown as [n] (ref); if your answer relies on them, end your reply with [SUPPORT: ref, ...] listing only those refs.)\n[/MEMORY CONTEXT]`;
           volatileContext.push({ kind: "recall", content: block });
           prompt = `${block}\n\n${prompt}`;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          recalledHits = hits.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
-          logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          recalledHits = recall.hits.map((h) => ({ ref: h.ref, contentEn: h.content }));
+          logDebug(TAG, `Active recall: ${recall.hits.length} hits injected, status=${recall.status}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
           logTrace(TAG, `recall content: ${block}`);
         }
+        logDebug(TAG, `Active recall outcome: status=${recall.status} omissions=${(recall.omissionReasons ?? []).join("; ") || "none"}`);
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -234,7 +253,7 @@ export async function buildPrompt(
       const scan = scanFn(text);
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, durableContextIntent };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined };
     }
     }
   }
@@ -245,5 +264,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, currentTurn };
 }

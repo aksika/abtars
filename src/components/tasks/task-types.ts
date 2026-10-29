@@ -42,8 +42,8 @@ export type Delivery = "report" | "announce" | "silent";
  */
 export type DeliveryMode = "silent" | "deliver" | "announce";
 
-/** #1516: Upper bound on scheduled agent orchestration (1 Orc + up to 3 Workers). */
-export const MAX_SCHEDULED_AGENTS = 4;
+/** #1516: Upper bound on scheduled agent orchestration (1 Orc + up to 5 Workers). */
+export const MAX_SCHEDULED_AGENTS = 6;
 
 export interface TaskOrchestration {
   /** Normalized total agent budget, 1..MAX_SCHEDULED_AGENTS — includes the Orc. */
@@ -186,17 +186,21 @@ export function normalizeOrchestration(raw: unknown):
   }
   const maxAgents = (raw as Record<string, unknown>).maxAgents;
   if (maxAgents === undefined) return { ok: true, value: { maxAgents: 1 } };
-  if (typeof maxAgents !== "number" || !Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS) {
+  if (typeof maxAgents !== "number" || !Number.isInteger(maxAgents) || maxAgents < 1) {
     return { ok: false, error: `agent orchestration.maxAgents must be an integer from 1 to ${MAX_SCHEDULED_AGENTS}` };
   }
+  // #1516: clamp an over-configured cap to the runtime ceiling instead of
+  // quarantining the whole task. A value above the supported envelope was the
+  // daily-ai Aug 18 quarantine cause: config said 5 while the runtime capped at 4.
+  const cappedMaxAgents = Math.min(maxAgents, MAX_SCHEDULED_AGENTS);
   const laneDurationMs = (raw as Record<string, unknown>).laneDurationMs;
   if (laneDurationMs !== undefined) {
     if (typeof laneDurationMs !== "number" || !Number.isInteger(laneDurationMs) || laneDurationMs < 1) {
       return { ok: false, error: "agent orchestration.laneDurationMs must be a positive integer (ms)" };
     }
-    return { ok: true, value: { maxAgents, laneDurationMs } };
+    return { ok: true, value: { maxAgents: cappedMaxAgents, laneDurationMs } };
   }
-  return { ok: true, value: { maxAgents } };
+  return { ok: true, value: { maxAgents: cappedMaxAgents } };
 }
 
 export function normalize(raw: unknown): NormalizeResult {

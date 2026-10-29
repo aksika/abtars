@@ -55,14 +55,44 @@ vi.mock("./peer-transport/index.js", () => ({
 // spin.ts instantiates WorkerSupervisionService directly in finishSpin; the
 // mock supplies a per-test collectAndSettle outcome without touching the DB.
 const collectAndSettleOutcome = { value: undefined as unknown };
+let settledContract: unknown = undefined;
 vi.mock("./worker-supervision-service.js", () => ({
   WorkerSupervisionService: class {
     collectAndSettle() { return collectAndSettleOutcome.value as any; }
-    getContract() { return undefined; }
+    getContract() { return settledContract; }
     cardHasContract() { return false; }
     renderContractForPrompt() { return ""; }
   },
   validateWorkerRootCriteria: () => null,
+}));
+
+// #1750: the drain's cardHasSupervision reads the REAL worker-supervision
+// store, which opens the production kanban DB — a test card id colliding with
+// a live contract there made the drain skip nondeterministically. Stub it
+// deterministic: no contract, no attempts.
+vi.mock("./worker-supervision-store.js", () => ({
+  WorkerSupervisionStore: class {
+    contractExists() { return false; }
+    getAttempt() { return undefined; }
+    getLatestAttempt() { return undefined; }
+    terminalSettlement() { return undefined; }
+    cancelProjectChild() { return undefined; }
+  },
+}));
+
+// #1751: durable-run store double for the handoff-satisfied regression. The
+// real store opens the production kanban DB; a deterministic double lets the
+// test observe the exact release call failSpin makes (outcome + failure code).
+const orcReleaseCalls: Array<{ context: unknown; outcome: string; failureCode: unknown }> = [];
+vi.mock("./orc-project/orc-project-run-store.js", () => ({
+  OrcProjectRunStore: class {
+    db = {};
+    bindExecution() { return { ok: true as const, row: { id: "run-1751" } }; }
+    release(context: unknown, outcome: string, failureCode?: unknown) {
+      orcReleaseCalls.push({ context, outcome, failureCode });
+      return true;
+    }
+  },
 }));
 
 vi.mock("./spin-notifications.js", () => ({
@@ -78,8 +108,14 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 // real cards into the production DB, which the running bridge reconciler then delivers to
 // Telegram as `Task "X" complete.` spam (boom×60, first×60, init×140, …).
 let _nextId = 1;
-interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
+interface MockCard { id: number; title: string; source: string; status: string; type: string; next_retry_at?: string | null; [key: string]: unknown; }
 const _cards = new Map<number, MockCard>();
+// #1778: in-memory peer-callback outbox. Settlement helpers record the
+// delivery intent exactly when they commit the terminal (mirroring the
+// INSERT OR IGNORE in kanbanTransition); the peer-callback-outbox mock
+// below delivers only what was queued.
+interface MockOutboxIntent { cardId: number; to: string; peer: string; status: string; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }>; }
+const _outbox: MockOutboxIntent[] = [];
 // #1629: configurable root resolution — defaults to identity (card is its own
 // root). Provenance tests install a parent-chain walker or a failure stub.
 let resolveRootImpl: ((id: number) => number | undefined) | null = null;
@@ -102,9 +138,37 @@ vi.mock("./tasks/kanban-board.js", () => ({
     return id;
   },
   kanbanRunning: (id: number) => { const c = _cards.get(id); if (c) c.status = "running"; },
-  kanbanComplete: (id: number) => { const c = _cards.get(id); if (c) c.status = "done"; },
-  kanbanFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; },
-  kanbanRetryOrFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; return "failed"; },
+  kanbanComplete: (id: number, _path: unknown, _summary: unknown, _emit?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "done";
+      if (callback) _outbox.push({ cardId: id, to: "done", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+  },
+  kanbanFail: (id: number, _error?: unknown, _emit?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "failed";
+      if (callback) _outbox.push({ cardId: id, to: "failed", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+  },
+  kanbanRetryOrFail: (id: number, _error?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "failed";
+      if (callback) _outbox.push({ cardId: id, to: "failed", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+    return "failed";
+  },
+  // #1778: take (and clear) queued peer intents for a card — the mock drain's
+  // only source, so a test send proves the intent was queued at settlement.
+  __takeOutboxForCard: (cardId: number) => {
+    const taken = _outbox.filter(e => e.cardId === cardId);
+    for (let i = _outbox.length - 1; i >= 0; i--) {
+      if (_outbox[i]!.cardId === cardId) _outbox.splice(i, 1);
+    }
+    return taken;
+  },
   kanbanList: (filter?: string) => {
     const cards = Array.from(_cards.values());
     if (filter === "*") return cards;
@@ -124,10 +188,50 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanProgress: () => {},
   // #1411: internal card data accessor for test assertions
   _kanbanGetCardRaw: (id: number) => _cards.get(id) ?? null,
+  // #1644: the lease emitter path (attemptId + executionControl present)
+  // constructs ExecutorLeaseStore — a no-op in-memory stub is enough here
+  // (the worker-supervision service itself is mocked).
+  requireTaskDatabase: () => ({
+    prepare: () => ({ run: () => ({ changes: 0 }), get: () => undefined, all: () => [] }),
+    exec: () => {},
+    transaction: (fn: () => unknown) => fn(),
+  }),
   _kanbanSetCardField: (id: number, field: string, value: unknown) => {
     const c = _cards.get(id);
     if (c) (c as any)[field] = value;
   },
+}));
+
+vi.mock("./peer-callback-outbox.js", () => ({
+  // #1778: deliver only what settlement queued — a send here proves the
+  // intent committed with the card terminal. Real durability/delivery is
+  // covered by peer-callback-outbox tests against a real database.
+  drainPeerCallbackForCard: async (cardId: number) => {
+    const board = await import("./tasks/kanban-board.js") as unknown as {
+      __takeOutboxForCard(id: number): MockOutboxIntent[];
+    };
+    const { getPeerTransport } = await import("./peer-transport/index.js") as unknown as {
+      getPeerTransport(): { send(peer: string, msg: unknown): Promise<unknown> };
+    };
+    const transport = getPeerTransport();
+    const intents = board.__takeOutboxForCard(cardId);
+    for (const intent of intents) {
+      await transport.send(intent.peer, {
+        type: "callback",
+        payload: {
+          action: "callback",
+          task_id: cardId,
+          status: intent.status,
+          ...(intent.resultSummary !== undefined ? { result_summary: intent.resultSummary } : {}),
+          ...(intent.error !== undefined ? { error: intent.error } : {}),
+          tokens_used: intent.tokensUsed ?? 0,
+          ...(intent.artifacts?.length ? { artifacts: intent.artifacts } : {}),
+        },
+      });
+    }
+    return intents.length;
+  },
+  drainPeerCallbackOutbox: async () => 0,
 }));
 
 vi.mock("../utils/local-time.js", () => ({
@@ -139,11 +243,12 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
-import { kanbanEnqueue } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanGetCard } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AgentSession } from "./subagent-runtime.js";
+import { PiCoreToolExecutionError } from "./transport/tool-failure-diagnostic.js";
 
 function makeUser(userId: string, role: "master" | "user" | "guest", telegram = 100): UserEntry {
   return { userId, role, maxClass: role === "master" ? 3 : 1, tools: ["all"], platforms: { telegram } };
@@ -206,7 +311,9 @@ function makeRuntime(opts: {
   const mockExec = {
     send: vi.fn(async (prompt: string, image?: any, context?: any) => {
       const response = await mockTransportInstance.sendPrompt("mock:exec", prompt, image, context);
-      return response ?? "(no output)";
+      // #1651: mirror production — the executor returns the provider's own
+      // string, empty included. It never substitutes a placeholder.
+      return response ?? "";
     }),
     close: vi.fn(),
     transport: mockTransportInstance,
@@ -216,7 +323,7 @@ function makeRuntime(opts: {
   };
   return {
     session: vi.fn().mockResolvedValue(agentSession),
-    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "(no output)")),
+    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "agent response")),
     openExecution: vi.fn(async () => mockExec),
     lastUsage,
   };
@@ -230,6 +337,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     projectSupervision.clear();
     projectStoreReadFails = false;
     callbackSend.mockClear();
+    _outbox.length = 0;
     setUserRegistryOverride(makeRegistry([
       makeUser("aksika", "master", 111),
       makeUser("adrika", "user", 222),
@@ -317,7 +425,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("defensive guards (Layer A in spin) — #1327", () => {
     it("spin with unknown type returns a fail-soft SpinResult (no crash, no unhandled rejection)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      const r = await spin.spin({ settlementOwner: "spin", type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
       expect(r.sessionId).toBe("");
       expect(r.result).toMatch(/\[SYSTEM BUG\] invalid type for Spin dispatch: "bug" is not a SessionType/);
     });
@@ -328,14 +436,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // we re-mutate to simulate the real-world "type=bug" card that was the trigger).
       const cardId = kanbanEnqueue("stale card", "agent");
       _cards.get(cardId)!.type = "bug";
-      const r = await spin.spin({ type: "bug" as any, goal: "stale", cardId, await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "bug" as any, goal: "stale", cardId, await: true });
       expect(r.result).toMatch(/invalid type for Spin dispatch/);
       expect(_cards.get(cardId)!.status).toBe("failed");
     });
 
     it("spin with valid type still works (regression guard)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
       expect(r.sessionId).toBeTruthy();
       expect(r.result).not.toMatch(/\[SYSTEM BUG\]/);
     });
@@ -344,7 +452,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("session resolution (no type branches)", () => {
     it("A resolves to active session (auto-create Main)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
       expect(r.sessionId).toBeTruthy();
       const usedSession = spin.getSessionById(r.sessionId);
       expect(usedSession).toBeDefined();
@@ -354,8 +462,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("A persists across turns — same active session id, not response-terminated (#1287)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "A", prompt: "turn 1", userId: "aksika", platform: "telegram", await: true });
-      const r2 = await spin.spin({ type: "A", prompt: "turn 2", userId: "aksika", platform: "telegram", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "turn 1", userId: "aksika", platform: "telegram", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "turn 2", userId: "aksika", platform: "telegram", await: true });
       // A is external-terminated: the Main session survives a completed turn, so the
       // second turn reuses the SAME session (stable id → continuous conversation context).
       expect(r2.sessionId).toBe(r1.sessionId);
@@ -370,15 +478,15 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("O reuses the one visible Orc session (singleton)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "O", prompt: "task 1", await: true });
-      const r2 = await spin.spin({ type: "O", prompt: "task 2", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", prompt: "task 1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", prompt: "task 2", await: true });
       expect(r1.sessionId).toBe(r2.sessionId);
     });
 
     it("S creates fresh session each time (transient)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "S", prompt: "x", await: true });
-      const r2 = await spin.spin({ type: "S", prompt: "y", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "y", await: true });
       expect(r1.sessionId).not.toBe(r2.sessionId);
       // S should be deleted from Map after call
       expect(spin.getSessionById(r1.sessionId)).toBeUndefined();
@@ -397,8 +505,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       spin.setRuntime(runtime as any);
 
-      const r1 = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", await: true });
-      const r2 = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step2", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step2", await: true });
       expect(r1.sessionId).toBe(dSession.id);
       expect(r2.sessionId).toBe(dSession.id);
       // Persistent send uses session.transport.sendPrompt, not runtime.complete
@@ -406,18 +514,99 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(runtime.complete).not.toHaveBeenCalled();
     });
 
-    it("threads durableContextIntent through to the session transport unchanged (#1529)", async () => {
-      const transport = mockTransport();
-      const runtime = makeRuntime();
-      const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
-      dSession.transport = transport;
-      spin.setRuntime(runtime as any);
+    describe("sleep execution scope (#1807)", () => {
+      async function tmpScope() {
+        const { mkdtempSync, realpathSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const cwd = mkdtempSync(join(tmpdir(), "spin-sleep-scope-"));
+        return { cwd, canonical: realpathSync(cwd) };
+      }
 
-      const intent = { mode: "required_unavailable" as const, reason: "record_failed" as const };
-      const r = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", durableContextIntent: intent, await: true });
-      expect(r.sessionId).toBe(dSession.id);
-      const context = (transport.sendPrompt as any).mock.calls[0]?.[3];
-      expect(context.durableContextIntent).toEqual(intent);
+      function sleepRuntime(transport: IKiroTransport, binding: string | undefined) {
+        const agentSession: AgentSession = {
+          sendPrompt: vi.fn(async () => "sleep ok"),
+          destroy: vi.fn(),
+          get isReady() { return true; },
+          get transport() { return transport; },
+        };
+        return {
+          session: vi.fn().mockResolvedValue(agentSession),
+          verifyTransportBinding: vi.fn().mockReturnValue(binding),
+          complete: vi.fn(),
+          openExecution: vi.fn(),
+        };
+      }
+
+      function sleepScope(cwd: string) {
+        return { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
+      }
+
+      it("keys sleep acquisition by the cycle session id and carries the scope", async () => {
+        const { cwd, canonical } = await tmpScope();
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, canonical);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        const scope = sleepScope(cwd);
+        const r = await spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", executionScope: scope, await: true,
+        });
+        expect(r.sessionId).toBe(dSession.id);
+        expect(runtime.session).toHaveBeenCalledWith(
+          "dreamy", dSession.id, expect.objectContaining({ executionScope: scope }),
+        );
+      });
+
+      it("reuses an attached transport only when the binding matches", async () => {
+        const { cwd, canonical } = await tmpScope();
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, canonical);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        dSession.transport = transport;
+        const r = await spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", executionScope: sleepScope(cwd), await: true,
+        });
+        expect(r.sessionId).toBe(dSession.id);
+        expect(runtime.verifyTransportBinding).toHaveBeenCalledWith("dreamy", dSession.id);
+        expect((transport.sendPrompt as any).mock.calls.length).toBe(1);
+      });
+
+      it("rejects mismatched or unverified attached transports before dispatch", async () => {
+        const { cwd } = await tmpScope();
+        for (const binding of ["/tmp/elsewhere-1807", undefined]) {
+          const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+          const runtime = sleepRuntime(transport, binding);
+          spin.setRuntime(runtime as any);
+
+          const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+          dSession.transport = transport;
+          await expect(spin.spin({
+            settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+            executionOrigin: "sleep", executionScope: sleepScope(cwd), await: true,
+          })).rejects.toThrow(/binding mismatch\/unverified/);
+          expect((transport.sendPrompt as any).mock.calls.length).toBe(0);
+        }
+      });
+
+      it("rejects sleep dispatch without a scope instead of inheriting daemon cwd", async () => {
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, undefined);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        await expect(spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", await: true,
+        })).rejects.toThrow(/without execution scope/);
+        expect(runtime.session).not.toHaveBeenCalled();
+        expect((transport.sendPrompt as any).mock.calls.length).toBe(0);
+      });
     });
 
     it("A continuation does NOT overwrite existing session transport", async () => {
@@ -428,7 +617,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // Register master session (sets user-keyed transport on the A session)
       spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: userKeyedTransport });
 
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
       // The session used by spin() must have kept the user-keyed transport
       const usedSession = spin.getSessionById(r.sessionId)!;
       expect(usedSession.transport).toBe(userKeyedTransport);
@@ -440,8 +629,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("kanban card lifecycle", () => {
     it("goal creates a card; prompt-only does not", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const withGoal = await spin.spin({ type: "T", goal: "do something", userId: "aksika", platform: "telegram", source: "user", await: true });
-      const noGoal = await spin.spin({ type: "S", prompt: "background", await: true });
+      const withGoal = await spin.spin({ settlementOwner: "spin", type: "T", goal: "do something", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const noGoal = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "background", await: true });
       expect(withGoal.cardId).toBeDefined();
       expect(noGoal.cardId).toBeUndefined();
     });
@@ -483,7 +672,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       projectSupervision.set(cardId, { state: "executing" });
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -496,7 +685,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       projectStoreReadFails = true;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -506,10 +695,10 @@ describe("spin(spec) — unified session API (#1271)", () => {
   });
 
   describe("#1599 — worker criteria outcome decides card status", () => {
-    function makeEnvelope(criteria: Array<{ status: string }>): any {
+    function makeEnvelope(criteria: Array<{ criterion_id: string; status: string; evidence_ids: string[] }>): any {
       return {
         schema_version: 1,
-        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "local_worker", executor_id: "e", started_at: "", finished_at: "" },
+        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
         outcome: "completed",
         criteria,
         checks: [],
@@ -529,9 +718,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
         envelope: makeEnvelope([{ criterion_id: "c1", status: "failed", evidence_ids: [] }, { criterion_id: "c2", status: "failed", evidence_ids: [] }]),
       };
       const cardId = kanbanEnqueue("worker lane", "peer");
+      // #1644: supervised settlement requires the attempt identity the
+      // reconciler claim path would have provided.
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -548,9 +740,54 @@ describe("spin(spec) — unified session API (#1271)", () => {
         envelope: makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
       };
       const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("#1656 fails the card when the envelope names a different contract even though every criterion passed", async () => {
+      // exact-contract acceptance: the settled envelope must match the named
+      // contract's id AND digest — a completed execution is never acceptance.
+      settledContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }, { id: "c2" }] };
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: {
+          ...makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "other-digest", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
+        },
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+    });
+
+    it("#1656 completes the card when the envelope matches the exact contract and all criteria pass", async () => {
+      settledContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }, { id: "c2" }] };
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: {
+          ...makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
+        },
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -562,7 +799,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("plain lane", "peer");
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -574,7 +811,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("unreadable lane", "peer");
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -584,12 +821,118 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
+  /*
+   * #1651: Spin used to replace an empty provider response with the literal
+   * string "(no output)". That fabricated content made three downstream guards
+   * unreachable — the sleep completion guard (#1611/#1650), the skill bootstrap
+   * guard, and the chat empty/no-reply policy — and wrote the placeholder into
+   * memory, card summaries and report artifacts (#1474). These cases pin the
+   * truthful contract: the provider's own string, plus a classified outcome.
+   */
+  describe("empty and no-reply outcomes (#1651)", () => {
+    it("returns an empty provider response verbatim, never a placeholder", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.result).toBe("");
+      expect(r.outcome).toBe("empty");
+    });
+
+    it("reports a deliberate [NO_REPLY] as no_reply, not as empty", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[NO_REPLY]" }) as any);
+
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.outcome).toBe("no_reply");
+    });
+
+    it("#1651 v2: reports a reaction-only turn as reaction, not as text content", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.result).toBe("[REACT:👋]");
+      expect(r.outcome).toBe("reaction");
+    });
+
+    it("#1651 v2: never records a reaction-only turn as an assistant message in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).not.toHaveBeenCalled();
+    });
+
+    it("#1651 v2: fails an unsupervised card whose turn produced only a reaction, and reports failed to the peer", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "" };
+      const cardId = kanbanEnqueue("reaction lane", "peer");
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(callbackSend).toHaveBeenCalledWith("kp", expect.objectContaining({
+        payload: expect.objectContaining({ status: "failed", error: "model returned only a reaction" }),
+      }));
+    });
+
+    it("never records a contentless turn as an assistant message in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).not.toHaveBeenCalled();
+    });
+
+    it("still records a normal turn in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "real answer" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "assistant", content: "real answer" }));
+    });
+
+    it("fails an unsupervised card whose turn produced no content, and reports failed to the peer", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "" };
+      const cardId = kanbanEnqueue("empty lane", "peer");
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(callbackSend).toHaveBeenCalledWith("kp", expect.objectContaining({
+        payload: expect.objectContaining({ status: "failed", error: "model returned no output" }),
+      }));
+    });
+
+    it("exposes the outcome on the step event", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+      const events: any[] = [];
+
+      await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, onStepComplete: e => { events.push(e); } });
+
+      expect(events[0].result).toBe("");
+      expect(events[0].outcome).toBe("empty");
+    });
+  });
+
   describe("onStepComplete hook", () => {
     it("fires with correct stepIndex on success", async () => {
       spin.setRuntime(makeRuntime({ completeResponse: "ok" }) as any);
       const events: any[] = [];
-      const r1 = await spin.spin({ type: "S", prompt: "x", await: true, onStepComplete: e => events.push(e) });
-      const r2 = await spin.spin({ type: "S", prompt: "y", await: true, onStepComplete: e => events.push(e) });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, onStepComplete: e => { events.push(e); } });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "y", await: true, onStepComplete: e => { events.push(e); } });
       expect(events.length).toBe(2);
       expect(events[0].result).toBe("ok");
       expect(events[0].durationMs).toBeGreaterThanOrEqual(0);
@@ -607,9 +950,9 @@ describe("spin(spec) — unified session API (#1271)", () => {
       }));
       spin.setRuntime(runtime as any);
       const events: any[] = [];
-      await expect(spin.spin({
+      await expect(spin.spin({ settlementOwner: "spin",
         type: "S", prompt: "x", await: true,
-        onStepComplete: e => events.push(e),
+        onStepComplete: e => { events.push(e); },
       })).rejects.toThrow("boom");
       expect(events.length).toBe(1);
       expect(events[0].error).toBeInstanceOf(Error);
@@ -622,7 +965,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const transport = mockTransport();
       // First spin: transient D allocation with metadata → session.metadata set
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({
+      const r1 = await spin.spin({ settlementOwner: "spin",
         type: "D",
         prompt: "init",
         userId: "aksika",
@@ -636,7 +979,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       // Reuse with new metadata → session.metadata must NOT change
       dSession.transport = transport;
-      await spin.spin({ type: "D", sessionId: dSession.id, prompt: "s2", userId: "aksika", platform: "telegram", metadata: { stepName: "shouldBeIgnored" }, await: true });
+      await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "s2", userId: "aksika", platform: "telegram", metadata: { stepName: "shouldBeIgnored" }, await: true });
       expect(dSession.metadata).toEqual({ sleepNight: "2026-07-01" });
     });
   });
@@ -664,6 +1007,17 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const call = (runtime.openExecution as any).mock.calls[0];
       expect(call[0]).toBe("dreamy");
     });
+
+    it.each<[string, string]>([
+      ["empty", ""],
+      ["no_reply", "[NO_REPLY]"],
+      ["reaction", "[REACT:👋]"],
+    ])("rejects a %s response instead of returning it as background text", async (_name, raw) => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => raw }) as any);
+      await expect(spin.dispatchBackground({ prompt: "compact" })).rejects.toThrow(
+        "background spin returned non-text outcome",
+      );
+    });
   });
 
   describe("Orc parity (#1271 — highest-risk area)", () => {
@@ -674,7 +1028,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("sets setActiveOrcCard before, clears after (success path)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
       expect(activeOrcCardUpdates).toHaveLength(0);
       expect(r.cardId).toBeDefined();
     });
@@ -686,14 +1040,104 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
       // Trigger initial create — this will get a working transport
-      const r1 = await spin.spin({ type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Now make the visible O session's transport throw on next call
       const orcSession = spin.getSessionById(r1.sessionId)!;
       orcSession.transport = transport;
 
-      await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
+      await expect(spin.spin({ settlementOwner: "spin", type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
       // Project authority is no longer held in module-global active-card state.
       expect(activeOrcCardUpdates).toHaveLength(0);
+    });
+
+    it("#1751: a satisfied handoff survives a thrown transport", async () => {
+      orcReleaseCalls.length = 0;
+      const feedPublish = vi.fn();
+      spin.setOrcActivityFeed({ publish: feedPublish } as never);
+      // The transport throws AFTER the bound turn control latched
+      // intent_satisfied — the incident shape: a durable success followed by a
+      // retained terminal tool-failure diagnostic.
+      spin.setRuntime(makeRuntime({
+        sendPromptImpl: async () => {
+          throw new PiCoreToolExecutionError({
+            version: 1,
+            execution_id: "exec-1751",
+            tool: "project_execution",
+            reason: "settlement_lost",
+            timed_out: false,
+            aborted: false,
+          });
+        },
+      }) as any);
+      const cardId = kanbanEnqueue("handoff run", "agent");
+      const orcContext = {
+        version: 2 as const,
+        runId: "run-1751",
+        intentKey: "ik-1751",
+        intentKind: "project_execution" as const,
+        projectCardId: 999,
+        projectGeneration: 1,
+        ownershipGeneration: 1,
+        ownerPeer: "kp",
+        ownerInstanceId: "kp-1",
+        origin: { kind: "local" as const, peer: "kp" },
+      };
+      const turnControl = {
+        runId: "run-1751",
+        complete: () => true,
+        completed: { kind: "intent_satisfied" as const, code: "project_execution_handed_off" },
+      };
+      const thrown: unknown = await spin.spin({ settlementOwner: "spin",
+        type: "O", cardId, orcContext, orcTurnControl: turnControl as never,
+        goal: "hand off the project", await: true,
+      }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(PiCoreToolExecutionError);
+      // The durable release records the verified success: `completed` with no
+      // failure code — the transport diagnostic cannot downgrade it.
+      const release = orcReleaseCalls.at(-1);
+      expect(release?.outcome).toBe("completed");
+      expect(release?.failureCode).toBeUndefined();
+      // The root card is not re-queued (kanbanRetryOrFail never fired).
+      expect(kanbanGetCard(cardId)!.status).not.toBe("failed");
+      // No operator-visible execution.failed publish for a satisfied handoff.
+      const failedPublishes = feedPublish.mock.calls.filter(c => (c[0] as { kind: string }).kind === "execution.failed");
+      expect(failedPublishes).toHaveLength(0);
+    });
+
+    it("#1751: an ownerless O turn gets its own session, never a project-scoped one", async () => {
+      orcReleaseCalls.length = 0;
+      spin.setRuntime(makeRuntime() as any);
+      const orcContext = {
+        version: 2 as const,
+        runId: "run-1751-b",
+        intentKey: "ik-1751-b",
+        intentKind: "project_execution" as const,
+        projectCardId: 999,
+        projectGeneration: 1,
+        ownershipGeneration: 1,
+        ownerPeer: "kp",
+        ownerInstanceId: "kp-1",
+        origin: { kind: "local" as const, peer: "kp" },
+      };
+      const turnControl = {
+        runId: "run-1751-b",
+        complete: () => true,
+        completed: null,
+      };
+      // First: a project-scoped O turn binds its session to the project.
+      const r1 = await spin.spin({ settlementOwner: "spin",
+        type: "O", orcContext, orcTurnControl: turnControl as never,
+        goal: "project work", await: true,
+      });
+      const projectSession = spin.getSessionById(r1.sessionId)!;
+      expect(projectSession.orcContext).toBeDefined();
+
+      // Second: an ownerless O turn explicitly targeting the project session
+      // must be fenced too — it gets a fresh one and the project session's
+      // authority survives untouched.
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: r1.sessionId, goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
+      expect(r2.sessionId).not.toBe(r1.sessionId);
+      expect(spin.getSessionById(r1.sessionId)!.orcContext).toBeDefined();
     });
 
     it("produces decorated prompt in the exact pre-refactor executeOrc order", async () => {
@@ -705,13 +1149,13 @@ describe("spin(spec) — unified session API (#1271)", () => {
       });
       spin.setRuntime(makeRuntime() as any);
       // Trigger create so O session has transport
-      await spin.spin({ type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Replace the O session's transport with a captor
       const sessions = spin.listAllSessions();
       const orcSession = sessions.find(s => s.id.includes("_O_"))!;
       orcSession.transport = transport;
       // Send another prompt
-      await spin.spin({ type: "O", sessionId: orcSession.id, goal: "do the work", userId: "aksika", platform: "telegram", source: "user", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", sessionId: orcSession.id, goal: "do the work", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Check the prompt that was sent
       const lastCall = (transport.sendPrompt as any).mock.calls[0];
       const sentPrompt: string = lastCall[1];
@@ -751,7 +1195,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       };
       try {
         spin.setRuntime(makeRuntime({ completeResponse: "fake-type response" }) as any);
-        const r = await spin.spin({ type: "X" as any, prompt: "test", await: true });
+        const r = await spin.spin({ settlementOwner: "spin", type: "X" as any, prompt: "test", await: true });
         expect(r.result).toBe("fake-type response");
         // X is call-terminate: deleted from Map
         expect(spin.getSessionById(r.sessionId)).toBeUndefined();
@@ -770,13 +1214,13 @@ describe("spin(spec) — unified session API (#1271)", () => {
       (SESSION_PROFILES["T"] as any).beforePrompt = async () => { throw new Error("beforePrompt kaboom"); };
       spin.setRuntime(makeRuntime() as any);
       try {
-        await spin.spin({ type: "T", goal: "first", source: "user", await: true });
+        await spin.spin({ settlementOwner: "spin", type: "T", goal: "first", source: "user", await: true });
       } catch { /* expected */ } finally {
         (SESSION_PROFILES["T"] as any).beforePrompt = orig;
       }
       // Slot must be free — a second T dispatch completes
       spin.setRuntime(makeRuntime({ completeResponse: "ok" }) as any);
-      const r = await spin.spin({ type: "T", goal: "second", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "T", goal: "second", source: "user", await: true });
       expect(r.result).toBe("ok");
     });
 
@@ -786,12 +1230,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime() as any);
       let threw = false;
       try {
-        await spin.spin({ type: "S", goal: "boom", source: "user", await: true });
+        await spin.spin({ settlementOwner: "spin", type: "S", goal: "boom", source: "user", await: true });
       } catch { threw = true; } finally {
         (SESSION_PROFILES["S"] as any).decorators = orig;
       }
       expect(threw).toBe(true);
-      const r = await spin.spin({ type: "S", goal: "ok", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "S", goal: "ok", source: "user", await: true });
       expect(r.sessionId).toBeTruthy();
     });
 
@@ -803,7 +1247,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const handler = () => { unhandled = true; };
       process.on("unhandledRejection", handler);
       try {
-        spin.dispatch({ type: "T", goal: "bg task", source: "user" });
+        spin.dispatch({ type: "T", goal: "bg task", source: "user", settlementOwner: "spin" });
         await new Promise(r => setTimeout(r, 50));
       } finally {
         (SESSION_PROFILES["T"] as any).beforePrompt = orig;
@@ -871,17 +1315,89 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
+  describe("#1750 — the heartbeat drain cannot kill the process", () => {
+    beforeEach(() => {
+      spin.setRuntime(makeRuntime() as any);
+    });
+
+    it("drain dispatch refused by a busy O session leaves the card queued and never reaches unhandledRejection", async () => {
+      // A live O execution holds the shared session. The queued card is an O
+      // CHILD (parent_id set) — the drain skips O roots by identity (#1750),
+      // so the child is the drain-visible shape that still reaches the
+      // busy-session admission fence at spin() and must be settled, not fatal.
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>(r => { releaseFirst = r; });
+      const heldTransport = mockTransport({
+        sendPrompt: vi.fn(async () => { await firstHeld; return "first result"; }),
+      });
+      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      oSession.transport = heldTransport;
+      const first = spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      await vi.waitFor(() => expect(oSession.activeExecutionId).toBeDefined());
+
+      const cardId = kanbanEnqueue("legacy O child", "agent");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(cardId, "type", "O");
+      (mod as any)._kanbanSetCardField(cardId, "parent_id", 1);
+      (mod as any)._kanbanSetCardField(cardId, "goal", "legacy O child");
+
+      const logWarnSpy = vi.spyOn(await import("./logger.js"), "logWarn");
+      const unhandled: unknown[] = [];
+      const handler = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", handler);
+      try {
+        await (spin as any).tick();
+        await new Promise(r => setTimeout(r, 20));
+        expect(unhandled).toHaveLength(0);
+        const card = (await import("./tasks/kanban-board.js")).kanbanGetCard(cardId) as { status: string } | null;
+        expect(card?.status).toBe("queued");
+        expect(logWarnSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("dispatch refused"));
+      } finally {
+        process.off("unhandledRejection", handler);
+        logWarnSpy.mockRestore();
+        releaseFirst();
+        await first.catch(() => {});
+      }
+    });
+
+    it("a non-contention rejection from the drain fails the card with the diagnostic", async () => {
+      const cardId = kanbanEnqueue("ended session card", "agent");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(cardId, "type", "W");
+      (mod as any)._kanbanSetCardField(cardId, "parent_id", null);
+      (mod as any)._kanbanSetCardField(cardId, "goal", "ended session card");
+
+      // The drain never passes a sessionId, so "sessionId … is ended" can only
+      // reach the sink through a future throw site — stub the chokepoint to
+      // reject with the diagnostic and verify the sink fails the card.
+      const spinSpy = vi.spyOn(spin, "spin").mockRejectedValue(new Error("Spin: sessionId sess-dead is ended"));
+      const unhandled: unknown[] = [];
+      const handler = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", handler);
+      try {
+        await (spin as any).tick();
+        await new Promise(r => setTimeout(r, 20));
+        expect(unhandled).toHaveLength(0);
+        const card = (await import("./tasks/kanban-board.js")).kanbanGetCard(cardId) as { status: string } | null;
+        expect(card?.status).toBe("failed");
+      } finally {
+        process.off("unhandledRejection", handler);
+        spinSpy.mockRestore();
+      }
+    });
+  });
+
   describe("#1274 — sessionId reuse rejects ended sessions", () => {
     it("spin({ sessionId }) on an ended session throws, sendPrompt never called", async () => {
       const transport = mockTransport();
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
-      const r1 = await spin.spin({ type: "D", prompt: "step1", userId: "aksika", platform: "telegram", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "D", prompt: "step1", userId: "aksika", platform: "telegram", await: true });
       const s = spin.getSessionById(r1.sessionId)!;
       s.transport = transport;
       s.status = "ended";
       await expect(
-        spin.spin({ type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
+        spin.spin({ settlementOwner: "spin", type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
       ).rejects.toThrow(/is ended/);
       expect(transport.sendPrompt).not.toHaveBeenCalled();
     });
@@ -893,7 +1409,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(runtime as any);
 
       // Allocate a reusable session (D is persistent/external).
-      const first = await spin.spin({ type: "D", prompt: "step1", await: true });
+      const first = await spin.spin({ settlementOwner: "spin", type: "D", prompt: "step1", await: true });
       const sessionId = first.sessionId;
 
       // A non-terminal control is already bound to that session (simulating
@@ -907,7 +1423,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const second = spin.executionSupervisor.open({ executionRef: "gen-2", type: "T" });
       expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(false);
       await expect(
-        spin.spin({
+        spin.spin({ settlementOwner: "spin",
           type: "D",
           sessionId,
           prompt: "step2",
@@ -916,7 +1432,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
         }),
       ).rejects.toMatchObject({ code: "execution_bind_rejected" });
       await expect(
-        spin.spin({
+        spin.spin({ settlementOwner: "spin",
           type: "D",
           sessionId,
           prompt: "step3",
@@ -932,6 +1448,62 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // A terminal old handle frees the session for the next generation.
       busy.markTerminal("completed");
       expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(true);
+    });
+  });
+
+  describe("#1691 — one active A/O execution per reusable session", () => {
+    it.each(["A", "O"] as const)("a second %s call is rejected before mutation; the first execution keeps its identity", async (type) => {
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>(r => { releaseFirst = r; });
+      const sendCalls: Array<{ context: unknown }> = [];
+      const heldTransport = mockTransport({
+        sendPrompt: vi.fn(async (_k: string, _m: string, _i: unknown, ctx?: unknown) => {
+          sendCalls.push({ context: ctx });
+          await firstHeld;
+          return "first result";
+        }),
+      });
+      spin.setRuntime(makeRuntime() as any);
+
+      // Allocate the reusable session and attach its persistent transport.
+      const oSession = spin.createSession("aksika", "background", type) as import("./spin-types.js").ManagedSession;
+      oSession.transport = heldTransport;
+
+      const first = spin.spin({ settlementOwner: "spin", type, sessionId: oSession.id, prompt: "first turn", await: true });
+      await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
+      const firstExecutionId = oSession.activeExecutionId;
+      expect(firstExecutionId).toBeDefined();
+      expect((sendCalls[0]!.context as { executionId?: string }).executionId).toBe(firstExecutionId);
+
+      // A second call against the same session is rejected with the bounded
+      // admission error BEFORE it can overwrite the session's active execution
+      // id, orc fields, or transport state — it never reaches sendPrompt.
+      await expect(
+        spin.spin({ settlementOwner: "spin", type, sessionId: oSession.id, prompt: "second turn", await: true }),
+      ).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
+      expect(sendCalls).toHaveLength(1);
+      expect(oSession.activeExecutionId).toBe(firstExecutionId);
+      // Release the first turn: it settles with its own captured identity and
+      // clears the session marker for the next execution.
+      releaseFirst();
+      const firstResult = await first;
+      expect(firstResult.result).toBe("first result");
+      expect(firstResult.executionId).toBe(firstExecutionId);
+      // finishSpin clears the marker — the session is single-flight again.
+      expect(oSession.activeExecutionId).toBeUndefined();
+    });
+
+    it("sequential O turns on one session still admit normally after settlement", async () => {
+      const transport = mockTransport();
+      spin.setRuntime(makeRuntime() as any);
+      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      oSession.transport = transport;
+
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "turn 1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "turn 2", await: true });
+      expect(r1.sessionId).toBe(oSession.id);
+      expect(r2.sessionId).toBe(oSession.id);
+      expect((transport.sendPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
     });
   });
 
@@ -951,7 +1523,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
       fillSessions(spin, MAX);
-      const result = spin.dispatch({ type: "W", goal: "overflow", source: "user" });
+      const result = spin.dispatch({ type: "W", goal: "overflow", source: "user", settlementOwner: "spin" });
       expect(result.cardId).toBeGreaterThan(0);
       await new Promise(r => setTimeout(r, 30));
       expect(runtime.complete).not.toHaveBeenCalled();
@@ -962,7 +1534,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime() as any);
       fillSessions(spin, MAX);
       await expect(
-        spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
+        spin.dispatchAwait({ type: "W", goal: "overflow", source: "user", settlementOwner: "spin" }),
       ).rejects.toThrow(/System busy/);
     });
   });
@@ -994,7 +1566,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
   it("task-sourced root card → unattended-task on the prompt context", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("scheduled direct task", "task");
-    const r = await spin1629.spin({ type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
+    const r = await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
     expect(r.result).toBe("ok");
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
   });
@@ -1005,7 +1577,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
     const rootId = kanbanEnqueue("daily-ai project", "task");
     const workerId = kanbanEnqueue("lane 3", "agent");
     _cards.get(workerId)!.parent_id = rootId;
-    const r = await spin1629.spin({ type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
+    const r = await spin1629.spin({ settlementOwner: "spin", type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
     expect(r.result).toBe("ok");
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
   });
@@ -1013,55 +1585,55 @@ describe("spin() — #1629 tool authorization provenance", () => {
   it("user/agent-sourced roots → interactive", async () => {
     const contexts = captureRuntime();
     const agentCard = kanbanEnqueue("manual agent work", "agent");
-    await spin1629.spin({ type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
     const userCard = kanbanEnqueue("manual user work", "user");
-    await spin1629.spin({ type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
     expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
 
   it("no card (prompt-only spin) → interactive", async () => {
     const contexts = captureRuntime();
-    await spin1629.spin({ type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
-  it("missing root card → interactive (fails closed)", async () => {
+  it("missing root card → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("ghost card", "task");
     _cards.delete(cardId); // root unreadable
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
-  it("unreadable/cyclic ancestry → interactive (fails closed)", async () => {
+  it("unreadable/cyclic ancestry → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => undefined;
     const cardId = kanbanEnqueue("cyclic card", "task");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
-  it("provenance resolver failure → interactive (fails closed)", async () => {
+  it("provenance resolver failure → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => { throw new Error("kanban read failed"); };
     const cardId = kanbanEnqueue("unreadable card", "task");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
   it("unknown root source → interactive", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("peer work", "peer");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
   it("a reused session recomputes the mode from the current card, never retaining the prior value", async () => {
     const contexts = captureRuntime();
-    const first = await spin1629.spin({ type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
+    const first = await spin1629.spin({ settlementOwner: "spin", type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
-    const second = await spin1629.spin({ type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
+    const second = await spin1629.spin({ settlementOwner: "spin", type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
     expect(second.sessionId).toBe(first.sessionId); // same reused session
     expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
@@ -1073,7 +1645,7 @@ import { SessionOutputFeed, type SessionOutputEvent } from "./session-output-fee
 
 class RecordingFeed extends SessionOutputFeed {
   events: SessionOutputEvent[] = [];
-  publish(e: SessionOutputEvent): void {
+  override publish(e: SessionOutputEvent): void {
     this.events.push(e);
     super.publish(e);
   }
@@ -1095,7 +1667,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     spin2.setSessionOutputFeed(feed);
-    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    const r = await spin2.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
 
     const types = feed.events.map((e) => e.type);
     expect(types).toContain("start");
@@ -1128,7 +1700,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     spin2.setSessionOutputFeed(feed);
-    await spin2.spin({ type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
+    await spin2.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
 
     const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
     expect(delta?.text).toBe("one-shot text");
@@ -1140,7 +1712,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     // No setSessionOutputFeed — must not throw and must still return the result.
-    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    const r = await spin2.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
     expect(r.result).toBe("ok");
   });
 });

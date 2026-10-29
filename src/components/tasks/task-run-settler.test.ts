@@ -395,23 +395,23 @@ describe("settleRunOnce failure cascade (#1588)", () => {
 
   it("fires exactly once for a failed run — the headline agent-task defect", () => {
     const run = reserve("cascade-fail");
-    const calls: Array<[string, string]> = [];
+    const calls: Array<[string, string, string]> = [];
     const settled = settle.settleRunOnce({
       entry: ENTRY, run, outcome: "failed",
       diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
-      onFailure: (entryId, diagnostic) => calls.push([entryId, diagnostic.code]),
+      onFailure: (event) => calls.push([event.entryId, event.diagnostic.code, event.taskKind]),
     });
     expect(settled).toBe("settled");
-    expect(calls).toEqual([["finance-daily", "model_error"]]);
+    expect(calls).toEqual([["finance-daily", "model_error", "script"]]);
   });
 
   it("duplicate and late settlements add zero further invocations", () => {
     const run = reserve("cascade-once");
     const calls: Array<[string, string]> = [];
     const opts = {
-      entry: ENTRY, run, outcome: "failed",
+      entry: ENTRY, run, outcome: "failed" as const,
       diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
-      onFailure: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => calls.push([entryId, diagnostic.code]),
+      onFailure: (event: import("../sha/sha-types.js").ScheduledFailureEvent) => calls.push([event.entryId, event.diagnostic.code]),
     };
     expect(settle.settleRunOnce(opts)).toBe("settled");
     expect(settle.settleRunOnce(opts)).toBe("duplicate");
@@ -429,13 +429,13 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     settle.settleRunOnce({
       entry: ENTRY, run: runDeferred, outcome: "deferred",
       diagnostic: failure.makeTaskFailure("admission", "executor_unavailable", "queued", "busy", "transient"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.code),
     });
     const runCancelled = reserve("cascade-cancelled");
     settle.settleRunOnce({
       entry: ENTRY, run: runCancelled, outcome: "cancelled",
       diagnostic: failure.makeTaskFailure("interruption", "cancelled", "cancelling", "operator", "none"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.code),
     });
     expect(calls).toEqual([]);
   });
@@ -446,7 +446,7 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     settle.settleRunOnce({
       entry: ENTRY, run, outcome: "timed_out",
       diagnostic: failure.makeTaskFailure("supervision", "lane_timed_out", "executing", "deadline", "none"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.category + "/" + diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.category + "/" + event.diagnostic.code),
     });
     expect(calls).toEqual(["supervision/lane_timed_out"]);
   });
@@ -591,5 +591,65 @@ describe("settleRunOnce deliveryText (#1610)", () => {
     const settled = settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", cardId });
     expect(settled).toBe("settled");
     expect(kanbanGetCard(cardId)!.result_summary).toBe("completed");
+  });
+});
+
+describe("settleRunOnce supervised-root failure fencing (#1778)", () => {
+  function reserve(runId: string): import("./task-state-store.js").ActiveTaskRun {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId,
+      groupId: "g-fence",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE_AT,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    return reserved.run;
+  }
+
+  async function seedSupervisedRoot(runId: string, generation: number): Promise<number> {
+    const board = await import("./kanban-board.js");
+    const cardId = board.kanbanEnqueue("fenced project", "task", runId, { type: "O" });
+    // ProjectReviewStore migration owns the supervision schema; the row is
+    // the live generation the settling run must prove against.
+    const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+    new ProjectReviewStore(board.requireTaskDatabase());
+    board.requireTaskDatabase().prepare(
+      `INSERT INTO project_supervision (project_card_id, contract_id, state, generation, updated_at)
+       VALUES (?, ?, 'executing', ?, datetime('now'))`,
+    ).run(cardId, `c_fence_${cardId}`, generation);
+    return cardId;
+  }
+
+  function failDiagnostic(): TaskFailureDiagnosticV1 {
+    return failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none");
+  }
+
+  it("fails the supervised root when the settling run still owns it", async () => {
+    const run = reserve("fence-own-1");
+    const cardId = await seedSupervisedRoot("fence-own-1", 1);
+    expect(settle.settleRunOnce({ entry: ENTRY, run, outcome: "failed", diagnostic: failDiagnostic(), cardId })).toBe("settled");
+    const { kanbanGetCard } = await import("./kanban-board.js");
+    expect(kanbanGetCard(cardId)!.status).toBe("failed");
+  });
+
+  it("a superseded run cannot fail the successor's root", async () => {
+    // The card was re-owned by run B at generation 2; stale run A settles
+    // failed for the same card. The bare kanbanFail path would move it to
+    // failed; the fenced authority must leave it live.
+    const runA = reserve("fence-stale-A");
+    const cardId = await seedSupervisedRoot("fence-next-B", 2);
+    expect(settle.settleRunOnce({ entry: ENTRY, run: runA, outcome: "failed", diagnostic: failDiagnostic(), cardId })).toBe("settled");
+    const { kanbanGetCard } = await import("./kanban-board.js");
+    expect(kanbanGetCard(cardId)!.status).not.toBe("failed");
+  });
+
+  it("still fails an unsupervised card on the plain path", async () => {
+    const run = reserve("fence-plain-1");
+    const { kanbanEnqueue, kanbanGetCard } = await import("./kanban-board.js");
+    const cardId = kanbanEnqueue("plain worker", "task", "fence-plain-1", { type: "W" });
+    expect(settle.settleRunOnce({ entry: ENTRY, run, outcome: "failed", diagnostic: failDiagnostic(), cardId })).toBe("settled");
+    expect(kanbanGetCard(cardId)!.status).toBe("failed");
   });
 });

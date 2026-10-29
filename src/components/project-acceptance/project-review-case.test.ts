@@ -172,9 +172,37 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
 
     const supStore = new supStoreMod.WorkerSupervisionStore();
     const lane1 = kanban.kanbanEnqueue("lane A", "agent", undefined, { type: "W", parent_id: rootCardId });
-    supStore.insertContract(makeChildContract(lane1, rootCardId, ["lane1-feeds"]), lane1);
+    const lane1Contract = makeChildContract(lane1, rootCardId, ["lane1-feeds"]);
+    supStore.insertContract(lane1Contract, lane1);
+    // #1656: lane 1 is a SUCCESSFUL mapped child — terminal card + completed
+    // attempt + exact-contract envelope with every criterion passed.
+    const lane1Attempt = {
+      id: `att_lane1_ok`,
+      card_id: lane1,
+      contract_id: lane1Contract.id,
+      ordinal: 1,
+      executor_kind: "agent" as const,
+      executor_id: "spin",
+      status: "settled",
+      started_at: new Date().toISOString(),
+    };
+    supStore.insertAttempt(lane1Attempt);
+    supStore.lifecycleTransition(lane1Attempt.id, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+    supStore.insertResult(lane1Attempt.id, {
+      schema_version: 1,
+      attempt: { id: lane1Attempt.id, ordinal: 1, contract_id: lane1Contract.id, contract_digest: lane1Contract.digest, executor_kind: "agent", executor_id: "spin", started_at: lane1Attempt.started_at, finished_at: new Date().toISOString() },
+      outcome: "completed",
+      criteria: [{ criterion_id: `l${lane1}c1`, status: "passed", evidence_ids: ["a1"] }],
+      checks: [],
+      artifacts: [{ artifact_id: "a1", exists: true, kind: "file", ref: "handoff.md", size: 10 }],
+      worker_report: { summary: "done", claims: [], unresolved_risks: [] },
+    });
+    kanban.kanbanRunning(lane1);
+    kanban.kanbanComplete(lane1, null, "worker completed");
     const lane2 = kanban.kanbanEnqueue("lane B", "agent", undefined, { type: "W", parent_id: rootCardId });
-    supStore.insertContract(makeChildContract(lane2, rootCardId, ["lane2-newsletters"]), lane2);
+    const lane2Contract = makeChildContract(lane2, rootCardId, ["lane2-newsletters"]);
+    supStore.insertContract(lane2Contract, lane2);
+    // lane 2 is mapped but never produced a successful child — semantic failed
     const lane3 = kanban.kanbanEnqueue("lane C", "agent", undefined, { type: "W", parent_id: rootCardId });
     const lane3Contract = makeChildContract(lane3, rootCardId, ["lane3-web"]);
     supStore.insertContract(lane3Contract, lane3);
@@ -184,7 +212,7 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
       card_id: lane3,
       contract_id: lane3Contract.id,
       ordinal: 1,
-      executor_kind: "local_worker",
+      executor_kind: "agent",
       executor_id: "spin",
       status: "failed",
       started_at: new Date().toISOString(),
@@ -202,14 +230,24 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
     const lane3Policy = snap.root_contract.criteria.find(c => c.id === "lane3-web")!;
     expect(lane3Policy.required).toBe(false);
 
-    // Coverage hints: orc_owned for the four Orc duties, supported for lanes
+    // Coverage hints: orc_owned for the four Orc duties, semantic hints for lanes
     const inputs = new Map(snap.criterion_inputs.map(ci => [ci.criterion_id, ci]));
     expect(inputs.get("synthesis")?.coverage_hint).toBe("orc_owned");
     expect(inputs.get("synthesis")?.execution_owner).toBe("orc");
     expect(inputs.get("synthesis")?.mapped_child_contract_ids).toEqual([]);
+    // #1656: successful mapped children carry provenance and qualified evidence
     expect(inputs.get("lane1-feeds")?.coverage_hint).toBe("supported");
     expect(inputs.get("lane1-feeds")?.execution_owner).toBe("delegated");
+    expect(inputs.get("lane1-feeds")?.successful_mapped_child_contract_ids).toEqual([lane1Contract.id]);
+    expect(inputs.get("lane1-feeds")?.unsuccessful_mapped_child_contract_ids).toEqual([]);
+    expect(inputs.get("lane1-feeds")?.artifact_observation_ids).toEqual([`attempt:${lane1Attempt.id}:artifact:a1`]);
+    expect(inputs.get("lane1-feeds")?.observed_evidence_ids).toEqual([]);
+    // mapped children without any successful outcome are semantically failed
+    expect(inputs.get("lane2-newsletters")?.coverage_hint).toBe("failed");
+    expect(inputs.get("lane2-newsletters")?.unsuccessful_mapped_child_contract_ids).toEqual([lane2Contract.id]);
+    expect(inputs.get("lane3-web")?.coverage_hint).toBe("failed");
     expect(inputs.get("lane3-web")?.required).toBe(false);
+    expect(inputs.get("lane3-web")?.unsuccessful_mapped_child_contract_ids).toEqual([lane3Contract.id]);
 
     // Failed optional lane is durable evidence, not a coverage gap
     expect(snap.uncovered_criteria).toEqual([]);
@@ -244,18 +282,18 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
       criterion_inputs: [
         {
           criterion_id: "c_orc", description: "Orc synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis",
-          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
           artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned",
         },
         {
           criterion_id: "c_sup", description: "Delegated supported", required: true, execution_owner: "delegated", evidence_expectation: "observed",
-          mapped_child_contract_ids: ["cc_1"], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"],
+          mapped_child_contract_ids: ["cc_1"], successful_mapped_child_contract_ids: ["cc_1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"],
           failed_or_inconclusive_check_ids: ["chk_fail"], artifact_observation_ids: ["art_1"], retry_lineage_ids: ["card_1_2_attempts"],
           coverage_hint: "supported",
         },
         {
           criterion_id: "c_gap", description: "Delegated gap", required: true, execution_owner: "delegated", evidence_expectation: "observed",
-          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
           artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap",
         },
       ],
@@ -264,7 +302,7 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
       ],
       uncovered_criteria: ["c_gap"],
       child_summaries: [
-        { card_id: 1001, contract_id: "cc_1", outcome: "completed", criterion_statuses: [{ criterion_id: "c_sup", status: "passed" }], attempts: 2, executor_kind: "local_worker" },
+        { card_id: 1001, contract_id: "cc_1", outcome: "completed", criterion_statuses: [{ criterion_id: "c_sup", status: "passed" }], attempts: 2, executor_kind: "agent" },
       ],
       peer_contributions: [
         { card_id: 2001, peer: "molty", outcome: "completed", projection_summary: "Molty completed the analysis", root_criteria: ["c_sup"], provenance: '{"receiver_peer":"molty"}' },
@@ -370,33 +408,130 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
 
     const missing = projectReviewBrief("nonexistent", store);
     expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.code).toBe("review_case_unknown");
+      expect(missing.error).toContain("not found");
+    }
     const closed = projectReviewBrief(id, store);
     expect(closed.ok).toBe(false);
-    if (!closed.ok) expect(closed.error).toContain("not open");
+    if (!closed.ok) {
+      expect(closed.code).toBe("review_case_not_open");
+      expect(closed.error).toContain("not open");
+    }
   });
 
-  it("truncates prose but preserves every id and evidence reference", async () => {
+  it("#1677: a case whose snapshot is unparseable or structurally invalid maps to review_case_unreadable with unchanged prose", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.db.prepare(`INSERT INTO project_review_cases (id, project_card_id, generation, round, snapshot_digest, case_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run("rc_unparseable", 7718, 2, 1, "digest_brief_u", "{ not json", new Date().toISOString());
+    const unparseable = projectReviewBrief("rc_unparseable", store);
+    expect(unparseable.ok).toBe(false);
+    if (!unparseable.ok) {
+      expect(unparseable.code).toBe("review_case_unreadable");
+      expect(unparseable.error).toBe("review case snapshot is unparseable");
+    }
+
+    const { id: invalidId } = store.insertReviewCase(7719, 2, 1, { schema_version: 99, project_card_id: 0 }, "digest_brief_i");
+    const invalid = projectReviewBrief(invalidId, store);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.code).toBe("review_case_unreadable");
+      expect(invalid.error).toBe("review case snapshot is structurally invalid");
+    }
+  });
+
+  it("#1677: a parseable snapshot with malformed nested fields is also unreadable, not an escaped throw", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { id } = store.insertReviewCase(
+      7720,
+      1,
+      1,
+      { schema_version: 1, project_card_id: 7720, generation: 1 },
+      "digest_brief_nested_invalid",
+    );
+
+    expect(projectReviewBrief(id, store)).toEqual({
+      ok: false,
+      code: "review_case_unreadable",
+      error: "review case snapshot is structurally invalid",
+    });
+  });
+
+  it("retains validated prose exactly while preserving every id and evidence reference (#1772)", async () => {
     const reviewStoreMod = await import("./project-review-store.js");
     const { projectReviewBrief } = await import("./project-review-case.js");
     const store = new reviewStoreMod.ProjectReviewStore();
     const snapshot = makeProjectionSnapshot();
-    const longDesc = "x".repeat(1000);
+    const goal = "g".repeat(4000);
+    const longDesc = "x".repeat(500);
+    const longOutput = "o".repeat(500);
     snapshot.root_contract = {
       ...snapshot.root_contract,
-      goal: "g".repeat(5000),
+      goal,
       criteria: snapshot.root_contract.criteria.map(c => ({ ...c, description: c.id === "c_sup" ? longDesc : c.description })),
+      required_outputs: snapshot.root_contract.required_outputs.map(o => ({ ...o, description: o.id === "out_required" ? longOutput : o.description })),
     };
     const { id } = store.insertReviewCase(7717, 2, 1, snapshot, "digest_brief_4");
 
     const result = projectReviewBrief(id, store);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.goal.length).toBeLessThanOrEqual(1000);
+    expect(result.brief.goal).toBe(goal);
+    expect(result.brief.goal.length).toBe(4000);
     const sup = result.brief.criteria.find(c => c.criterion_id === "c_sup")!;
-    expect(sup.description.length).toBeLessThanOrEqual(300);
+    expect(sup.description).toBe(longDesc);
+    expect(sup.description.length).toBe(500);
+    const out = result.brief.outputs.find(o => o.output_id === "out_required")!;
+    expect(out.description).toBe(longOutput);
+    expect(out.description.length).toBe(500);
     expect(sup.compatible_evidence.observed).toEqual(["chk_1"]);
     expect(result.brief.uncovered_criteria).toEqual(["c_gap"]);
     expect(result.brief.peer_claims[0]!.card_id).toBe(2001);
+  });
+
+  it("#1772 bounds peer projection summaries once with an announcement", async () => {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { ReviewCaseAssembler, projectReviewBrief } = await import("./project-review-case.js");
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+
+    const rootCardId = kanban.kanbanEnqueue("root-peer-bound", "task", `run-peer-${Date.now()}-${Math.random().toString(36).slice(2)}`, { type: "O" });
+    reviewStore.insertContract(makeRootContractV2(rootCardId, [{ id: "c1", required: true, execution_owner: "delegated" }]));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+
+    const rawProjection = "p".repeat(5000);
+    const notes = JSON.stringify({
+      parent_project_id: rootCardId,
+      projection: rawProjection,
+      root_criteria: ["c1"],
+      peer: "molty",
+      provenance: { receiver_peer: "molty" },
+    });
+    const peerCardId = kanban.kanbanEnqueue("peer contrib", "peer", undefined, { type: "contribution", parent_id: rootCardId, notes, sourcePeer: "molty" });
+    kanban.requireTaskDatabase().prepare(`UPDATE kanban_board SET status = 'done', source = 'peer', type = 'contribution' WHERE id = ?`).run(peerCardId);
+
+    const assembler = new ReviewCaseAssembler();
+    const snapshot = await assembler.assembleCase(rootCardId, 1, 1);
+    expect("error" in snapshot).toBe(false);
+    if ("error" in snapshot) return;
+    const stored = snapshot.peer_contributions.find(c => c.card_id === peerCardId);
+    expect(stored).toBeDefined();
+    expect(stored!.projection_summary.startsWith("p".repeat(2000))).toBe(true);
+    expect(stored!.projection_summary).toContain("[+3000 chars omitted]");
+    expect(stored!.projection_summary.length).toBeLessThan(2500);
+
+    const { id } = reviewStore.insertReviewCase(rootCardId, 1, 1, snapshot, "digest_peer_bound");
+    const brief = projectReviewBrief(id, reviewStore);
+    expect(brief.ok).toBe(true);
+    if (!brief.ok) return;
+    const claimed = brief.brief.peer_claims.find(c => c.card_id === peerCardId);
+    expect(claimed).toBeDefined();
+    expect(claimed!.projection_summary).toBe(stored!.projection_summary);
   });
 
   it("projects child metadata without exposing an embedded Worker result envelope", async () => {
@@ -421,5 +556,259 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
     expect(result.brief.children[0]).not.toHaveProperty("result");
     expect(JSON.stringify(result.brief)).not.toContain("/private/path");
     expect(JSON.stringify(result.brief)).not.toContain("raw Worker prose");
+  });
+});
+
+describe("ReviewCaseAssembler #1656 contract-level evidence", () => {
+  async function setupProject(criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc" }>): Promise<{ rootCardId: number; kanban: typeof import("../tasks/kanban-board.js"); reviewStoreMod: typeof import("./project-review-store.js"); supStoreMod: typeof import("../worker-supervision-store.js"); reviewStore: import("./project-review-store.js").ProjectReviewStore; supStore: import("../worker-supervision-store.js").WorkerSupervisionStore }> {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const supStoreMod = await import("../worker-supervision-store.js");
+    const rootCardId = kanban.kanbanEnqueue("root", "task", `run-${Date.now()}`, { type: "O" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract(makeRootContractV2(rootCardId, criteria));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+    return { rootCardId, kanban, reviewStoreMod, supStoreMod, reviewStore, supStore: new supStoreMod.WorkerSupervisionStore() };
+  }
+
+  async function seedChild(
+    ctx: { rootCardId: number; supStore: import("../worker-supervision-store.js").WorkerSupervisionStore; kanban: typeof import("../tasks/kanban-board.js") },
+    opts: {
+      supports: string[];
+      outcome: "success" | "failed" | "missing_result" | "no_attempt";
+      checkId?: string;
+    },
+  ): Promise<{ cardId: number; contractId: string; attemptId?: string }> {
+    const { supStore, kanban, rootCardId } = ctx;
+    const cardId = kanban.kanbanEnqueue("lane", "agent", undefined, { type: "W", parent_id: rootCardId });
+    const contract = makeChildContract(cardId, rootCardId, opts.supports);
+    supStore.insertContract(contract, cardId);
+
+    if (opts.outcome === "no_attempt") return { cardId, contractId: contract.id };
+
+    const attemptId = `att_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    supStore.insertAttempt({
+      id: attemptId, card_id: cardId, contract_id: contract.id, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin", status: "settled",
+      started_at: new Date().toISOString(),
+    });
+
+    if (opts.outcome === "success") {
+      supStore.lifecycleTransition(attemptId, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+      supStore.insertResult(attemptId, {
+        schema_version: 1,
+        attempt: { id: attemptId, ordinal: 1, contract_id: contract.id, contract_digest: contract.digest, executor_kind: "agent", executor_id: "spin", started_at: new Date().toISOString(), finished_at: new Date().toISOString() },
+        outcome: "completed",
+        criteria: [{ criterion_id: `l${cardId}c1`, status: "passed", evidence_ids: [opts.checkId ?? "a1"] }],
+        checks: opts.checkId ? [{ check_id: opts.checkId, argv: ["true"], started_at: "", finished_at: "", timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "", stderr_excerpt: "" }] : [],
+        artifacts: [{ artifact_id: "a1", exists: true, kind: "file", ref: "handoff.md", size: 10 }],
+        worker_report: { summary: "ok", claims: [], unresolved_risks: [] },
+      });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanComplete(cardId, null, "worker completed");
+    } else if (opts.outcome === "failed") {
+      supStore.lifecycleTransition(attemptId, ["pending"], "failed", { status: "failed", settled_at: new Date().toISOString() });
+      supStore.insertResult(attemptId, {
+        schema_version: 1,
+        attempt: { id: attemptId, ordinal: 1, contract_id: contract.id, contract_digest: contract.digest, executor_kind: "agent", executor_id: "spin", started_at: new Date().toISOString(), finished_at: new Date().toISOString() },
+        outcome: "completed",
+        criteria: [{ criterion_id: `l${cardId}c1`, status: "failed", evidence_ids: ["a1"] }],
+        checks: [],
+        artifacts: [{ artifact_id: "a1", exists: false, kind: "file", ref: "handoff.md", error: "not found" }],
+        worker_report: { summary: "nope", claims: [], unresolved_risks: [] },
+      });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanFail(cardId, "worker completed without passing acceptance");
+    } else {
+      // missing_result — a completed attempt lifecycle with no persisted envelope
+      supStore.lifecycleTransition(attemptId, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanComplete(cardId, null, "worker completed");
+    }
+    return { cardId, contractId: contract.id, attemptId };
+  }
+
+  it("all failed mapped children: hint failed, negative evidence only, no positive arrays", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+    const b = await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("failed");
+    expect(input.successful_mapped_child_contract_ids).toEqual([]);
+    expect([...input.unsuccessful_mapped_child_contract_ids].sort()).toEqual([a.contractId, b.contractId].sort());
+    expect(input.observed_evidence_ids).toEqual([]);
+    expect(input.artifact_observation_ids).toEqual([]);
+    // each failed child contributes one qualified negative id (criterion
+    // evidence and the missing-artifact observation dedupe to the same id)
+    expect(input.failed_or_inconclusive_check_ids).toHaveLength(2);
+    expect(input.failed_or_inconclusive_check_ids.every(id => id.startsWith("attempt:"))).toBe(true);
+    expect(new Set(input.failed_or_inconclusive_check_ids).size).toBe(2);  });
+
+  it("one successful mapped child: hint supported, qualified positive evidence", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("supported");
+    expect(input.successful_mapped_child_contract_ids).toEqual([a.contractId]);
+    expect(input.unsuccessful_mapped_child_contract_ids).toEqual([]);
+    expect(input.artifact_observation_ids).toEqual([`attempt:${a.attemptId}:artifact:a1`]);
+    expect(input.failed_or_inconclusive_check_ids).toEqual([]);
+  });
+
+  it("mixed outcomes: hint conflicting, one contradiction candidate naming card and contract", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+    await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const snapshot = snap as ReviewCaseSnapshot;
+    const input = snapshot.criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("conflicting");
+    expect(input.successful_mapped_child_contract_ids).toHaveLength(1);
+    expect(input.unsuccessful_mapped_child_contract_ids).toHaveLength(1);
+    const contradiction = snapshot.contradiction_candidates.find(c => c.affected_criterion_ids.includes("r1"));
+    expect(contradiction).toBeDefined();
+    expect(contradiction!.sources.every(s => /^card:\d+:.+$/.test(s))).toBe(true);
+  });
+
+  it("reused local evidence ids from different children stay distinct via attempt qualification", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success", checkId: "v1" });
+    const b = await seedChild(ctx, { supports: ["r1"], outcome: "success", checkId: "v1" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.observed_evidence_ids).toEqual([
+      `attempt:${a.attemptId}:check:v1`,
+      `attempt:${b.attemptId}:check:v1`,
+    ]);
+    expect(new Set(input.observed_evidence_ids).size).toBe(2);
+  });
+
+  it("a completed attempt with no persisted envelope is not successful evidence", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    await seedChild(ctx, { supports: ["r1"], outcome: "missing_result" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("failed");
+    expect(input.successful_mapped_child_contract_ids).toEqual([]);
+    expect(input.observed_evidence_ids).toEqual([]);
+  });
+
+  it("child criterion ids are never compared to root criterion ids", async () => {
+    // the child's own criteria are l<card>c1 — completely unrelated names to
+    // the root criterion r1; classification is contract-level
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("supported");
+    expect(input.successful_mapped_child_contract_ids).toEqual([a.contractId]);
+    expect(input.artifact_observation_ids).toEqual([`attempt:${a.attemptId}:artifact:a1`]);
+  });
+});
+
+describe("ReviewCaseAssembler #1791 report evidence observations", () => {
+  const RUN_COLS = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
+
+  async function setupOrcOnly(source: string, sourceId?: string): Promise<{ rootCardId: number; runId: string }> {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const rootCardId = kanban.kanbanEnqueue("root", source, sourceId, { type: "O" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract(makeRootContractV2(rootCardId, [{ id: "q1", required: true, execution_owner: "orc" }]));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+    return { rootCardId, runId: sourceId ?? "" };
+  }
+
+  function insertRun(db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } }, run: { runId: string; cardId: number | null; contractJson: string | null }): void {
+    const now = Date.now();
+    db.prepare(`INSERT INTO task_runs (${RUN_COLS.join(", ")}) VALUES (${RUN_COLS.map(() => "?").join(", ")})`).run(
+      run.runId, "t", "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
+      run.cardId, null, null, null, run.contractJson, process.pid, null);
+  }
+
+  async function assemble(rootCardId: number): Promise<ReviewCaseSnapshot> {
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    return snap as ReviewCaseSnapshot;
+  }
+
+  it("unscheduled root projects observe not_applicable without touching task_runs", async () => {
+    const { rootCardId } = await setupOrcOnly("agent");
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "not_applicable", reason: "unscheduled_project" });
+  });
+
+  it("task-sourced root with empty source identity observes occurrence_missing, not not_applicable", async () => {
+    const { rootCardId } = await setupOrcOnly("task", "");
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "unavailable", code: "occurrence_missing" });
+  });
+
+  it("task-sourced root without an occurrence row observes occurrence_missing", async () => {
+    const { rootCardId } = await setupOrcOnly("task", `run-norow-${Date.now()}`);
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "occurrence_missing" });
+  });
+
+  it("occurrence bound to another card observes occurrence_mismatch", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-mismatch-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId + 1000, contractJson: null });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "occurrence_mismatch" });
+  });
+
+  it("malformed snapshot observes snapshot_invalid, never absence", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-malformed-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId, contractJson: "{oops" });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "snapshot_invalid" });
+  });
+
+  it("null snapshot observes not_applicable/no_report_contract", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-nocontract-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId, contractJson: null });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "not_applicable", reason: "no_report_contract" });
+  });
+
+  it("declared report with no file observes invalid/artifact_not_found", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-nofile-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), {
+      runId,
+      cardId: rootCardId,
+      contractJson: JSON.stringify({
+        artifactPath: join(TEST_HOME, "workspace", "ghost.md"),
+        minBytes: 1, requiredSections: [], baseline: { existed: false },
+      }),
+    });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "invalid", code: "artifact_not_found", run_id: runId });
+    // no positive id is registered anywhere
+    expect(snap.criterion_inputs.find(c => c.criterion_id === "q1")!.artifact_observation_ids).toEqual([]);
   });
 });

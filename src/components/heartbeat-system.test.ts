@@ -59,7 +59,9 @@ describe("HeartbeatSystem", { timeout: 30000 }, () => {
 
   it("#1584: a task hanging past the standby threshold must not trigger a standby restart", async () => {
     const onStandbyResume = vi.fn();
-    let release: (() => void) | null = null;
+    // No-op initial: assigned inside the hung-task closure, which is invisible
+    // to control-flow analysis (same pattern as memory-runtime.test.ts).
+    let release: () => void = () => {};
     const hung = vi.fn().mockImplementation(
       () => new Promise<HeartbeatTaskOutcome>((resolve) => { release = () => resolve({ state: "idle" }); }),
     );
@@ -73,7 +75,7 @@ describe("HeartbeatSystem", { timeout: 30000 }, () => {
     // span (20s) exceeds the 15s standby threshold (3 x interval).
     await vi.advanceTimersByTimeAsync(5000 + 10);
     await vi.advanceTimersByTimeAsync(4 * 5000);
-    release?.();
+    release();
     await vi.advanceTimersByTimeAsync(5000 + 10);
 
     expect(onStandbyResume).not.toHaveBeenCalled();

@@ -3,8 +3,8 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
+import { canonicalRequestHash } from "./contract.js";
 import { ContributionStore } from "./contribution-store.js";
-import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { RequesterContributionService } from "./requester-contribution-service.js";
 
 let db: import("better-sqlite3").Database;
@@ -71,16 +71,16 @@ function makeEnv(): Env {
     kanbanComplete: () => {},
     kanbanFail: () => {},
   });
-  const reviewStore = new ProjectReviewStore(wrapper as any);
-  const env: Env = {
+  // #1792: Env requires the service, but the service closes over env —
+  // construct the shell first, then attach (same pattern as before).
+  const env = {
     sends: [],
     wakes: [],
     nextResponse: { version: 1, request_id: "req_1", decision: "declined", reason_code: "policy" },
-  };
+  } as unknown as Env;
   env.service = new RequesterContributionService({
     contributionStore,
     taskDb: wrapper as any,
-    reviewStore,
     askHelp: async (peer, request) => {
       env.sends.push({ peer, request });
       if (env.nextError) throw env.nextError;
@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 describe("RequesterContributionService", () => {
-  it("create_cli_project: root, supervision, and proxy exist before the transport is invoked", async () => {
+  it("create_cli_project: root, supervised run, and proxy exist before the transport is invoked", async () => {
     const env = makeEnv();
     env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_abc" };
     const result = await env.service.delegate({
@@ -144,8 +144,12 @@ describe("RequesterContributionService", () => {
     expect(root.status).toBe("queued");
     expect(root.goal).toContain("req_1");
 
-    const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(root.id) as any;
-    expect(sup.state).toBe("awaiting_contract");
+    const run = db.prepare("SELECT run_id, root_kind, state FROM workflow_runs WHERE root_card_id = ?").get(root.id) as any;
+    expect(run).toBeDefined();
+    expect(run.root_kind).toBe("interactive");
+    expect(run.state).toBe("admitted");
+    const planCmd = db.prepare("SELECT COUNT(*) as cnt FROM workflow_commands WHERE run_id = ? AND action = 'plan'").get(run.run_id) as any;
+    expect(planCmd.cnt).toBe(1);
 
     const proxy = db.prepare("SELECT * FROM kanban_board WHERE type = 'contribution'").get() as any;
     expect(proxy).toBeDefined();
@@ -161,6 +165,37 @@ describe("RequesterContributionService", () => {
     expect(result.proxyCardId).toBe(proxy.id);
     expect(result.decision).toBe("accepted");
     expect(result.contributionRef).toBe("help_abc");
+  });
+
+  it("ledger stores the canonical request hash so the receiver can agree on it (#1853)", async () => {
+    const env = makeEnv();
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_agree" };
+    await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+
+    expect(env.sends).toHaveLength(1);
+    const sent = env.sends[0]!.request;
+    const ledger = db.prepare("SELECT request_hash FROM peer_contributions WHERE peer = 'molty'").get() as any;
+    // The stored value must be a pure function of the request — the receiver
+    // stores canonicalRequestHash too, and the live gate cross-checks equality.
+    // Binding the local root card or criteria here made agreement unsatisfiable.
+    expect(ledger.request_hash).toBe(canonicalRequestHash(sent));
+
+    // Same request replays without conflict; different content still conflicts.
+    const replay = await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+    expect(replay.decision).toBe("accepted");
+    await expect(env.service.delegate({
+      peer: "molty",
+      request: makeRequest({ goal: "DIFFERENT GOAL" }),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    })).rejects.toThrow(/conflicts/);
   });
 
   it("accepted response adopts the receiver contribution reference", async () => {

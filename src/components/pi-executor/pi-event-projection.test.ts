@@ -34,8 +34,8 @@ describe("projectPiEvent", () => {
     it("message_update produces no progress, no log, no settlement", () => {
       const proj = projectPiEvent({
         type: "message_update",
-        message: { role: "assistant", content: "x".repeat(10_000) } as any,
-        assistantMessageEvent: {} as any,
+        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        assistantMessageEvent: { type: "done", reason: "stop", message: { role: "assistant", api: "openai", provider: "openai", model: "test-model", content: [{ type: "text", text: "x".repeat(10_000) }], stopReason: "stop", usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 0 } },
       });
       expect(proj.progress).toEqual([]);
       expect(proj.settleCompletion).toBe(false);

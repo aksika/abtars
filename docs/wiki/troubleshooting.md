@@ -135,7 +135,7 @@ npm install && npm run build
 
 # 3. Build abtars
 cd ~/.abtars-releases/src/abtars
-npm install && node esbuild.config.js
+npm install && npm run bundle
 
 # 4. Run the install directly via node
 node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js install
@@ -143,8 +143,8 @@ node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js install
 
 For subsequent updates from source:
 ```bash
-cd ~/.abtars-releases/src/abtars && git pull && node esbuild.config.js
-node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js update --from-local
+cd ~/.abtars-releases/src/abtars && git pull && npm run bundle
+node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js update --dev ~/.abtars-releases/src/abtars
 ```
 
 ---
@@ -171,7 +171,8 @@ cd ~/.abtars-releases/src/abtars && git pull origin dev
 bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 ```
 
-The watchdog health probe runs for ~120s after the script. If the bridge is still not healthy, check `~/.abtars/logs/bridge.log`.
+The watchdog health probe runs for ~3 min after the script (same budget as
+the deploy health probe). If the bridge is still not healthy, check `~/.abtars/logs/bridge.log`.
 
 ### `abtars update` hangs or stalls
 
@@ -188,15 +189,17 @@ npm uninstall -g abtars && npm install -g abtars@alpha
 
 A previous process is still holding the port:
 ```bash
-abtars stop --force
-abtars start
+abtars doctor --fix
+abtars restart --cold
 ```
 
 ### Memory not working
 
 abmind is not installed:
 ```bash
-npm install -g abmind@alpha && abmind install && abtars restart
+npm install -g abmind
+abmind install
+abtars restart
 ```
 
 ---

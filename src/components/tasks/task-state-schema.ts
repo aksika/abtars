@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
   session_id         TEXT,
   execution_id       TEXT,
   terminal_request_json TEXT,
+  report_contract_json TEXT,
   owner_pid          INTEGER NOT NULL,
   owner_started_at   INTEGER,
   finished_at        INTEGER,
@@ -132,6 +133,9 @@ export function initTaskStateSchema(db: TaskStateDb): void {
   // bounded-recovery columns existed (SQLite errors silently when present).
   try { db.exec(`ALTER TABLE task_state ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0`); } catch { /* already present */ }
   try { db.exec(`ALTER TABLE task_state ADD COLUMN last_pause_warn_at INTEGER`); } catch { /* already present */ }
+  // #1729 v2: report-contract snapshot for the synthesis admission check.
+  // Nullable so pre-migration rows read NULL (→ today's routing, never a new path).
+  try { db.exec(`ALTER TABLE task_runs ADD COLUMN report_contract_json TEXT`); } catch { /* already present */ }
   const p = statePath();
   if (!existsSync(p)) return;
 

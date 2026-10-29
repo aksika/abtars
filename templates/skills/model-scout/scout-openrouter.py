@@ -90,8 +90,9 @@ def make_entry(mid, mdata, providers, alive, provider_name):
     ctx = mdata.get("context_length") or 0
     top_out = mdata.get("top_provider", {}).get("max_completion_tokens") or 0
     pricing = mdata.get("pricing", {})
-    inp = float(pricing.get("prompt", 0) or 0)
-    out = float(pricing.get("completion", 0) or 0)
+    # OpenRouter pricing is $/token; models.json stores $/1M (#1830).
+    inp = float(pricing.get("prompt", 0) or 0) * 1_000_000
+    out = float(pricing.get("completion", 0) or 0) * 1_000_000
     is_free = ":free" in mid
     rank = 1 if ctx >= 500000 else (2 if ctx >= 200000 else 3)
 

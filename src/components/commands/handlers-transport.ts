@@ -1,8 +1,7 @@
 import { logInfo, logError } from "../logger.js";
-import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
-import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../session-control/types.js";
 
 const TAG = "cmd";
 
@@ -55,28 +54,25 @@ export async function handleCompact(text: string, ctx: CommandContext): Promise<
       await ctx.reply("Compaction not available for this session.");
       return true;
     }
-    // #1406: exact durable target through the backend-neutral control plane.
-    const { getSessionControlService } = await import("../session-control/instance.js");
-    const service = getSessionControlService();
-    if (!service) {
-      await ctx.reply("Compaction is unavailable (control service not initialized).");
-      return true;
-    }
     const instructions = text.replace(/^\/compact\b/i, "").trim();
     if (Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
       await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
       return true;
     }
-    const result = await service.execute(
-      { kind: "durable_conversation", principalId: ctx.userId, sessionId: ctx.sessionKey },
-      { kind: "compact", reason: "manual", customInstructions: instructions || undefined },
-    );
-    // #1619: a completed durable compaction invalidates the attached
-    // transport's measured context usage so stale fill is never shown again.
-    if (result.status === "completed") {
-      resolveAttachedTransport(ctx).invalidateContextUsage?.();
+    // #1940: /compact compacts the Pi session (SOUL survives: it is the
+    // session system prompt, not history).
+    const attached = resolveAttachedTransport(ctx) as unknown as {
+      compactSession?: (sessionKey: string, customInstructions?: string) => Promise<unknown>;
+      invalidateContextUsage?: () => void;
+    };
+    if (attached && typeof attached.compactSession === "function") {
+      await attached.compactSession(ctx.sessionKey, instructions || undefined);
+      attached.invalidateContextUsage?.();
+      await ctx.reply("Compaction complete.");
+      return true;
     }
-    await ctx.reply(formatCompactReply(result));
+    // Non-Pi routes: ACP session compaction is not maintained (#1940 R8).
+    await ctx.reply("Compaction is not supported for this session.");
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("Compaction failed.");
@@ -124,10 +120,28 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // #1447: embedded Pi has no private emergency engine. #1468 owns the
-  // dedicated emergency path; #1467 only defines the global ACP hailMary entry.
+  // #1875: hot-reload Pi model data on every /model(s) entry so the picker
+  // menu and the dispatch gates agree on the current catalog. Best-effort
+  // and bounded — a failed refresh keeps the previous snapshot and never
+  // blocks the command.
+  {
+    const { refreshPiCatalog } = await import("../transport/pi-catalog.js");
+    const { refreshPiRuntime } = await import("../transport/pi-runtime.js");
+    await refreshPiCatalog();
+    await refreshPiRuntime();
+  }
+
+  // #1468: the early emergency router (recovery handler + first pipeline
+  // middleware) claims /emergency and the hailmary aliases. This branch is a
+  // defensive fallback only when neither router is wired (isolated caller) —
+  // it reports the live service snapshot, never a second activation path.
   if (arg === "emergency" || arg === "hailmary") {
-    await ctx.reply("❌ Emergency execution is unavailable until #1468. Normal transport switching is available with /route pi-ai or /route acp.");
+    const state = ctx.emergencyExecution?.status();
+    if (state && state.kind !== "inactive") {
+      await ctx.reply(`Emergency mode is ${state.kind}${state.owner ? ` (owner ${state.owner.userId})` : ""}. Send a text message in the owning chat, or /model restore to exit.`);
+    } else {
+      await ctx.reply("❌ Emergency execution is unavailable in this context — the emergency router is not wired here.");
+    }
     return true;
   }
 
@@ -148,77 +162,21 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset / primary / reset — reset model health buckets
+  // /models health reset — retired with the provider-availability memo
+  // (#1940 R1: no memo, no cooldown gate — Pi owns retry and availability).
+  // The command shape stays so existing muscle memory lands on a truthful
+  // reply instead of an unknown-subcommand fallthrough.
   if (arg === "health reset" || arg === "primary" || arg === "reset") {
-    const t = ctx.transport as unknown as {
-      policy?: { registry: { resetAll: () => void } };
-    };
-    if (t.policy?.registry) {
-      t.policy.registry.resetAll();
-      await ctx.reply("Model health reset — all models available (sticky credits/auth cleared).");
-    } else {
-      await ctx.reply("No fallback policy configured.");
-    }
+    await ctx.reply("No provider cooldowns are tracked — Pi owns retry and availability, so there is nothing to clear.");
     return true;
   }
 
-  // /model doctor — probe all models under current transport
+  // /model doctor — retired with the HTTP model-health probes
+  // (#1940: Pi owns retry and availability; no endpoint probes, no
+  // models.json writes). The command shape stays so existing muscle memory
+  // lands on a truthful reply instead of an unknown-subcommand fallthrough.
   if (arg === "doctor") {
-    if (!prof) { await ctx.reply("❌ No transport configured."); return true; }
-    const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
-    const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
-
-    // Collect all models under this provider from the active route block + hailMary
-    const models = new Set<string>();
-    const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
-    if (ra) {
-      for (const [, agent] of Object.entries(ra.agents)) {
-        if (agent.provider === prof.providerName) models.add(agent.model);
-      }
-      for (const fb of ra.fallbacks ?? []) {
-        if (fb.provider === prof.providerName) models.add(fb.model);
-      }
-    }
-    if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
-
-    await ctx.reply(`🩺 Checking ${models.size} models on ${prof.providerName}...`);
-    const results: string[] = [];
-    const { loadModels } = await import("../transport-config.js");
-    const catalog = loadModels();
-
-    for (const model of models) {
-      try {
-        const res = await fetch(`${endpoint}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-          body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (res.ok) {
-          results.push(`✓ ${model} — alive`);
-          if (catalog[model]) catalog[model]!.status = "alive";
-        } else {
-          const body = await res.text().catch(err => { logAndSwallow(TAG, "read model probe error body", err); return ""; });
-          const short = body.slice(0, 80).replace(/\n/g, " ");
-          const status = res.status === 404 ? "dead" : res.status === 403 ? "subscription" : res.status === 429 ? "rate_limited" : "error";
-          results.push(`❌ ${model} — ${status} (${res.status}: ${short})`);
-          if (catalog[model]) { catalog[model]!.status = status as any; (catalog[model] as any).error = `${res.status}: ${short}`; }
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`⚠️ ${model} — timeout/error (${msg.slice(0, 60)})`);
-        if (catalog[model]) { catalog[model]!.status = "dead" as any; (catalog[model] as any).error = msg.slice(0, 80); }
-      }
-      if (catalog[model]) (catalog[model] as any).lastChecked = new Date().toISOString();
-    }
-
-    // Write updated catalog
-    const { writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { configDir } = await import("../transport-config.js");
-    writeFileSync(join(configDir(), "models.json"), JSON.stringify(catalog, null, 2) + "\n");
-
-    await ctx.reply(`🩺 Model Health:\n${results.join("\n")}`);
+    await ctx.reply("Model health probes are retired — Pi owns retry and availability, so there is nothing to probe.");
     return true;
   }
 
@@ -248,14 +206,18 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
     const activeRa = candidate.routes[candidate.activeRoute];
     if (activeRa) activeRa.agents["main"]!.model = newModel;
-    const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
-    cleanDemotedModels(candidate, newModel);
+    const { writeTransportConfig } = await import("../transport-config.js");
     const result = writeTransportConfig(candidate, `main model → ${newModel}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
     }
-    if ("setModel" in ctx.transport) {
+    // #1940: /model keeps the conversation — apply to the attached
+    // session's own transport (Pi setModel switches without dispose).
+    const attached = resolveAttachedTransport(ctx) as unknown as { setModel?: (m: string) => Promise<void> };
+    if (attached && typeof attached.setModel === "function") {
+      await attached.setModel(newModel);
+    } else if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
     await ctx.reply(`✓ Switched to ${newModel}`);
@@ -321,6 +283,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { getEnv } = await import("../env-schema.js");
     const validation = validateProviderReady(providerName, provider, getEnv());
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
+    // #1757: live Pi-auth gate before a global switch to a Pi-managed provider.
+    if (provider.authSource === "pi") {
+      const { checkPiManagedAuth } = await import("../transport/pi-runtime.js");
+      const readiness = await checkPiManagedAuth(providerName);
+      if (!readiness.ok) { await ctx.reply(`❌ ${providerName}: ${readiness.detail}`); return true; }
+    }
     const defaults = loadProviderDefaults(providerName);
     if (defaults?.main) {
       const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
@@ -374,11 +342,13 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   const names: Record<string, string> = { main: "Main", dreamy: "Dreamy", browsie: "Browsie", cody: "Cody" };
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
-    let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
+    // #1757: Pi-managed entries are distinguished from abtars-key and keyless
+    // entries; Pi owns retry and availability (no health probes).
+    const piManaged = r?.provider.authSource === "pi" ? ", Pi-managed" : "";
+    let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"}${piManaged})`;
     if (a === "main") {
       const ra = tc ? routeAssignments(tc) : null;
       const fbLines = (ra?.fallbacks ?? []).map((f, i) => {
-        if ((f as any).demoted) return null;
         return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
       }).filter(Boolean).join("\n");
       if (fbLines) line += "\n" + fbLines;
@@ -389,15 +359,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   if (ra?.fallbacks?.length) {
     lines.push(`\nFallback chain: ${ra.fallbacks.map(f => f.model).join(" → ")}`);
   }
-  // #1386: Show effective candidate order from the attached transport's policy
-  const transport = attached as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
-  if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
-    const { formatCandidateChain } = await import("../transport/model-candidates.js");
-    lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
-  }
   if (ctx.hailMary) {
     lines.push(`hailMary: ${ctx.hailMary.model} `);
   }
+  // #1468: live emergency state from the service snapshot.
+  const emergency = ctx.emergencyExecution?.describeForOperator();
+  if (emergency) lines.push(emergency);
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;
@@ -412,8 +379,11 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 // reasoning level, never a display toggle. show/hide were removed — display
 // visibility is no longer coupled to effort. A transport without runtime
 // effort support returns an explicit unsupported response.
+//
+// #1654: /thinking is no longer an alias — it is a display-only toggle, see
+// handleThinking below.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
+  const arg = text.replace(/^\/effort\s*/i, "").trim().toLowerCase();
   const transport = resolveAttachedTransport(ctx);
 
   if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
@@ -448,6 +418,34 @@ export async function handleEffort(text: string, ctx: CommandContext): Promise<b
     return true;
   }
   await ctx.reply("Runtime reasoning effort is not supported by this transport.");
+  return true;
+}
+
+/**
+ * #1654: /thinking is a display toggle only — it never touches reasoning
+ * effort (that is /effort). Session-scoped, default hidden.
+ */
+export async function handleThinking(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/thinking\s*/i, "").trim().toLowerCase();
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+
+  if (arg === "show" || arg === "on") {
+    if (!session) { await ctx.reply("No active session."); return true; }
+    session.showThinking = true;
+    await ctx.reply("Thinking display: shown");
+    return true;
+  }
+  if (arg === "hide" || arg === "off") {
+    if (!session) { await ctx.reply("No active session."); return true; }
+    session.showThinking = false;
+    await ctx.reply("Thinking display: hidden");
+    return true;
+  }
+  if (arg) {
+    await ctx.reply("Usage: /thinking show|hide (reasoning effort is /effort)");
+    return true;
+  }
+  await ctx.reply(`Thinking display: ${session?.showThinking ? "shown" : "hidden"}`);
   return true;
 }
 

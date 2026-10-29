@@ -72,6 +72,9 @@ const result = await esbuild.build({
     "abtars-rss": "src/cli/abtars-rss.ts",
     "abtars-todo": "src/cli/abtars-todo.ts",
     "abtars-supervisor-state": "src/supervisor/state-cli.ts",
+    // #1660: stdio MCP proxy spawned by ACP agents; never resolves/executes
+    // locally — forwards to the in-process host tool service.
+    "abtars-sealed-mcp": "src/cli/abtars-sealed-mcp.ts",
   },
   bundle: true,
   platform: "node",

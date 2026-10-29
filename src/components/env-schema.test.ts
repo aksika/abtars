@@ -6,7 +6,7 @@ describe("env-schema", () => {
 
   beforeEach(() => {
     _resetEnv();
-    for (const k of ["SELFHEAL_ENABLED", "CTX_WARN_PCT", "ACTIVE_MEMORY"]) {
+    for (const k of ["SELFHEAL_MODE", "CTX_WARN_PCT", "ACTIVE_MEMORY", "BASH_TOOL_TIMEOUT_SEC"]) {
       saved[k] = process.env[k];
       delete process.env[k];
     }
@@ -22,10 +22,21 @@ describe("env-schema", () => {
 
   it("returns frozen config with defaults", () => {
     const env = initEnv();
-    expect(env.selfhealEnabled).toBe(false);
+    expect(env.selfhealMode).toBe("off");
     expect(env.ctxWarnPct).toBe(70);
     expect(env.activeMemory).toBe(true);
     expect(Object.isFrozen(env)).toBe(true);
+  });
+
+  it("parses SELFHEAL_MODE values and fails closed on invalid", () => {
+    process.env["SELFHEAL_MODE"] = "investigation";
+    expect(initEnv().selfhealMode).toBe("investigation");
+    _resetEnv();
+    process.env["SELFHEAL_MODE"] = "full";
+    expect(initEnv().selfhealMode).toBe("full");
+    _resetEnv();
+    process.env["SELFHEAL_MODE"] = "banana";
+    expect(initEnv().selfhealMode).toBe("off");
   });
 
   it("getEnv auto-initializes on first call", () => {
@@ -51,10 +62,36 @@ describe("env-schema", () => {
     expect(() => initEnv()).toThrow("Invalid CTX_WARN_PCT");
   });
 
-  it("getApiKey reads dynamic env var", () => {
+  it("getApiKey reads dynamic env var", async () => {
     process.env["GROQ_API_KEY"] = "gsk_test123";
     const env = initEnv();
     expect(env.getApiKey("GROQ_API_KEY")).toBe("gsk_test123");
     delete process.env["GROQ_API_KEY"];
+  });
+
+  describe("BASH_TOOL_TIMEOUT_SEC (#1716)", () => {
+    it("defaults to 120", () => {
+      expect(initEnv().bashToolTimeoutSec).toBe(120);
+    });
+
+    it("parses a valid override", () => {
+      process.env["BASH_TOOL_TIMEOUT_SEC"] = "45";
+      expect(initEnv().bashToolTimeoutSec).toBe(45);
+    });
+
+    it("throws strict on a non-integer value", () => {
+      process.env["BASH_TOOL_TIMEOUT_SEC"] = "banana";
+      expect(() => initEnv()).toThrow("Invalid BASH_TOOL_TIMEOUT_SEC");
+    });
+
+    it.each(["0", "-5", "3601", "45.5", "1junk"])("throws on invalid value %s", (value) => {
+      process.env["BASH_TOOL_TIMEOUT_SEC"] = value;
+      expect(() => initEnv()).toThrow(/expected integer between 1 and 3600/);
+    });
+
+    it("accepts the upper bound", () => {
+      process.env["BASH_TOOL_TIMEOUT_SEC"] = "3600";
+      expect(initEnv().bashToolTimeoutSec).toBe(3600);
+    });
   });
 });

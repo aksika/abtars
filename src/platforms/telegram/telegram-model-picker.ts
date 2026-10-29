@@ -14,7 +14,7 @@ export interface PickerState {
 }
 
 export interface PickerDeps {
-  transport: { setModel?: (m: string) => Promise<void> | void; switchProvider?: (o: unknown) => void; [k: string]: unknown };
+  transport: { setModel?: (m: string) => Promise<void> | void; [k: string]: unknown };
   pipeline: { rebuildTransport?: () => Promise<void>; [k: string]: unknown };
   resetSessionForModelSwitch: (chatId: number, reason?: string) => Promise<void>;
 }
@@ -39,13 +39,28 @@ export function isModelPickerCallback(data: string): boolean {
  */
 const PICKER_MAX = 50;
 
-async function buildModelEntries(providerName: string, providerConfig: { transport?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string; authSource?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
   const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
 
-  // Tier 1: pi-catalog (small list → use directly)
+  // Tier 1: pi catalog (small list → use directly)
   let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
-  const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+  const { modelsForProviderSync, mapProviderName, logUnmappedProviderOnce } = await import("../../components/transport/pi-catalog.js");
   pi = modelsForProviderSync(providerName);
+  // #1875: for Pi-managed providers the menu must come from the refreshed
+  // runtime composition (builtins + local models store + Pi models.json) —
+  // the same source the dispatch gate reads — so updated models appear
+  // without a restart. Null/empty runtime list falls back to the static
+  // pi-ai catalog.
+  if (providerConfig?.authSource === "pi") {
+    const { piRuntimeModelsForProvider } = await import("../../components/transport/pi-runtime.js");
+    const runtimeCatalog = await piRuntimeModelsForProvider(providerName);
+    if (runtimeCatalog && runtimeCatalog.length > 0) pi = runtimeCatalog;
+  }
+  if (pi === null && providerConfig?.transport === "api" && !mapProviderName(providerName)) {
+    // #1747: no pi mapping → Tier 2 falls back to models.json; log once so the
+    // silently skipped stale-ID validation filter is observable.
+    logUnmappedProviderOnce(providerName);
+  }
   if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }
@@ -65,6 +80,15 @@ async function buildModelEntries(providerName: string, providerConfig: { transpo
 export async function handleModelPickerCallback(
   data: string, chatId: number, api: TelegramApi, state: PickerState, deps: PickerDeps,
 ): Promise<void> {
+  // #1875: the interactive callbacks bypass handleModels, so they refresh
+  // here before building any list. Best-effort and bounded — a failed
+  // refresh keeps the previous snapshot and never blocks the picker.
+  {
+    const { refreshPiCatalog } = await import("../../components/transport/pi-catalog.js");
+    const { refreshPiRuntime } = await import("../../components/transport/pi-runtime.js");
+    await refreshPiCatalog();
+    await refreshPiRuntime();
+  }
 
   if (data.startsWith("mb:")) {
     const target = data.slice(3);
@@ -234,10 +258,31 @@ export async function handleModelPickerCallback(
 
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
-    const validModels = getModelsForProvider(providerName);
-    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
+    // #1875: accept any model the picker could have offered — curated models.json
+    // or the pi catalogs — instead of curated alone. The menu's Tier-1 source can
+    // include models curated models.json doesn't list, so a curated-only gate
+    // rejected selections that were visible in the picker.
+    const curatedModels = getModelsForProvider(providerName);
+    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+    const piCatalogModels = modelsForProviderSync(providerName) ?? [];
+    let modelKnown = [...curatedModels, ...piCatalogModels].some(m => m.id === model);
+    if (!modelKnown && providerConfig.authSource === "pi") {
+      // Pi-managed providers dispatch through the runtime composition, so
+      // runtime knowledge is the authoritative gate for the refreshed menu.
+      const { isPiManagedModelKnown } = await import("../../components/transport/pi-runtime.js");
+      modelKnown = await isPiManagedModelKnown(providerName, model);
+    }
+    if (!modelKnown) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
+    // #1757: Pi-managed providers need a live runtime check — the sync shape
+    // validation above cannot see Pi login state. Refuse the switch with
+    // actionable guidance instead of writing a doomed assignment.
+    if (providerConfig.authSource === "pi") {
+      const { checkPiManagedAuth } = await import("../../components/transport/pi-runtime.js");
+      const readiness = await checkPiManagedAuth(providerName);
+      if (!readiness.ok) { await api.sendMessage(chatId, `❌ ${providerName}: ${readiness.detail}`); return; }
+    }
 
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
     const activeRa = candidate.routes[candidate.activeRoute];
@@ -248,8 +293,6 @@ export async function handleModelPickerCallback(
         if (!activeRa.fallbacks) activeRa.fallbacks = [];
         activeRa.fallbacks[fbIndex] = { model, provider: providerName };
       }
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(candidate, model);
       const wr = writeTransportConfig(candidate, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
       if (wr.ok) {
         try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
@@ -264,8 +307,6 @@ export async function handleModelPickerCallback(
       if (activeRa) {
         activeRa.agents[slot] = { ...activeRa.agents[slot]!, model, provider: providerName };
       }
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(candidate, model);
       const wr = writeTransportConfig(candidate, `${slot} → ${model} (${providerName})`);
       if (!wr.ok) {
         try { await api.sendMessage(chatId, `❌ ${slot} not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm model fail", err); }
@@ -290,41 +331,6 @@ export async function handleModelPickerCallback(
       if (isMain && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
         try { await api.sendMessage(chatId, `✓ Switched to ${model}`); } catch (err) { logAndSwallow(TAG, "confirm model switch", err); }
-      } else if (isMain && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
-        try {
-          const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
-          const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
-          const { buildCandidates } = await import("../../components/transport/model-candidates.js");
-          const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
-          // #1418: build candidates through the shared builder so each carries its
-          // complete identity tuple (provider/endpoint/apiKey/maxContext).
-          const route = tc.activeRoute;
-          const tcRa = tc.routes[route];
-          const fallbackCandidates = (tcRa?.fallbacks ?? []).map(fb => {
-            const tcWithFb = tcRa ? { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _fb: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
-            const fbRes = resolveAgent("_fb", tcWithFb);
-            return {
-              model: fb.model,
-              provider: fb.provider,
-              endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
-              apiKey: fbRes?.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey,
-              maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
-              source: "agent_fallback" as const,
-            };
-          });
-          const candidates = buildCandidates({
-            role: "main",
-            configured: { model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, maxContext: newResolved!.contextWindow, source: "primary" },
-            fallbacks: fallbackCandidates,
-          });
-          const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
-          const policy = new FallbackPolicy(candidates, registry);
-          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
-        } catch (err) {
-          await api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
-          return;
-        }
-        try { await api.sendMessage(chatId, `✓ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
       } else if (isMain && providerChanged) {
         const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
         try {

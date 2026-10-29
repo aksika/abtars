@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import type {
   AbmindClientLike,
+  AbmindClientErrorLike,
   AbmindPrivateMemoryLike,
   AbmindRouteSnapshotV1Like,
   SleepStatusLike,
 } from "./abmind-client-contract.js";
 
-import { logWarn } from "./logger.js";
+import { logDebug, logTrace, logWarn, isLogLevel, redactSecrets } from "./logger.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -17,13 +18,14 @@ export type MemoryRuntimeCapability =
   | "recall"
   | "recordMessage"
   | "instantStore"
-  | "editMemory"
   | "rebuildFts"
-  | "feedback"
   | "coreKnowledge"
   | "status"
-  | "durableContext"
-  | "compaction";
+  | "dreamQuestions"
+  | "dreamQuestionsNextPending"
+  // #1660: composite local sealed-secret capability (find + resolve on a
+  // local route). Absent for signed peers and remote routes.
+  | "sealedSecrets";
 
 export interface InstantStoreInput {
   userId: string;
@@ -33,33 +35,52 @@ export interface InstantStoreInput {
   emotionScore: number;
   confidence: number;
   classification: number;
+  /** #1660: class-3 only — descriptive label stored in content_en. */
+  sealedLabel?: string;
+  /** #1660: class-3 only — non-sensitive retrieval keyword. */
+  sealedKeyword?: string;
 }
 
-export interface InstantStoreResult {
-  stored: boolean;
-  memoriesCount?: number;
-  error?: string;
-  memoryId?: number;
-  semanticRevision?: number;
+/**
+ * #1659: normalized structural mutation failure shared by mutation paths.
+ * Fields are preserved from the protocol contract; the bridge code keeps its
+ * own stable `memory_*` classification.
+ */
+export interface MemoryMutationFailureFields {
+  readonly code: string;
+  readonly message: string;
+  readonly requestId: string;
+  readonly retryable: boolean;
+  readonly action: "fix_input" | "re_recall" | "retry" | "reconcile" | "stop";
+  readonly stage: "pre_dispatch" | "dispatch" | "response";
 }
 
-export interface EditMemoryInput {
-  memoryId: number;
-  expectedRevision: number;
-  userId: string;
-  contentEn?: string;
-  contentOriginal?: string;
-  memoryType?: string;
-  emotionScore?: number;
-  confidence?: number;
-  classification?: number;
+const MEMORY_FAILURE_MESSAGE_MAX = 512;
+const MEMORY_FAILURE_CODE_MAX = 64;
+const MEMORY_FAILURE_REQUEST_ID_MAX = 128;
+
+function boundedFailureText(value: unknown, max: number): string {
+  const raw = value instanceof Error
+    ? value.message
+    : value && typeof value === "object" && "message" in value && typeof (value as { message?: unknown }).message === "string"
+      ? (value as { message: string }).message
+      : String(value);
+  const redacted = redactSecrets(raw);
+  return redacted.length <= max ? redacted : `${redacted.slice(0, max - 3)}...`;
 }
 
-export interface EditMemoryResult {
-  ok: boolean;
-  error?: string;
-  semanticRevision?: number;
+function boundedFailureMessage(value: unknown): string {
+  return boundedFailureText(value, MEMORY_FAILURE_MESSAGE_MAX);
 }
+
+export type InstantStoreResult =
+  | {
+      readonly stored: true;
+      readonly memoriesCount: number;
+      readonly memoryId: number;
+      readonly semanticRevision: number;
+    }
+  | ({ readonly stored: false; readonly memoriesCount: 0 } & MemoryMutationFailureFields);
 
 export interface RecordMessageInput {
   userId: string;
@@ -81,40 +102,88 @@ export interface RecordMessageResult {
 export interface RuntimeRecallInput {
   query: string;
   userId: string;
+  /**
+   * #1928 M4 — required logical profile. Fast is compact regardless of
+   * route; normal/full are deliberate and never auto-skip. Auto-recall
+   * uses fast; explicit tools select normal/full.
+   */
+  profile: "recall_fast" | "recall_normal" | "recall_full";
+  /** Fast requires the verbatim current turn. */
+  rawTurn?: string;
+  /** Normal/full anchor: verbatim explicit text and/or 1–50 keywords. */
+  text?: string;
+  keywords?: string[];
+  /** Selected items, bounded by the profile ceiling. */
   limit?: number;
+  maxOutputBytes?: number;
+  deadlineMs?: number;
   maxClassification?: number;
-  original?: string;
   timeStart?: number;
   timeEnd?: number;
-  stages?: string[];
+  memoryType?: string;
+  scope?: string;
+  asOf?: string;
+  continuation?: string;
 }
 
+
 export interface RuntimeRecallHit {
+  /** Owner-rendered excerpt; injected verbatim, never re-rendered locally. */
   content: string;
-  score: number;
   date: string;
-  memoryId?: number;
-  source?: string;
-  contentOriginal?: string;
-  memoryType?: string;
-  trust?: number;
-  integrity?: number;
-  credibility?: number;
+  /**
+   * #1928 M4 — source-safe C2 ref key (`db:<layer>:<id>:<owner>:<version>`,
+   * `artifact:…`, `graph:…`). Numeric IDs never identify evidence alone;
+   * citations and support declarations name this ref.
+   */
+  ref: string;
+  kind: "db" | "artifact" | "graph";
+  layer?: string;
+  rationale?: string;
+  excerptProvenance?: string;
+  currentness?: string;
+  score?: number;
   classification?: number;
-  emotionScore?: number;
-  createdAt?: number;
-  semanticRevision?: number;
 }
 
 export interface RuntimeRecallResult {
   hits: RuntimeRecallHit[];
+  /** Owner-rendered text; injected verbatim. No local clipping. */
   context: string;
+  /** Packet status: skipped | empty | evidence | partial | unavailable | cancelled. */
+  status: string;
+  packetId?: string;
+  omissionReasons?: string[];
+  continuation?: string;
+}
+
+/**
+ * #1895 — narrow caller keywords for the explicit path. Accepted arrays
+ * cross verbatim (order, duplicates, and case preserved; no cap): any
+ * documented resource limit rejects oversize input explicitly rather than
+ * truncating it. Anything else is a caller bug and throws here, before any
+ * retrieval runs on a silently shortened or substituted query.
+ */
+export function asExplicitKeywords(keywords: unknown): string[] {
+  if (!Array.isArray(keywords) || keywords.length === 0) {
+    throw new Error("explicit keywords must be a non-empty array of non-blank strings");
+  }
+  const accepted: string[] = [];
+  for (const keyword of keywords) {
+    if (typeof keyword !== "string" || keyword.trim().length === 0) {
+      throw new Error("explicit keywords must be a non-empty array of non-blank strings");
+    }
+    accepted.push(keyword);
+  }
+  return accepted;
 }
 
 export interface SessionContextInput {
   identity: { principalId: string; executionId: string };
   prompt?: string;
-  maxChars?: number;
+  modelContextTokens?: number;
+  wakeUpMaxChars?: number;
+  includeHistory?: boolean;
 }
 
 export interface SessionContextResult {
@@ -122,6 +191,9 @@ export interface SessionContextResult {
   recall: string;
   coreKnowledge: string;
   soulBundle: SessionSoulBundle;
+  // #1869 — addressable parts from new daemons; absent on older ones, which
+  // serve only the legacy fields. Session-start prefers parts when present.
+  parts?: SessionSoulBundle;
 }
 
 export interface SessionSoulBundle {
@@ -130,6 +202,27 @@ export interface SessionSoulBundle {
   notes: string;
   memoryTools: string;
   coreFacts: string;
+}
+
+/**
+ * #1869 — narrow the unknown wire parts map. Malformed or absent input
+ * yields undefined: the caller falls back to the legacy fields, never a
+ * fabricated or partial bundle.
+ */
+export function asSessionSoulBundle(raw: unknown): SessionSoulBundle | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  for (const key of ["soul", "profile", "notes", "memoryTools", "coreFacts"]) {
+    if (typeof record[key] !== "string") return undefined;
+  }
+  return {
+    soul: record["soul"] as string,
+    profile: record["profile"] as string,
+    notes: record["notes"] as string,
+    memoryTools: record["memoryTools"] as string,
+    coreFacts: record["coreFacts"] as string,
+  };
 }
 
 export interface RecentConversationInput {
@@ -149,11 +242,12 @@ export interface RuntimeStatusResult {
   extractedMemories: number;
   extractedByType: Record<string, number>;
   consolidationFiles: { daily: number; weekly: number; quarterly: number };
-  ingestedDocuments: number;
-  preservedKeywords: number;
   dbSizeBytes: number;
   rejectedByScanner: number;
   uptimeMs?: number;
+  // #1869 — daemon test-mode state. Older daemons omit it; absence means
+  // false (full bundle).
+  memoryTest: boolean;
 }
 
 export interface CoreKnowledgeInput {
@@ -161,16 +255,6 @@ export interface CoreKnowledgeInput {
 }
 
 export type CoreKnowledgeResult = string;
-
-export interface FeedbackInput {
-  userId: string;
-  memoryId: number;
-  feedbackType: "cite" | "reject";
-}
-
-export interface FeedbackResult {
-  ok: boolean;
-}
 
 export interface MaintenanceInput {
   operation: "integrity" | "fts_rebuild" | "wal_checkpoint";
@@ -184,101 +268,89 @@ export interface MaintenanceResult {
 export interface EmbeddingInput { texts: string[] }
 export interface EmbeddingResult { vectors: Array<number[] | null>; model: string }
 
-// ── #1527: durable context projection ────────────────────────────────────────
+// ── #1660: sealed secrets (labels metadata + local-only plaintext) ───────────
 
-export interface DurableContextProjectionInput {
-  userId: string;
-  sessionId: string;
-  beforeMessageId: number;
-  maxContext: number;
+export interface SealedSecretRef {
+  readonly memoryId: number;
+  readonly semanticRevision: number;
+  readonly label: string;
+  readonly memoryType: string;
+  readonly createdAt: number;
 }
 
-export interface DurableContextProjectionResult {
-  messages: Array<{ role: "user" | "assistant" | "tool"; content: string }>;
-  estimatedTokens: number;
-  sourceMessageCount: number;
+export interface FindSealedSecretsInput {
+  readonly userId: string;
+  readonly query: string;
+  readonly limit?: number;
 }
 
-/**
- * Read-only provider contract consumed by Pi durable projection. The runtime
- * supplies an adapter; disabled/unavailable runtimes reject instead of
- * returning an empty successful projection.
- */
-export interface DurableContextProvider {
-  projectContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
+export type SealedSecretResolution =
+  | { ok: true; value: string; semanticRevision: number }
+  | { ok: false; code: "sealed_resolution_failed" };
+
+export interface ResolveSealedSecretInput {
+  readonly userId: string;
+  readonly memoryId: number;
+  readonly expectedRevision: number;
 }
 
-// ── #1406: durable conversation compaction ───────────────────────────────────
+// ── #1515: durable Dreamy clarification questions ─────────────────────────────
 
-export interface CompactionCandidateLike {
-  version: 1;
-  expectedGeneration: number;
-  previousCheckpointId: number | null;
-  sourceMessageStart: number;
-  sourceMessageEnd: number;
-  firstKeptMessageId: number;
-  sourceDigest: string;
-  sourceTokenCount: number;
-  serializedTurns: string;
-  priorCheckpoint: string;
-  summaryTokenBudget: number;
+export interface DreamQuestionWireLike {
+  id: string;
+  memoryAId: number;
+  memoryBId: number;
+  question: string;
+  status: "pending" | "asked" | "resolved" | "expired" | "dismissed";
+  createdAt: number;
+  expiresAt: number;
+  askedAt?: number;
 }
 
-export interface PrepareConversationCompactionInput {
-  userId: string;
-  sessionId: string;
-  beforeMessageId?: number;
-  maxHistoryTokens: number;
-  minRecentTokens: number;
-  reason: "manual" | "automatic";
-}
+export type DreamQuestionStatusLike = "pending" | "asked" | "resolved" | "expired" | "dismissed";
 
-export type PrepareConversationCompactionResult =
-  | { status: "nothing_to_compact" }
-  | { status: "busy" }
-  | { status: "ready"; candidate: CompactionCandidateLike };
+// ── #1659: structural failure normalization ─────────────────────────────────
 
-export interface CommitConversationCompactionInput {
-  userId: string;
-  sessionId: string;
-  candidate: Omit<CompactionCandidateLike, "serializedTurns" | "priorCheckpoint" | "summaryTokenBudget">;
-  summary: string;
-  summaryTokenCount: number;
-  summarizer: { provider: string | null; model: string | null };
-  activeRequestModel: string | null;
-  reason: "manual" | "automatic";
-  customInstructionsDigest?: string;
-}
-
-export type CommitConversationCompactionResult =
-  | { status: "committed"; checkpointId: number; generation: number }
-  | { status: "stale" }
-  | { status: "rejected" };
-
-const PROJECTION_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "tool"]);
-
-function normalizeProjectionResult(value: unknown): DurableContextProjectionResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Durable context projection returned a non-object response");
+/** Stable bridge-side code for the protocol failure table. */
+function bridgeFailureCode(code: string): string {
+  switch (code) {
+    case "validation_error": return "memory_validation";
+    case "not_found": return "memory_not_found";
+    case "conflict": return "memory_conflict";
+    case "unauthorized": return "memory_unauthorized";
+    case "idempotency_conflict": return "memory_idempotency_conflict";
+    case "unavailable": return "memory_unavailable";
+    case "outcome_unknown": return "memory_outcome_unknown";
+    default: return code;
   }
-  const record = value as Record<string, unknown>;
-  if (!Array.isArray(record["messages"])) {
-    throw new Error("Durable context projection response has no messages array");
-  }
-  const messages: Array<{ role: "user" | "assistant" | "tool"; content: string }> = [];
-  for (const raw of record["messages"] as unknown[]) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Durable context projection returned a malformed message");
-    }
-    const m = raw as Record<string, unknown>;
-    if (typeof m["role"] !== "string" || !PROJECTION_ROLES.has(m["role"]) || typeof m["content"] !== "string") {
-      throw new Error("Durable context projection returned a malformed message");
-    }
-    messages.push({ role: m["role"] as "user" | "assistant" | "tool", content: m["content"] });
-  }
-  const estimatedTokens = typeof record["estimatedTokens"] === "number" ? record["estimatedTokens"] : 0;
-  const sourceMessageCount = typeof record["sourceMessageCount"] === "number" ? record["sourceMessageCount"] : 0;
-  return { messages, estimatedTokens, sourceMessageCount };
+}
+
+/** Normalize a thrown structural client error into the shared failure fields. */
+function failureFields(err: unknown): MemoryMutationFailureFields {
+  const e = err as Partial<AbmindClientErrorLike> | null | undefined;
+  const code = e && typeof e.code === "string" ? boundedFailureText(e.code, MEMORY_FAILURE_CODE_MAX) : "unknown";
+  const hasStructuralStage = e && (e.stage === "pre_dispatch" || e.stage === "dispatch" || e.stage === "response");
+  return {
+    code: bridgeFailureCode(code),
+    message: boundedFailureMessage(err),
+    requestId: e && typeof e.requestId === "string" ? boundedFailureText(e.requestId, MEMORY_FAILURE_REQUEST_ID_MAX) : "",
+    retryable: e && typeof e.retryable === "boolean" ? e.retryable : false,
+    action: e && (e.action === "fix_input" || e.action === "re_recall" || e.action === "retry" || e.action === "reconcile" || e.action === "stop")
+      ? e.action
+      : "reconcile",
+    // Unstructured errors provide no dispatch evidence: treat the outcome as
+    // uncertain (response), never as a proven pre-dispatch refusal.
+    stage: hasStructuralStage
+      ? (e!.stage as MemoryMutationFailureFields["stage"])
+      : "response",
+  };
+}
+
+/** True when a structured failure proves the mutation definitely did not begin. */
+export function isDefinitivePreDispatchFailure(code: string, stage: string): boolean {
+  if (stage === "pre_dispatch") return true;
+  return code === "memory_not_found" || code === "memory_conflict" || code === "memory_validation"
+    || code === "memory_unauthorized" || code === "memory_idempotency_conflict";
 }
 
 /** Normalize an unknown recordMessage response to RecordMessageResult.
@@ -302,6 +374,28 @@ function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
 
 // ── Interface ──────────────────────────────────────────────────────────────
 
+/** #1706: bounded reason codes for late memory composition. Closed union —
+ *  raw endpoint messages never enter diagnostics or status rendering. */
+export type MemoryCompositionFailureCode =
+  | "config_invalid"
+  | "package_missing"
+  | "endpoint_unavailable"
+  | "pin_mismatch"
+  | "authentication_failed"
+  | "negotiation_failed"
+  | "policy_rejected"
+  | "retry_exhausted";
+
+/** #1706: immutable snapshot of re-composition progress for a runtime whose
+ *  initial boot-time negotiation failed. */
+export interface MemoryCompositionDiagnostics {
+  state: "idle" | "retrying" | "upgraded" | "cancelled";
+  attempts: number;
+  lastAttemptAt?: number;
+  lastFailure?: MemoryCompositionFailureCode;
+  upgradedAt?: number;
+}
+
 export interface AbtarsMemoryRuntime {
   readonly state: RuntimeState;
   readonly capabilities: ReadonlySet<MemoryRuntimeCapability>;
@@ -317,18 +411,25 @@ export interface AbtarsMemoryRuntime {
   /** Read daemon-owned sleep lifecycle state for operator status commands. */
   getSleepStatus(): Promise<SleepStatusLike>;
   getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
-  recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
-  editMemory(input: EditMemoryInput): Promise<EditMemoryResult>;
   rebuildFtsIndexes(): Promise<{ rebuilt: string[] }>;
-  /** #1527: daemon-owned durable context projection. Rejects when unavailable. */
-  projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
-  /** #1406: daemon-owned durable compaction prepare (bounded read). */
-  prepareConversationCompaction(input: PrepareConversationCompactionInput): Promise<PrepareConversationCompactionResult>;
-  /** #1406: daemon-owned durable compaction commit (generation CAS). */
-  commitConversationCompaction(input: CommitConversationCompactionInput, operationKey: string): Promise<CommitConversationCompactionResult>;
+  /** #1515: optional owner-scoped dream-question lifecycle. Presence of the
+   *  `dreamQuestions` capability is checked independently of core recall. */
+  dreamQuestions: {
+    nextPending(userId: string): Promise<DreamQuestionWireLike | null>;
+    list(userId: string, status?: DreamQuestionStatusLike, limit?: number): Promise<{ questions: DreamQuestionWireLike[] }>;
+    markAsked(userId: string, questionId: string, deliveryKey: string): Promise<{ status: "asked" | "not_found" | "conflict" }>;
+    dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }>;
+  };
+  /** #1660: owner-only sealed label search (metadata only). */
+  findSealedSecrets(input: FindSealedSecretsInput): Promise<SealedSecretRef[]>;
+  /** #1660: local-only plaintext resolution, revision-checked. */
+  resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution>;
+  /** #1706: bounded late-composition diagnostics. Present only on
+   *  re-composable facades; ordinary disabled/client runtimes omit it. */
+  readonly compositionDiagnostics?: MemoryCompositionDiagnostics;
   close(): Promise<void>;
 }
 
@@ -358,15 +459,20 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.recall") && features["private_read"] === "true") result.add("recall");
   if (methods.has("private.recordMessage")) result.add("recordMessage");
   if (methods.has("private.instantStore") && features["private_write"] === "true" && revisionContract) result.add("instantStore");
-  if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
-  if (methods.has("private.recordFeedback")) result.add("feedback");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
-  if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
-  if (methods.has("private.prepareConversationCompaction")
-    && methods.has("private.commitConversationCompaction")
-    && features["private_write"] === "true") result.add("compaction");
+  if (methods.has("private.dreamQuestions.nextPending")) result.add("dreamQuestionsNextPending");
+  if (methods.has("private.dreamQuestions.nextPending")
+    && methods.has("private.dreamQuestions.list")
+    && methods.has("private.dreamQuestions.markAsked")
+    && methods.has("private.dreamQuestions.dismiss")) result.add("dreamQuestions");
+  // #1660: composite local sealed-secret capability. Signed peers never
+  // negotiate the resolver (abmind strips both methods), so their presence in
+  // the negotiated method set implies a local route.
+  if (methods.has("private.findSealedSecrets") && methods.has("private.resolveSealedSecret")) {
+    result.add("sealedSecrets");
+  }
 
   return result;
 }
@@ -375,6 +481,140 @@ function requireClientCapability(capabilities: ReadonlySet<MemoryRuntimeCapabili
   if (!capabilities.has(capability)) {
     throw new Error(`Memory capability unavailable: ${capability}`);
   }
+}
+
+const DREAM_QUESTION_IDEMPOTENCY_KEY_MAX = 128;
+
+/** Keep normal keys readable, but never let caller-controlled bounded fields
+ * exceed abmind's idempotency-key limit. The hash retains the full tuple so
+ * oversized IDs cannot collide merely because they share a prefix. */
+function dreamQuestionIdempotencyKey(kind: "ask" | "dismiss", questionId: string, deliveryKey?: string): string {
+  const raw = deliveryKey === undefined
+    ? `dream-question-${kind}-${questionId}`
+    : `dream-question-${kind}-${questionId}-${deliveryKey}`;
+  if (raw.length <= DREAM_QUESTION_IDEMPOTENCY_KEY_MAX) return raw;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([kind, questionId, deliveryKey ?? ""]), "utf-8")
+    .digest("hex");
+  return `dream-question-${kind}-v1-${digest}`;
+}
+
+/**
+ * #1928 M4 — narrow the unknown owner packet (validated, not cast). A
+ * malformed packet fails the recall loudly instead of injecting a lie:
+ * the owner text is only delivered when its items carry complete C2 refs.
+ */
+interface OwnedPacketItem {
+  excerpt: string;
+  refKey: string;
+  kind: "db" | "artifact" | "graph";
+  layer?: string;
+  rationale?: string;
+  provenance?: string;
+  currentness?: string;
+  score?: number;
+  classification?: number;
+}
+
+interface OwnedPacket {
+  profile: string;
+  status: string;
+  items: OwnedPacketItem[];
+  text: string;
+  packetId?: string;
+  omissionReasons?: string[];
+  continuation?: string;
+}
+
+function ownedRefKey(ref: Record<string, unknown>): string | undefined {
+  if (ref["kind"] === "db") {
+    const layer = ref["layer"];
+    const recordId = ref["recordId"];
+    const owner = ref["owner"];
+    const version = ref["version"];
+    if ((layer === "durable" || layer === "episode" || layer === "raw")
+      && Number.isSafeInteger(recordId) && typeof owner === "string" && owner.length > 0
+      && typeof version === "string" && version.length > 0) {
+      return `db:${layer}:${recordId}:${owner}:${version}`;
+    }
+    return undefined;
+  }
+  if (ref["kind"] === "artifact") {
+    const owner = ref["owner"];
+    const artifact = ref["artifact"];
+    const contentVersion = ref["contentVersion"];
+    if (typeof owner === "string" && owner.length > 0 && typeof artifact === "string" && artifact.length > 0
+      && typeof contentVersion === "string" && contentVersion.length > 0) {
+      return `artifact:${owner}:${artifact}:${contentVersion}`;
+    }
+    return undefined;
+  }
+  if (ref["kind"] === "graph") {
+    const edge = ref["edge"];
+    const sources = ref["sources"];
+    if (typeof edge === "string" && edge.length > 0 && Array.isArray(sources)
+      && sources.every((s) => typeof s === "string")) {
+      return `graph:${edge}:${(sources as string[]).join("+")}`;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function asOwnedPacket(raw: unknown): OwnedPacket {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  const record = raw as Record<string, unknown>;
+  if (record["contract"] !== "owned-v1") throw new Error("recall returned an unsupported contract");
+  if (typeof record["profile"] !== "string" || typeof record["status"] !== "string") {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  if (typeof record["text"] !== "string" || !Array.isArray(record["items"])) {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  const items: OwnedPacketItem[] = [];
+  for (const entry of record["items"] as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error("recall returned a malformed owner packet item");
+    }
+    const item = entry as Record<string, unknown>;
+    if (typeof item["excerpt"] !== "string") throw new Error("recall returned a malformed owner packet item");
+    const ref = item["ref"];
+    if (typeof ref !== "object" || ref === null || Array.isArray(ref)) {
+      throw new Error("recall returned an item without a C2 ref");
+    }
+    const refKey = ownedRefKey(ref as Record<string, unknown>);
+    if (refKey === undefined) throw new Error("recall returned an item with an incomplete C2 ref");
+    const kind = (ref as Record<string, unknown>)["kind"];
+    if (kind !== "db" && kind !== "artifact" && kind !== "graph") {
+      throw new Error("recall returned an item with an incomplete C2 ref");
+    }
+    const layer = (ref as Record<string, unknown>)["layer"];
+    items.push({
+      excerpt: item["excerpt"] as string,
+      refKey,
+      kind,
+      ...(typeof layer === "string" ? { layer } : {}),
+      ...(typeof item["rationale"] === "string" ? { rationale: item["rationale"] as string } : {}),
+      ...(typeof item["excerptProvenance"] === "string" ? { provenance: item["excerptProvenance"] as string } : {}),
+      ...(typeof item["currentness"] === "string" ? { currentness: item["currentness"] as string } : {}),
+      ...(typeof item["score"] === "number" ? { score: item["score"] as number } : {}),
+      ...(typeof item["classification"] === "number" ? { classification: item["classification"] as number } : {}),
+    });
+  }
+  const omissionReasons = record["omissionReasons"];
+  return {
+    profile: record["profile"] as string,
+    status: record["status"] as string,
+    items,
+    text: record["text"] as string,
+    ...(typeof record["packetId"] === "string" ? { packetId: record["packetId"] as string } : {}),
+    ...(Array.isArray(omissionReasons) && omissionReasons.every((r) => typeof r === "string")
+      ? { omissionReasons: omissionReasons as string[] }
+      : {}),
+    ...(typeof record["continuation"] === "string" ? { continuation: record["continuation"] as string } : {}),
+  };
 }
 
 // ── Client-backed implementation ──────────────────────────────────────────
@@ -431,41 +671,91 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
-      const result = (await pm.recall({
-        translated: [input.query],
-        original: input.original ?? input.query,
-        userId: input.userId,
-        limit: input.limit ?? 10,
-        maxClassification: input.maxClassification,
-        timeStart: input.timeStart,
-        timeEnd: input.timeEnd,
-        stages: input.stages,
-      })) as { results: Array<Record<string, unknown>> };
-      const hits: RuntimeRecallHit[] = result.results.map((r) => ({
-        content: String(r["content"] ?? ""),
-        score: Number(r["score"] ?? 0),
-        date: String(r["date"] ?? ""),
-        memoryId: typeof r["id"] === "number" ? r["id"] : undefined,
-        source: typeof r["source"] === "string" ? r["source"] : undefined,
-        contentOriginal: typeof r["contentOriginal"] === "string" ? r["contentOriginal"] : undefined,
-        memoryType: typeof r["memoryType"] === "string" ? r["memoryType"] : undefined,
-        trust: typeof r["trust"] === "number" ? r["trust"] : undefined,
-        integrity: typeof r["integrity"] === "number" ? r["integrity"] : undefined,
-        credibility: typeof r["credibility"] === "number" ? r["credibility"] : undefined,
-        classification: typeof r["classification"] === "number" ? r["classification"] : undefined,
-        emotionScore: typeof r["emotionScore"] === "number" ? r["emotionScore"] : undefined,
-        createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : undefined,
-        semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
+      const t0 = Date.now();
+      logDebug("memory-runtime", `recall: profile=${input.profile} query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? "profile"} maxClass=${input.maxClassification ?? "?"}`);
+      // #1928 M4 — the bridge passes raw/context/identity/capacity and
+      // consumes the owner packet. No semantic hints, floors, reranking,
+      // numeric-ref selection, or local rendering: the owner text travels
+      // intact and the owner ref keys identify every hit.
+      const profileBounds = input.profile === "recall_fast"
+        ? { maxItems: 5, maxOutputBytes: 2000 }
+        : input.profile === "recall_normal"
+          ? { maxItems: 15, maxOutputBytes: 12000 }
+          : { maxItems: 40, maxOutputBytes: 32768 };
+      const request: Record<string, unknown> = {
+        contract: "owned-v1",
+        profile: input.profile,
+        identity: { principal: input.userId },
+        ...(input.profile === "recall_fast"
+          ? { rawTurn: (input.rawTurn ?? input.query).trim() }
+          : {
+              query: {
+                ...(input.text !== undefined ? { text: input.text } : {}),
+                ...((() => {
+                  const keywords = input.keywords !== undefined ? asExplicitKeywords(input.keywords) : [];
+                  return keywords.length > 0 ? { keywords } : {};
+                })()),
+              },
+            }),
+        ...((input.maxClassification !== undefined || input.timeStart !== undefined || input.timeEnd !== undefined || input.memoryType !== undefined || input.scope !== undefined || input.asOf !== undefined)
+          ? {
+              filters: {
+                ...(input.memoryType !== undefined ? { memoryType: input.memoryType } : {}),
+                ...(input.scope !== undefined ? { scope: input.scope } : {}),
+                ...(input.timeStart !== undefined ? { timeStart: input.timeStart } : {}),
+                ...(input.timeEnd !== undefined ? { timeEnd: input.timeEnd } : {}),
+                ...(input.maxClassification !== undefined ? { classificationCeiling: input.maxClassification } : {}),
+                ...(input.asOf !== undefined ? { asOf: input.asOf } : {}),
+              },
+            }
+          : {}),
+        capacity: {
+          maxItems: Math.max(1, Math.min(input.limit ?? profileBounds.maxItems, profileBounds.maxItems)),
+          maxOutputBytes: Math.max(64, Math.min(input.maxOutputBytes ?? profileBounds.maxOutputBytes, profileBounds.maxOutputBytes)),
+          ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+        },
+        ...(input.continuation !== undefined ? { continuation: input.continuation } : {}),
+      };
+      const packet = asOwnedPacket(await pm.recall(request));
+      const hits: RuntimeRecallHit[] = packet.items.map((item) => ({
+        content: item.excerpt,
+        date: "",
+        ref: item.refKey,
+        kind: item.kind,
+        ...(item.layer !== undefined ? { layer: item.layer } : {}),
+        ...(item.rationale !== undefined ? { rationale: item.rationale } : {}),
+        ...(item.provenance !== undefined ? { excerptProvenance: item.provenance } : {}),
+        ...(item.currentness !== undefined ? { currentness: item.currentness } : {}),
+        ...(item.score !== undefined ? { score: item.score } : {}),
+        ...(item.classification !== undefined ? { classification: item.classification } : {}),
       }));
-      const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
-      return { hits, context };
+      const ms = Date.now() - t0;
+      logDebug("memory-runtime", `recall: profile=${packet.profile} status=${packet.status} hits=${hits.length} in ${ms}ms omissions=${(packet.omissionReasons ?? []).length}`);
+      if (isLogLevel("trace")) {
+        for (const h of hits.slice(0, 10)) {
+          logTrace("memory-runtime", `hit ref=${h.ref} text="${redactSecrets(h.content).slice(0, 120)}"`);
+        }
+      }
+      return {
+        hits,
+        context: packet.text,
+        status: packet.status,
+        ...(packet.packetId !== undefined ? { packetId: packet.packetId } : {}),
+        ...(packet.omissionReasons !== undefined ? { omissionReasons: packet.omissionReasons } : {}),
+        ...(packet.continuation !== undefined ? { continuation: packet.continuation } : {}),
+      };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
       const assembled = await pm.assembleSessionContext({
         userId: input.identity.principalId,
-        maxChars: input.maxChars,
+        modelContextTokens: input.modelContextTokens,
+        wakeUpMaxChars: input.wakeUpMaxChars,
+        includeHistory: input.includeHistory,
       });
+      // #1869 — parts ride the existing method (no new capability): older
+      // daemons omit them and the caller falls back to the legacy fields.
+      // Shape validation lives with the consumer (asSessionSoulBundle).
       return assembled as SessionContextResult;
     },
 
@@ -490,10 +780,10 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
           weekly: typeof consolidation["weekly"] === "number" ? consolidation["weekly"] : 0,
           quarterly: typeof consolidation["quarterly"] === "number" ? consolidation["quarterly"] : 0,
         },
-        ingestedDocuments: typeof stats["ingestedDocuments"] === "number" ? stats["ingestedDocuments"] : 0,
-        preservedKeywords: typeof stats["preservedKeywords"] === "number" ? stats["preservedKeywords"] : 0,
         dbSizeBytes: typeof stats["dbSizeBytes"] === "number" ? stats["dbSizeBytes"] : 0,
         rejectedByScanner: typeof stats["rejectedByScanner"] === "number" ? stats["rejectedByScanner"] : 0,
+        // #1869 — older daemons omit the mode; absence means full bundle.
+        memoryTest: stats["memoryTest"] === true,
       };
     },
 
@@ -503,11 +793,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult> {
       return (await pm.getCoreKnowledge(input)) as CoreKnowledgeResult;
-    },
-
-    async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
-      await pm.recordFeedback(input, operationKey);
-      return { ok: true };
     },
 
     async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
@@ -532,47 +817,31 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async instantStore(input: InstantStoreInput): Promise<InstantStoreResult> {
       requireClientCapability(capabilities, "instantStore");
-      const result = (await pm.instantStore({
-        userId: input.userId,
-        contentEn: input.contentEn,
-        contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as string,
-        emotionScore: input.emotionScore,
-        confidence: input.confidence,
-        classification: input.classification,
-        createdBy: "tool:memory_store",
-      })) as Record<string, unknown>;
-      return {
-        stored: result["stored"] === true,
-        memoriesCount: typeof result["memoriesCount"] === "number" ? result["memoriesCount"] : undefined,
-        error: typeof result["error"] === "string" ? result["error"] : undefined,
-        memoryId: typeof result["memoryId"] === "number" ? result["memoryId"] : undefined,
-        semanticRevision: typeof result["semanticRevision"] === "number" ? result["semanticRevision"] : undefined,
-      };
-    },
-
-    async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
-      requireClientCapability(capabilities, "editMemory");
-      const result = (await pm.editMemory({
-        memoryId: input.memoryId,
-        userId: input.userId,
-        expectedRevision: input.expectedRevision,
-        contentEn: input.contentEn,
-        contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as string,
-        emotionScore: input.emotionScore,
-        confidence: input.confidence,
-        classification: input.classification,
-      })) as Record<string, unknown>;
-      if (result["ok"] !== true) {
-        const code = typeof result["code"] === "string" ? result["code"] : "unknown";
-        return { ok: false, error: code === "validation_error" ? String(result["message"] ?? "") : code };
+      try {
+        const result = (await pm.instantStore({
+          userId: input.userId,
+          contentEn: input.contentEn,
+          contentOriginal: input.contentOriginal,
+          memoryType: input.memoryType as string,
+          emotionScore: input.emotionScore,
+          confidence: input.confidence,
+          classification: input.classification,
+          // #1660: class-3 sealed stores carry label/keyword explicitly; the
+          // value must never ride in the label-bearing field.
+          sealedLabel: input.sealedLabel,
+          sealedKeyword: input.sealedKeyword,
+          createdBy: "tool:memory_store",
+        })) as Record<string, unknown>;
+        return {
+          stored: true,
+          memoriesCount: typeof result["memoriesCount"] === "number" ? result["memoriesCount"] : 1,
+          memoryId: typeof result["memoryId"] === "number" ? result["memoryId"] : 0,
+          semanticRevision: typeof result["semanticRevision"] === "number" ? result["semanticRevision"] : 1,
+        };
+      } catch (err) {
+        // #1659: never flatten a protocol failure back to a bare string.
+        return { stored: false, memoriesCount: 0, ...failureFields(err) };
       }
-      const ref = (result["ref"] ?? result) as Record<string, unknown>;
-      return {
-        ok: true,
-        semanticRevision: typeof ref["semanticRevision"] === "number" ? ref["semanticRevision"] : undefined,
-      };
     },
 
     async rebuildFtsIndexes(): Promise<{ rebuilt: string[] }> {
@@ -580,34 +849,70 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       return (await pm.rebuildFtsIndexes()) as { rebuilt: string[] };
     },
 
-    async projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult> {
-      // #1527: route loss clears capabilities immediately; recovery re-projects
-      // them after renegotiation. Every call checks the current route state.
-      requireClientCapability(capabilities, "durableContext");
+    dreamQuestions: {
+      async nextPending(userId: string): Promise<DreamQuestionWireLike | null> {
+        requireClientCapability(capabilities, "dreamQuestionsNextPending");
+        const result = await pm.dreamQuestions.nextPending(userId) as unknown;
+        if (result === null || result === undefined) return null;
+        const pending = normalizeDreamQuestion(result);
+        if (pending.status !== "pending") throw new Error("Dream question nextPending returned a non-pending row");
+        return pending;
+      },
+      async list(userId: string, status?: DreamQuestionStatusLike, limit?: number): Promise<{ questions: DreamQuestionWireLike[] }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        const result = await pm.dreamQuestions.list(userId, status, limit) as unknown;
+        return normalizeDreamQuestionList(result);
+      },
+      async markAsked(userId: string, questionId: string, deliveryKey: string): Promise<{ status: "asked" | "not_found" | "conflict" }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        // Stable idempotency key derived from question id + delivery key — a
+        // retry after a crash replays the same CAS instead of double-marking.
+        const result = await pm.dreamQuestions.markAsked(
+          { userId, questionId, deliveryKey },
+          dreamQuestionIdempotencyKey("ask", questionId, deliveryKey),
+        ) as unknown;
+        return normalizeMarkAskedResult(result);
+      },
+      async dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        const result = await pm.dreamQuestions.dismiss({ userId, questionId }, dreamQuestionIdempotencyKey("dismiss", questionId)) as unknown;
+        return normalizeDismissResult(result);
+      },
+    },
+
+    async findSealedSecrets(input: FindSealedSecretsInput): Promise<SealedSecretRef[]> {
+      requireClientCapability(capabilities, "sealedSecrets");
+      const result = (await pm.findSealedSecrets(input)) as unknown;
+      if (!Array.isArray(result)) throw new Error("Sealed secret search returned a non-array response");
+      return result.map((raw) => {
+        const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+        return {
+          memoryId: typeof r["memoryId"] === "number" ? r["memoryId"] : 0,
+          semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : 0,
+          label: typeof r["label"] === "string" ? r["label"] : "",
+          memoryType: typeof r["memoryType"] === "string" ? r["memoryType"] : "",
+          createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : 0,
+        };
+      });
+    },
+
+    async resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution> {
+      requireClientCapability(capabilities, "sealedSecrets");
       try {
-        const result = await pm.projectConversationContext(input);
-        return normalizeProjectionResult(result);
-      } catch (err) {
-        // Bounded, content-free diagnostic: route state + protocol reason code.
-        const code = err && typeof err === "object" && "code" in err
-          ? String((err as { code: unknown }).code)
-          : "unknown";
-        const route = client.routeSnapshot?.state ?? "unknown";
-        logWarn("memory-runtime", `durable_projection_failed route=${route} reason=${code}`);
-        throw err;
+        const result = (await pm.resolveSealedSecret(input)) as unknown;
+        if (result && typeof result === "object" && (result as Record<string, unknown>)["ok"] === true) {
+          const value = (result as Record<string, unknown>)["value"];
+          if (typeof value === "string") {
+            return { ok: true, value, semanticRevision: Number((result as Record<string, unknown>)["semanticRevision"] ?? 0) };
+          }
+        }
+        return { ok: false, code: "sealed_resolution_failed" };
+      } catch {
+        // #1660: every failure — dispatch refusal, forged frame, wrong owner,
+        // stale revision, expired row — collapses to the same indistinguishable
+        // outcome so callers can never learn whether another owner's row exists.
+        return { ok: false, code: "sealed_resolution_failed" };
       }
-    },
-
-    async prepareConversationCompaction(input: PrepareConversationCompactionInput): Promise<PrepareConversationCompactionResult> {
-      requireClientCapability(capabilities, "compaction");
-      const result = await pm.prepareConversationCompaction(input) as unknown;
-      return normalizePrepareResult(result);
-    },
-
-    async commitConversationCompaction(input: CommitConversationCompactionInput, operationKey: string): Promise<CommitConversationCompactionResult> {
-      requireClientCapability(capabilities, "compaction");
-      const result = await pm.commitConversationCompaction(input, operationKey) as unknown;
-      return normalizeCommitResult(result);
     },
 
     async close(): Promise<void> {
@@ -617,91 +922,83 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
   return self;
 }
 
-const COMPACTION_CANDIDATE_MAX_BYTES = 240_000;
-const COMPACTION_BUDGET_MIN_TOKENS = 2_000;
-const COMPACTION_BUDGET_MAX_TOKENS = 12_000;
+// ── #1515: dream-question response normalization ────────────────────────────
+// Every field is bounded and validated; malformed responses fail closed rather
+// than becoming a fabricated question or a fake asked/dismissed success.
 
-function safeInteger(value: unknown, field: string, opts: { min: number; max?: number }): number {
-  if (!Number.isSafeInteger(value) || (value as number) < opts.min || (opts.max !== undefined && (value as number) > opts.max)) {
-    throw new Error(`Compaction response field ${field} is malformed`);
-  }
-  return value as number;
-}
+const DREAM_QUESTION_STATUSES = new Set(["pending", "asked", "resolved", "expired", "dismissed"]);
+const DREAM_QUESTION_ID_MAX = 128;
+const DREAM_QUESTION_TEXT_MAX = 300;
+const DREAM_QUESTION_LIST_MAX = 50;
 
-/** Normalize an unknown prepare response. Every candidate proof field is
- * required and bounded; malformed values must fail closed, never become a
- * fake ready candidate through defaults. */
-function normalizePrepareResult(value: unknown): PrepareConversationCompactionResult {
+function normalizeDreamQuestion(value: unknown): DreamQuestionWireLike {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Compaction prepare returned a non-object response");
+    throw new Error("Dream question response is malformed");
   }
   const record = value as Record<string, unknown>;
-  const status = record["status"];
-  if (status === "nothing_to_compact") return { status: "nothing_to_compact" };
-  if (status === "busy") return { status: "busy" };
-  if (status === "ready") {
-    const c = record["candidate"] as Record<string, unknown> | null | undefined;
-    if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("Compaction prepare candidate malformed");
-    if (typeof c["serializedTurns"] !== "string") throw new Error("Compaction prepare candidate has no serialized source");
-    if (Buffer.byteLength(c["serializedTurns"], "utf-8") > COMPACTION_CANDIDATE_MAX_BYTES) {
-      throw new Error("Compaction prepare candidate source is too large");
-    }
-    if (c["version"] !== 1) throw new Error("Compaction prepare candidate version is unsupported");
-    const expectedGeneration = safeInteger(c["expectedGeneration"], "expectedGeneration", { min: 0 });
-    const previousCheckpointId = c["previousCheckpointId"] === null
-      ? null
-      : safeInteger(c["previousCheckpointId"], "previousCheckpointId", { min: 1 });
-    const sourceMessageStart = safeInteger(c["sourceMessageStart"], "sourceMessageStart", { min: 1 });
-    const sourceMessageEnd = safeInteger(c["sourceMessageEnd"], "sourceMessageEnd", { min: sourceMessageStart });
-    const firstKeptMessageId = safeInteger(c["firstKeptMessageId"], "firstKeptMessageId", { min: sourceMessageEnd + 1 });
-    if (typeof c["sourceDigest"] !== "string" || !/^[0-9a-f]{16}$/.test(c["sourceDigest"])) {
-      throw new Error("Compaction prepare candidate digest is malformed");
-    }
-    const sourceTokenCount = safeInteger(c["sourceTokenCount"], "sourceTokenCount", { min: 1 });
-    if (sourceTokenCount !== Math.ceil(c["serializedTurns"].length / 4)) {
-      throw new Error("Compaction prepare candidate token estimate is inconsistent");
-    }
-    const sourceDigest = createHash("sha256").update(c["serializedTurns"], "utf-8").digest("hex").slice(0, 16);
-    if (sourceDigest !== c["sourceDigest"]) throw new Error("Compaction prepare candidate digest is inconsistent");
-    if (typeof c["priorCheckpoint"] !== "string") throw new Error("Compaction prepare prior checkpoint is malformed");
-    const summaryTokenBudget = safeInteger(c["summaryTokenBudget"], "summaryTokenBudget", {
-      min: COMPACTION_BUDGET_MIN_TOKENS,
-      max: COMPACTION_BUDGET_MAX_TOKENS,
-    });
-    return {
-      status: "ready",
-      candidate: {
-        version: 1,
-        expectedGeneration,
-        previousCheckpointId,
-        sourceMessageStart,
-        sourceMessageEnd,
-        firstKeptMessageId,
-        sourceDigest,
-        sourceTokenCount,
-        serializedTurns: c["serializedTurns"],
-        priorCheckpoint: c["priorCheckpoint"],
-        summaryTokenBudget,
-      },
-    };
+  if (typeof record["id"] !== "string" || record["id"].length === 0 || record["id"].length > DREAM_QUESTION_ID_MAX) throw new Error("Dream question response has no bounded id");
+  if (!Number.isSafeInteger(record["memoryAId"]) || (record["memoryAId"] as number) < 1
+    || !Number.isSafeInteger(record["memoryBId"]) || (record["memoryBId"] as number) < 1) throw new Error("Dream question evidence ids are malformed");
+  if (typeof record["question"] !== "string" || record["question"].length === 0 || record["question"].length > DREAM_QUESTION_TEXT_MAX) throw new Error("Dream question response has no bounded question text");
+  if (typeof record["status"] !== "string" || !DREAM_QUESTION_STATUSES.has(record["status"])) throw new Error("Dream question status is malformed");
+  if (!Number.isSafeInteger(record["createdAt"]) || (record["createdAt"] as number) < 0
+    || !Number.isSafeInteger(record["expiresAt"]) || (record["expiresAt"] as number) < 0) throw new Error("Dream question timestamps are malformed");
+  const wire: DreamQuestionWireLike = {
+    id: record["id"],
+    memoryAId: record["memoryAId"] as number,
+    memoryBId: record["memoryBId"] as number,
+    question: record["question"],
+    status: record["status"] as DreamQuestionWireLike["status"],
+    createdAt: record["createdAt"] as number,
+    expiresAt: record["expiresAt"] as number,
+  };
+  if (record["askedAt"] !== undefined && (!Number.isSafeInteger(record["askedAt"]) || (record["askedAt"] as number) < 0)) {
+    throw new Error("Dream question askedAt is malformed");
   }
-  throw new Error(`Compaction prepare returned unknown status: ${String(status)}`);
+  if (typeof record["askedAt"] === "number" && Number.isSafeInteger(record["askedAt"])) {
+    wire.askedAt = record["askedAt"] as number;
+  }
+  return wire;
 }
 
-function normalizeCommitResult(value: unknown): CommitConversationCompactionResult {
+function normalizeDreamQuestionList(value: unknown): { questions: DreamQuestionWireLike[] } {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Compaction commit returned a non-object response");
+    throw new Error("Dream question list response is malformed");
   }
   const record = value as Record<string, unknown>;
-  const status = record["status"];
-  if (status === "committed") {
-    const checkpointId = safeInteger(record["checkpointId"], "checkpointId", { min: 1 });
-    const generation = safeInteger(record["generation"], "generation", { min: 1 });
-    return { status: "committed", checkpointId, generation };
+  if (!Array.isArray(record["questions"])) {
+    throw new Error("Dream question list response has no questions array");
   }
-  if (status === "stale") return { status: "stale" };
-  if (status === "rejected") return { status: "rejected" };
-  throw new Error(`Compaction commit returned unknown status: ${String(status)}`);
+  if (record["questions"].length > DREAM_QUESTION_LIST_MAX) {
+    throw new Error("Dream question list response exceeds its bound");
+  }
+  const questions: DreamQuestionWireLike[] = [];
+  for (const raw of record["questions"] as unknown[]) {
+    questions.push(normalizeDreamQuestion(raw));
+  }
+  return { questions };
+}
+
+function normalizeMarkAskedResult(value: unknown): { status: "asked" | "not_found" | "conflict" } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question markAsked response is malformed");
+  }
+  const status = (value as Record<string, unknown>)["status"];
+  if (status === "asked" || status === "not_found" || status === "conflict") {
+    return { status };
+  }
+  throw new Error(`Dream question markAsked returned unknown status: ${String(status)}`);
+}
+
+function normalizeDismissResult(value: unknown): { status: "dismissed" | "not_found" | "already_terminal" } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question dismiss response is malformed");
+  }
+  const status = (value as Record<string, unknown>)["status"];
+  if (status === "dismissed" || status === "not_found" || status === "already_terminal") {
+    return { status };
+  }
+  throw new Error(`Dream question dismiss returned unknown status: ${String(status)}`);
 }
 
 // ── Disabled implementation ───────────────────────────────────────────────
@@ -714,21 +1011,24 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     routeSnapshot: { version: 1, state: "closed", generation: 0, retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
-    recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
+    recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
-    recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
-    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
-    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory is disabled: projectDurableContext not available"); },
-    prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory is disabled: prepareConversationCompaction not available"); },
-    commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory is disabled: commitConversationCompaction not available"); },
+    dreamQuestions: {
+      nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
+      list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },
+      markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
+      dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
+    },
+    findSealedSecrets: async () => { unavailable("findSealedSecrets"); return []; },
+    resolveSealedSecret: async () => { unavailable("resolveSealedSecret"); return { ok: false as const, code: "sealed_resolution_failed" as const }; },
     close: async () => {},
   };
 }
@@ -743,21 +1043,24 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     routeSnapshot: { version: 1, state: "unavailable", generation: 0, reasonCode: "route_unavailable", retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
-    recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
+    recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
-    recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
-    runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
-    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
-    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory unavailable: projectDurableContext not available"); },
-    prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory unavailable: prepareConversationCompaction not available"); },
-    commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory unavailable: commitConversationCompaction not available"); },
+    dreamQuestions: {
+      nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
+      list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },
+      markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
+      dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
+    },
+    findSealedSecrets: async () => { unavailable("findSealedSecrets"); return []; },
+    resolveSealedSecret: async () => { unavailable("resolveSealedSecret"); return { ok: false as const, code: "sealed_resolution_failed" as const }; },
     close: async () => {},
   };
 }
@@ -768,7 +1071,7 @@ function emptySoulBundle(): SessionSoulBundle {
 
 // ── Memory mutation isolation ─────────────────────────────────────────────
 
-export type MemoryWritePhase = "before_model" | "after_delivery" | "feedback";
+export type MemoryWritePhase = "before_model" | "after_delivery";
 
 /**
  * Attempt a memory mutation with safe isolation: catches typed abmind errors,

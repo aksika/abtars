@@ -87,7 +87,9 @@ ${suites}
 
   private laneSuite(lane: PiLaneResult): string {
     const scenarios = lane.scenarios.map((s) => this.scenarioCase(s)).join("\n");
-    const failures = lane.scenarios.filter((s) => s.state === "failed").length;
+    // #1900: any non-passed scenario (failed or blocked) makes the lane
+    // non-green and renders as a JUnit failure (fail-closed convention).
+    const failures = lane.scenarios.filter((s) => s.state !== "passed").length;
     const blocked = lane.state === "blocked";
     return `  <testsuite name="${escapeXml(lane.lane)}" tests="${lane.scenarios.length}" failures="${blocked ? 1 : failures}" time="0">
     ${blocked ? `    <testcase name="lane-blocked" time="0"><failure message="${escapeXml(lane.blockedBy ?? "blocked")}">${escapeXml(lane.blockedBy ?? "blocked")}</failure></testcase>` : ""}
@@ -125,7 +127,7 @@ function totalTests(matrix: PiAcceptanceMatrixV1): number {
 function totalFailures(matrix: PiAcceptanceMatrixV1): number {
   return matrix.lanes.reduce((acc, l) => {
     if (l.state === "blocked") return acc + 1;
-    return acc + l.scenarios.filter((s) => s.state === "failed").length;
+    return acc + l.scenarios.filter((s) => s.state !== "passed").length;
   }, 0);
 }
 

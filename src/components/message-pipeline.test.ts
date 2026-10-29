@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
+import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
-import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
+import { ProviderExecutionError, type ProviderTerminalFailure } from "./transport/provider-failure.js";
+import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
+import { composeScheduledAnnouncementText, composeScheduledAnnouncementHistoryText } from "./main-conversation-ingress.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
 let abmindReturn: any = { detectCitations: detectCitationsSpy };
@@ -20,13 +23,24 @@ const MASTER_REGISTRY: UserRegistry = {
   byPlatformId: new Map([["master:telegram", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
   byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
-import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
+const MAIN_NOTICE_REGISTRY: UserRegistry = {
+  users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
+  byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+};
+import { handleInboundMessage, submitTrustedInternalMessage, describePipelineError, type PipelineDeps } from "./message-pipeline.js";
+
+import { lookupAnswerRecord } from "./answer-evidence.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { Spin } from "./spin.js";
+import { bufferAgentNotice, drainSystemEvents } from "./system-event-buffer.js";
 const SessionManager = Spin;
 
-function mockTransport(): IKiroTransport {
+function mockTransport(): IKiroTransport & { contextPercent: number } {
+  // Mutable percent behind the readonly interface member: tests simulate
+  // pressure/unknown by assignment; production only ever reads it.
+  let percent = 0;
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn().mockResolvedValue("Hello from Kiro!"),
@@ -35,6 +49,11 @@ function mockTransport(): IKiroTransport {
     destroy: vi.fn(),
     transportCommands: [],
     get isReady() { return true; },
+    get contextPercent() { return percent; },
+    set contextPercent(v: number) { percent = v; },
+    answerOnly: "",
+    toolCallsSucceeded: 0,
+    intermediateDeliveredText: "",
   };
 }
 
@@ -60,9 +79,10 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
     delivery: "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
   };
   return {
     transport,
@@ -84,13 +104,19 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
         // #1271: pipeline tests stub spin() to call the transport directly
         // (mirrors pre-refactor sendPrompt behavior). Streaming/tool callbacks
         // are set on the transport by the pipeline itself.
+        // #1651: the stub must mirror the production contract — the provider's
+        // own string, verbatim (possibly empty), plus the classified outcome.
+        // It previously returned `result ?? ""` while production spin returned
+        // the literal "(no output)", so the empty-response and [NO_REPLY] cases
+        // below asserted a policy production could never reach.
         const result = await transport.sendPrompt(
           spec.sessionId ?? "test_A_01",
           spec.prompt,
           spec.imageContent,
           spec.userId,
         );
-        return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+        const raw = result ?? "";
+        return { sessionId: spec.sessionId ?? "test_A_01", result: raw, outcome: classifyContent(raw) };
       },
     } as any,
     updateCtxStart: vi.fn(),
@@ -114,8 +140,30 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
   };
 }
 
+describe("describePipelineError", () => {
+  it("keeps the typed provider settlement instead of rewriting it as a dropped connection", () => {
+    const err = new ProviderExecutionError({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 1,
+      message: "The configured model candidate failed: This operation was aborted",
+    });
+    const reason = describePipelineError(err);
+    expect(reason).toContain("configured model candidate failed");
+    expect(reason).not.toContain("connection dropped");
+  });
+
+  it("keeps credits exhaustion and generic transport mapping", () => {
+    const credits = new ProviderExecutionError({
+      code: "credits_exhausted", retryable: false, attemptedCandidates: 1, message: "quota",
+    });
+    expect(describePipelineError(credits)).toContain("credits exhausted");
+    expect(describePipelineError(new Error("socket aborted"))).toContain("connection dropped");
+  });
+});
+
 describe("handleInboundMessage", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   beforeEach(async () => {
     transport = mockTransport();
@@ -126,9 +174,10 @@ describe("handleInboundMessage", () => {
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     // #1348: Pipeline calls ensureSessionTransport if session.transport is missing.
     // Mock it to wire the describe-block's transport (recreated fresh per test) so
@@ -150,8 +199,49 @@ describe("handleInboundMessage", () => {
   });
 
   afterEach(() => {
+    drainSystemEvents();
     setUserRegistryOverride(null);
     vi.restoreAllMocks();
+  });
+
+  it("delivers agent notices to the master Main prompt", async () => {
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    bufferAgentNotice("dreamy", "sleep cycle degraded");
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("[SYSTEM] [DREAMY SAYS] sleep cycle degraded"),
+      undefined,
+      "master",
+    );
+    expect(drainSystemEvents()).toEqual([]);
+  });
+
+  it("does not drain agent notices for a non-Main session", async () => {
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    const spinMod = await import("./spin.js");
+    const active = spinMod.spin.getActiveSession("master", "telegram");
+    vi.mocked(spinMod.spin.getActiveSession).mockReturnValue({
+      ...active,
+      id: "test_C_01",
+    });
+    bufferAgentNotice("dreamy", "sleep cycle degraded");
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.not.stringContaining("[DREAMY SAYS] sleep cycle degraded"),
+      undefined,
+      "master",
+    );
+    expect(drainSystemEvents()).toEqual(["[DREAMY SAYS] sleep cycle degraded"]);
   });
 
   it("sends prompt to transport and delivers response via adapter", async () => {
@@ -225,6 +315,24 @@ describe("handleInboundMessage", () => {
     expect(adapter.setReaction).toHaveBeenCalledWith(expect.any(String), 7, "👍");
   });
 
+  it("#1651 v2: simple delivery delivers a reaction-only response as the emoji payload, never the raw marker", async () => {
+    transport.sendPrompt = vi.fn().mockResolvedValue("[REACT:👍]") as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    const spinMod = await import("./spin.js");
+    const active = spinMod.spin.getActiveSession("test", "telegram");
+    const originalDelivery = active.delivery;
+    active.delivery = "simple";
+    try {
+      await handleInboundMessage(makeMsg({ messageId: 9 }), adapter, deps);
+
+      expect(adapter.sendMessage).toHaveBeenCalledWith("100", "👍", expect.any(Object));
+      expect(adapter.sendMessage).not.toHaveBeenCalledWith("100", expect.stringContaining("[REACT:"), expect.any(Object));
+    } finally {
+      active.delivery = originalDelivery;
+    }
+  });
+
   it("cleans up busyChats and resets idle timer in finally block", async () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
@@ -246,10 +354,9 @@ describe("handleInboundMessage", () => {
     expect((deps as any)._session.busy).toBe(false);
   });
 
-  // #1529: a configured durable turn whose inbound write rejects must fail
-  // closed at the Pi boundary — bounded response, no normal model response,
-  // busy state released.
-  it("fails closed with a bounded response when the inbound durable write rejects (#1529)", async () => {
+  // #1940 R1: memory is decided at abtars start; a failed inbound archive
+  // write is reported but never blocks the turn.
+  it("runs the turn when the inbound archive write rejects (#1940 R1)", async () => {
     const adapter = mockAdapter();
     const recordMessage = vi.fn().mockRejectedValue(new Error("owner down"));
     const deps = mockDeps(transport, {
@@ -269,21 +376,11 @@ describe("handleInboundMessage", () => {
         close: vi.fn().mockResolvedValue(undefined),
       } as any,
     } as any);
-    // Stub spin() forwards the intent to the transport boundary so the Pi
-    // preflight can fail closed before any provider work.
-    (deps.sessionManager as any).spin = async (spec: any) => {
-      const context = { userId: spec.userId, durableContextIntent: spec.durableContextIntent };
-      if (context.durableContextIntent?.mode === "required_unavailable") {
-        throw new DurableContextUnavailableError("cursor_unavailable");
-      }
-      const result = await transport.sendPrompt(spec.sessionId ?? "test_A_01", spec.prompt, spec.imageContent, context);
-      return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
-    };
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Memory context is temporarily unavailable. Please retry.", expect.any(Object));
-    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(recordMessage).toHaveBeenCalled();
+    expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
     expect((deps as any)._session.busy).toBe(false);
   });
 
@@ -331,6 +428,20 @@ describe("handleInboundMessage", () => {
     expect(adapter.sendMessage).toHaveBeenCalled();
   });
 
+  // ── Context-overflow recovery (#1745) ─────────────────────────────────────
+
+  it("does NOT reset the session for a plain Error whose message mentions token limit", async () => {
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("API error 429: token limit reached")) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    // The four-substring sniff is gone — overflow must travel as the typed code.
+    expect(transport.resetSession).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).toHaveBeenCalled();
+  });
+
   it("handles command and returns early", async () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
@@ -375,9 +486,10 @@ describe("handleInboundMessage", () => {
           id, userId, platform, chatId: 100,
           delivery: "streaming", active: true, status: "ready",
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-          log: [], shortIndex: 1,
+          log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+          primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
         };
         sessions.set(id, s);
       }
@@ -408,15 +520,205 @@ describe("handleInboundMessage", () => {
   });
 });
 
+describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submissions", () => {
+  let transport: ReturnType<typeof mockTransport>;
+  let mockSession: ManagedSession;
+
+  const SCHEDULED_TEXT = composeScheduledAnnouncementText("Morning greeting", 12, "Good morning!");
+  const SCHEDULED_SAVED_TEXT = composeScheduledAnnouncementHistoryText("Morning greeting", 12, "Good morning!");
+
+  function announceMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
+    return makeMsg({
+      text: SCHEDULED_TEXT,
+      senderId: "scheduler",
+      senderName: "scheduler",
+      internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: SCHEDULED_SAVED_TEXT },
+      ...overrides,
+    });
+  }
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    const spinMod = await import("./spin.js");
+    // One stable session object per test — mutations (busy flag) are visible
+    // to every middleware resolution.
+    mockSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1, showThinking: false,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
+    };
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => (id === "test_A_01" ? mockSession : { ...mockSession, id }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => mockSession);
+  });
+
+  afterEach(() => {
+    drainSystemEvents();
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("resolves sent only after the response was externally delivered, and records both turns", async () => {
+    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready", capabilities: new Set<string>(), recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+      } as any,
+    });
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("sent");
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Hello from Kiro!", expect.any(Object));
+    // Both the internal event (inbound, before the model turn) and Main's
+    // assistant response are recorded into the same target A session by the
+    // normal pipeline — no task-specific memory writer.
+    const roles = recordMessage.mock.calls.map((c: unknown[]) => (c[0] as { role?: string })?.role);
+    expect(roles).toContain("user");
+    expect(roles).toContain("assistant");
+    const inbound = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "user")![0] as { sessionId: string; content: string };
+    const assistant = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "assistant")![0] as { sessionId: string };
+    expect(inbound.sessionId).toBe("test_A_01");
+    // #1873: the durable row records the historical form, never the one-time
+    // announcement instruction; the live turn keeps the instruction.
+    expect(inbound.content).toBe(SCHEDULED_SAVED_TEXT);
+    expect(inbound.content).not.toContain("Announce this result");
+    expect(transport.sendPrompt).toHaveBeenCalledWith("test_A_01", expect.stringContaining("Announce this result"), undefined, "master");
+    expect(assistant.sessionId).toBe("test_A_01");
+  });
+
+  it("resolves not_sent on a busy session without queueing and without a model turn (#1724 no-queue policy)", async () => {
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    mockSession.busy = true;
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("not_sent");
+    expect(mockSession.queue).toHaveLength(0);
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a scheduler-shaped event without the runtime trust token", async () => {
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    const outcome = await submitTrustedInternalMessage(
+      announceMsg({ internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } as any }),
+      adapter,
+      deps,
+    );
+
+    expect(outcome).toBe("not_sent");
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("#1873 does not select a forged saved form without the runtime trust token", async () => {
+    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready", capabilities: new Set<string>(), recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+      } as any,
+    });
+
+    await handleInboundMessage(
+      announceMsg({ internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: "forged saved form" } as any }),
+      adapter,
+      deps,
+    );
+
+    const inbound = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "user")?.[0] as { content: string } | undefined;
+    expect(inbound?.content).toBe(SCHEDULED_TEXT);
+  });
+
+  it("resolves not_sent for an empty, [NO_REPLY], or reaction-only Main outcome", async () => {
+    for (const raw of ["", "[NO_REPLY]", "[REACT:👍]"]) {
+      transport.sendPrompt = vi.fn().mockResolvedValue(raw) as any;
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport);
+      const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+      expect(outcome).toBe("not_sent");
+    }
+  }, 20_000);
+
+  it("resolves unknown after a partial send and not_sent when the first chunk fails", async () => {
+    // Two chunks — first delivered, second permanently failing → ambiguous.
+    transport.sendPrompt = vi.fn().mockResolvedValue("part one\n\npart two") as any;
+    const partialAdapter = mockAdapter({
+      chunkResponse: (t: string) => t.split("\n\n"),
+      sendMessage: vi.fn()
+        .mockResolvedValueOnce(11)
+        .mockRejectedValue(new Error("network gone")),
+    });
+    const deps1 = mockDeps(transport);
+    const unknownOutcome = await submitTrustedInternalMessage(announceMsg(), partialAdapter, deps1);
+    expect(unknownOutcome).toBe("unknown");
+
+    // First chunk never lands → definitely not sent.
+    transport.sendPrompt = vi.fn().mockResolvedValue("part one\n\npart two") as any;
+    const failingAdapter = mockAdapter({
+      chunkResponse: (t: string) => t.split("\n\n"),
+      sendMessage: vi.fn().mockRejectedValue(new Error("network gone")),
+    });
+    const deps2 = mockDeps(transport);
+    const notSentOutcome = await submitTrustedInternalMessage(announceMsg(), failingAdapter, deps2);
+    expect(notSentOutcome).toBe("not_sent");
+  }, 30_000);
+
+  it("resolves unknown when a semantic pre-tool segment was already delivered", async () => {
+    mockSession.showThinking = true;
+    transport.sendPrompt = vi.fn(async () => {
+      await transport.onSegmentBreak?.("The first part is ready.");
+      return "[NO_REPLY]";
+    }) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("unknown");
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "The first part is ready.", expect.any(Object));
+  });
+
+  it("suppresses the user-facing error reply for a failed announcement turn (synthetic convention)", async () => {
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("not_sent");
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("citation detection (#1270)", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   /** Shared memoryRuntime mock that satisfies AbtarsMemoryRuntime. */
   function mockMemoryRuntime(overrides: Record<string, unknown> = {}) {
     return {
       state: "ready",
       capabilities: new Set<string>(),
-      recall: vi.fn().mockResolvedValue({ hits: [{ memoryId: 1, content: "test memory", score: 0.95 }] }),
+      recall: vi.fn().mockResolvedValue({ hits: [{ ref: "db:durable:1:master:1", kind: "db", content: "test memory", date: "2026-09-01" }], context: "[1] (db:durable:1:master:1) test memory", status: "evidence" }),
       recordMessage: vi.fn().mockResolvedValue({}),
       recordFeedback: vi.fn().mockResolvedValue({}),
       assembleSessionContext: vi.fn().mockResolvedValue({}),
@@ -446,26 +748,29 @@ describe("citation detection (#1270)", () => {
       id, userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
       async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
         id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }),
     );
   });
@@ -489,21 +794,17 @@ describe("citation detection (#1270)", () => {
   });
 
   it("calls detectCitations from lazy module when memoryConfig.memoryEnabled is true", async () => {
-    const recordFeedback = vi.fn().mockResolvedValue({});
     const adapter = mockAdapter();
     const deps = mockDeps(transport, {
-      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-      memoryRuntime: mockMemoryRuntime({ recordFeedback }),
+      memoryRuntime: mockMemoryRuntime({}),
     } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
+    // Heuristic citation still feeds delivery tracking. The cite/reject
+    // feedback write is retired (#1928 A13), so no mutation is attempted.
     expect(detectCitationsSpy).toHaveBeenCalledWith("Hello from Kiro!", [{ id: 1, contentEn: "test memory" }]);
-    expect(recordFeedback).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryId: 1, feedbackType: "cite" }),
-      expect.any(String),
-    );
   });
 
   it("skips citation detection when abmind() returns null even if memoryEnabled is true", async () => {
@@ -569,26 +870,29 @@ describe("citation detection (#1270)", () => {
         id, userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
         id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
         async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
           id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
           delivery: "streaming", active: true, status: "ready",
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-          log: [], shortIndex: 1,
+          log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+          primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
         }),
       );
     });
@@ -635,11 +939,89 @@ describe("citation detection (#1270)", () => {
       );
       expect(assistantCalls).toHaveLength(0);
     });
+
+    it("delivers despite a failed assistant archive write — the gap is accepted (#1940 R1)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
+      const recordMessage = vi.fn(async (input: { role: string }) =>
+        input.role === "assistant" ? Promise.reject(new Error("owner down")) : { id: 1 },
+      );
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 12 }), adapter, deps);
+
+      // Delivery completes; the failed archive write is never reported as
+      // durable, and no retry obligation is queued for the next turn.
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("done text"),
+        expect.anything(),
+      );
+      expect(recordMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "assistant" }),
+        expect.any(String),
+      );
+    });
+
+    it("settles empty aborted turns without recording (#1940)", async () => {
+      // Regression: an aborted turn records nothing (the store drops
+      // empty content by policy). With no outbox, there is no obligation
+      // to hold — the turn simply settles.
+      transport.sendPrompt = vi.fn().mockResolvedValue("") as any;
+      const recordMessage = vi.fn(async (input: { content: string }) =>
+        (typeof input.content === "string" && input.content.trim() ? { id: 7 } : { id: null }),
+      );
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 14 }), adapter, deps);
+
+      // Empty turns record nothing and settle with the standard fallback.
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(0);
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("empty response"),
+        expect.anything(),
+      );
+    });
+
+    it("does not retry previous failures — each turn reports its own archive outcome (#1940 R1)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 7 });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 13 }), adapter, deps);
+
+      // One assistant write per turn under its own operation key — no
+      // carried-over retry from an earlier turn.
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(1);
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("done text"),
+        expect.anything(),
+      );
+    });
   });
 });
 
 describe("#1619 incremental block delivery wiring", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   const MASTER_REG: UserRegistry = {
     users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
@@ -656,8 +1038,10 @@ describe("#1619 incremental block delivery wiring", () => {
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
+      showThinking: true, // #1654: wiring evidence tests need the feed enabled
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
       console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
@@ -719,6 +1103,40 @@ describe("#1619 incremental block delivery wiring", () => {
     expect(sent).toContain("answer");
   });
 
+  it("#1654: default session (showThinking false) never delivers 💭 blocks but still answers", async () => {
+    const spinMod = await import("./spin.js");
+    const hiddenSession = (id: string): ManagedSession => ({
+      id, userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      showThinking: false, // #1654: default-hidden
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => hiddenSession(id));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => hiddenSession("test_A_01"));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => hiddenSession("test_A_01"),
+    );
+
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      fake.onOutputDelta?.({ kind: "thinking", text: "pondering quietly" });
+      return "Final answer.";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // Gating the feed must not swallow the terminal answer.
+    expect(sent).toContain("Final answer.");
+    expect(sent.some((t) => t.startsWith("💭 "))).toBe(false);
+  });
+
   it("an interim segment send failure keeps the complete final response (never lost)", async () => {
     const fake = transport as any;
     fake.sendPrompt = vi.fn(async () => {
@@ -743,4 +1161,221 @@ describe("#1619 incremental block delivery wiring", () => {
     expect(terminal[0]).toContain("Lost segment text.");
     expect(terminal[0]).toContain("Final answer.");
   });
+});
+
+describe("session-start hydration lifecycle (#1776)", () => {
+  let transport: ReturnType<typeof mockTransport>;
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MASTER_REGISTRY);
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
+  });
+
+  afterEach(() => {
+    drainSystemEvents();
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("hydrates an unseen Main/A session before marking seen, exactly once across two turns", async () => {
+    const spinMod = await import("./spin.js");
+    // One shared session object across turns (production sessions persist):
+    // unseen at boot, so the first turn is a genuine session start.
+    const session: ManagedSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1, showThinking: false,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
+    };
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => session);
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((): ManagedSession => session);
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(async (): Promise<ManagedSession> => session);
+
+    let seenDuringAssembly: boolean | undefined;
+    const assembleSessionContext = vi.fn().mockImplementation(async () => {
+      // Ordering probe: the assembly must observe the session unseen —
+      // the pipeline must not have marked seen before prompt construction.
+      seenDuringAssembly = session.seen;
+      // #1940: hydration (recall) reaches the first turn via the pipeline;
+      // the SOUL core lives in the Pi session system prompt instead.
+      return { coreKnowledge: "CORE-NOT-IN-TURN-1776", recall: "HYDRATION-PROBE-1776", wakeUp: "" };
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set(["durableContext"]),
+        recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext,
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+
+    await handleInboundMessage(makeMsg({ text: "first turn probe" }), adapter, deps);
+
+    // First turn: exactly one assembly, observed unseen, marker reached transport.
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    expect(seenDuringAssembly).toBe(false);
+    const sendPrompt = transport.sendPrompt as ReturnType<typeof vi.fn>;
+    const firstTurnPrompts = sendPrompt.mock.calls.map((c: unknown[]) => String(c[1] ?? ""));
+    expect(firstTurnPrompts.length).toBeGreaterThan(0);
+    expect(firstTurnPrompts.some((p) => p.includes("HYDRATION-PROBE-1776"))).toBe(true);
+    // The attempt settles the session seen so later turns do not rehydrate.
+    expect(session.seen).toBe(true);
+    expect(session.pendingStart).toBe(false);
+
+    await handleInboundMessage(makeMsg({ text: "second ordinary turn" }), adapter, deps);
+
+    // Second turn: no second assembly; ordinary prompts carry no hydration block.
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    const secondTurnPrompts = sendPrompt.mock.calls.slice(firstTurnPrompts.length).map((c: unknown[]) => String(c[1] ?? ""));
+    expect(secondTurnPrompts.length).toBeGreaterThan(0);
+    expect(secondTurnPrompts.some((p) => p.includes("HYDRATION-PROBE-1776"))).toBe(false);
+  });
+});
+
+describe("#1913 answer records", () => {
+  // Process-local answer store is shared: each test delivers to a unique
+  // platform message ID.
+  function streamingSession(): any {
+    return {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1, showThinking: false,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
+    };
+  }
+
+  beforeEach(async () => {
+    setUserRegistryOverride(MASTER_REGISTRY);
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      (session as { transport: unknown }).transport = currentTransport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation(() => streamingSession());
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation(() => streamingSession());
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(async () => streamingSession());
+  });
+
+  // The transport of the currently running test (set by rig before the turn).
+  let currentTransport: unknown;
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  function rig(responseText: string, sentId: number, cited: number[]) {
+    const transport = mockTransport();
+    transport.contextPercent = -1;
+    currentTransport = transport;
+    (transport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue(responseText);
+    setUserRegistryOverride(MASTER_REGISTRY);
+    detectCitationsSpy.mockClear();
+    detectCitationsSpy.mockReturnValue(cited);
+    abmindReturn = { detectCitations: detectCitationsSpy, renderMemory: vi.fn().mockReturnValue("test memory") };
+    const adapter = mockAdapter({ sendMessage: vi.fn().mockResolvedValue(sentId) });
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set<string>(),
+        recall: vi.fn().mockResolvedValue({ hits: [{ ref: "db:durable:1:master:1", kind: "db", content: "test memory", date: "2026-09-01" }], context: "[1] (db:durable:1:master:1) test memory", status: "evidence" }),
+        recordMessage: vi.fn().mockResolvedValue({}),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({}),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+    return { adapter, deps };
+  }
+
+  it("publishes validated support for a declared answer", async () => {
+    const { adapter, deps } = rig("Kedden! [SUPPORT: db:durable:1:master:1]", 101, [1]);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    const record = lookupAnswerRecord("telegram", "100", "101");
+    expect(record?.support).toEqual(["db:durable:1:master:1"]);
+    expect(record?.principal).toBe("master");
+    // The marker never reaches chat.
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => String(c[1] ?? ""));
+    expect(sent.join("\n")).not.toContain("[SUPPORT");
+  });
+
+  it("publishes nothing when support cannot be established", async () => {
+    const { adapter, deps } = rig("Plain answer.", 102, []);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "102")).toBeUndefined();
+  });
+
+  it("degrades forged declarations to the eligible subset", async () => {
+    const { adapter, deps } = rig("Answer. [SUPPORT: db:durable:1:master:1, db:durable:999:master:1]", 103, []);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "103")?.support).toEqual(["db:durable:1:master:1"]);
+  });
+  it("publishes each successful chunk before later delivery fails", async () => {
+    const { adapter, deps } = rig("Two chunks. [SUPPORT: db:durable:1:master:1]", 104, []);
+    adapter.chunkResponse = () => ["First chunk", "Second chunk"];
+    adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => {
+      if (content === "First chunk") return 104;
+      if (content === "Second chunk") {
+        expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual(["db:durable:1:master:1"]);
+        throw new Error("permanent send failure");
+      }
+      return 105;
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual(["db:durable:1:master:1"]);
+    expect(lookupAnswerRecord("telegram", "100", "105")).toBeUndefined();
+  });
+
+  it("uses settled execution identity for tool-only support after session cleanup", async () => {
+    const { adapter, deps } = rig("Kedden! [SUPPORT: db:durable:313:master:1]", 106, []);
+    deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
+    deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
+      const { recordToolEvidence } = await import("./answer-evidence.js");
+      recordToolEvidence("settled-execution", [{ ref: "db:durable:313:master:1" }]);
+      return { sessionId: "test_A_01", executionId: "settled-execution", result: "Kedden! [SUPPORT: db:durable:313:master:1]", outcome: "text" };
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "106")).toMatchObject({ executionId: "settled-execution", support: ["db:durable:313:master:1"] });
+  });
+
+  it("does not give a pre-tool segment support from a later read", async () => {
+    const { adapter, deps } = rig("Later answer. [SUPPORT: db:durable:313:master:1]", 108, []);
+    deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
+    adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => content === "Earlier answer." ? 107 : 108);
+    deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
+      await (currentTransport as IKiroTransport).onSegmentBreak?.("Earlier answer. [SUPPORT: db:durable:313:master:1]");
+      const { recordToolEvidence } = await import("./answer-evidence.js");
+      recordToolEvidence("later-read-execution", [{ ref: "db:durable:313:master:1" }]);
+      return { sessionId: "test_A_01", executionId: "later-read-execution", result: "Later answer. [SUPPORT: db:durable:313:master:1]", outcome: "text" };
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "107")).toBeUndefined();
+    expect(lookupAnswerRecord("telegram", "100", "108")?.support).toEqual(["db:durable:313:master:1"]);
+  });
+
 });

@@ -35,9 +35,9 @@ The agent doesn't load every skill into context — just the catalog. Full skill
 ```markdown
 ---
 name: deploy-peer-b
-description: Deploy abTARS to the Mac mini via SSH
+description: Deploy abTARS to a remote instance via SSH
 tags: [deploy, peer-b, ssh]
-related: [deploy-kp, watchdog]
+related: [watchdog]
 ---
 
 ## Steps
@@ -64,18 +64,72 @@ The agent creates skills when it notices it's repeating a procedure — the cata
 
 ## Usage tracking
 
-Each skill has a `.stats.json` sidecar tracking how often it's used:
+All skills share one stats file at `~/.abtars/skills/.stats.json`,
+tracking reads per skill:
 
 ```json
 {
-  "uses": 14,
-  "lastUsed": "2026-05-20T09:30:00Z",
-  "created": "2026-04-10T14:00:00Z"
+  "my-skill": {
+    "reads": 14,
+    "lastRead": "2026-05-20T09:30:00Z",
+    "createdAt": "2026-04-10T14:00:00Z",
+    "createdBy": "master"
+  }
 }
 ```
 
 ## Commands
 
 ```
-/skill          Reload the skill catalog (picks up new/changed files)
+/skill          List the skill catalog (cached)
+/skill reload   Rebuild the catalog (picks up new/changed files)
+/skill list     List runnable + active skill sessions
+/skill run <name> [message]   Start a skill session
+/skill stop     End the active skill session
 ```
+
+`/skills` is an alias for the catalog list. `reload` is substring-matched,
+so any `/skill ...reload...` form rebuilds the catalog.
+
+## Declaring npm dependencies (optional)
+
+Any skill — bundled (`core/`), agent-created (`self/`), operator-provided
+(`custom/`), or marketplace (`downloaded/`) — may declare npm runtime
+dependencies for its `scripts/` helpers in `scripts/package.json`:
+
+```json
+{
+  "type": "module",
+  "dependencies": {
+    "example-runtime-package": "1.2.3"
+  }
+}
+```
+
+- **Absent or empty declarations are no-ops.** A skill without
+  `scripts/package.json`, without a `dependencies` key, or with
+  `"dependencies": {}` needs no preparation.
+- **Exact semantic versions only** (`MAJOR.MINOR.PATCH`, optionally with a
+  prerelease/build suffix). Ranges, tags, aliases, and git/file/URL/workspace
+  sources are rejected before anything is installed.
+- Dependencies are installed centrally in `~/.abtars/node_modules` — never in
+  per-skill folders. Scripts nested under `~/.abtars/skills/.../scripts`
+  resolve them through Node's parent-directory lookup.
+- Preparation happens only at controlled lifecycle boundaries: **release
+  deploy** (before activation — a failure aborts the release and leaves the
+  previous release untouched), **boot**, and **explicit `/skill reload`**.
+  It never happens while a model executes a skill.
+- The shared dependency root keeps one direct version per package. Two skills
+  declaring the same package at different exact versions are a conflict — the
+  affected skills are excluded (catalog reload) or the deploy is aborted.
+- A `## Dependencies` section in SKILL.md is optional human/model guidance
+  (probes, manual repair). It must agree with the manifest; the manifest is
+  the installation authority.
+- `devDependencies`, `peerDependencies`, and other manifest fields are not
+  runtime declarations.
+- **Verification:** `/skill list` shows skipped skills with their reasons.
+  Errors name the skill source, manifest, package/version, bounded process
+  output, and a copyable repair command of the form
+  `npm install --prefix ~/.abtars --no-save --package-lock=false --no-audit --no-fund <name>@<version>`.
+- Declared-but-unprepared skills never enter the catalog until they verify —
+  re-run `/skill reload` (or deploy) to retry at the controlled boundary.

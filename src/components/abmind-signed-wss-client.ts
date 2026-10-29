@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import type {
   AbmindClientLike, AbmindCapabilitiesLike,
+  AbmindClientErrorLike, AbmindFailureActionLike, AbmindFailureStageLike,
   AbmindPrivateMemoryLike, AbmindSleepLike,
   AbmindRouteSnapshotV1Like, AbmindRouteStateLike,
 } from "./abmind-client-contract.js";
@@ -29,6 +30,7 @@ import { AbmindRequestOutbox } from "./abmind-request-outbox.js";
 import { AbtarsRouteController } from "./abmind-route-controller.js";
 import type { RetryFailureClassLike } from "./abmind-route-contract.js";
 import type { WssProfile } from "./abmind-endpoint-config.js";
+import { redactSecrets } from "./logger.js";
 
 // ── Wire constants (must match abmind's signed-wire protocol) ──────────────
 
@@ -37,6 +39,8 @@ const ABMIND_WSS_DOMAIN_REQUEST = "abmind-wss-request-v1";
 const ABMIND_PROTOCOL_VERSION = 1;
 
 const WSS_REQUEST_TIMEOUT_MS = 120_000;
+const ERROR_MESSAGE_MAX = 512;
+const ERROR_REQUEST_ID_MAX = 128;
 
 interface WssAuthFields {
   peerId: string;
@@ -49,7 +53,30 @@ interface AbmindResponseV1 {
   ok: boolean;
   requestId: string;
   result?: unknown;
-  error?: { code: string; message: string; current?: unknown };
+  error?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    action?: AbmindFailureActionLike;
+    stage?: AbmindFailureStageLike;
+    current?: unknown;
+  };
+}
+
+// ── #1659: exhaustive code → retryability/action mapping (mirrors abmind) ──
+
+function errorContract(code: string): { retryable: boolean; action: AbmindFailureActionLike } {
+  switch (code) {
+    case "validation_error": return { retryable: false, action: "fix_input" };
+    case "not_found": return { retryable: false, action: "stop" };
+    case "conflict": return { retryable: false, action: "re_recall" };
+    case "unauthorized": return { retryable: false, action: "stop" };
+    case "idempotency_conflict": return { retryable: false, action: "stop" };
+    case "outcome_unknown": return { retryable: false, action: "reconcile" };
+    case "unavailable": return { retryable: true, action: "retry" };
+    // Unknown codes carry no dispatch evidence: never claim retry safety.
+    default: return { retryable: false, action: "reconcile" };
+  }
 }
 
 // ── Canonical serialization (conforms to abmind's signed-wire) ─────────────
@@ -199,7 +226,6 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     this.privateMemory = {
       instantStore: (p, key) => this.call("private.instantStore", p, key),
-      editMemory: (p, key) => this.callPrivateMutation("private.edit", p, key),
       recall: (p) => this.call("private.recall", p),
       rebuildFtsIndexes: () => this.call("private.rebuildFts", {}),
       embed: (p) => this.call("private.embed", p),
@@ -208,10 +234,16 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       assembleSessionContext: (p) => this.call("private.assembleSessionContext", p),
       getRuntimeStatus: (p) => this.call("private.getRuntimeStatus", p ?? {}),
       getCoreKnowledge: (p) => this.call("private.getCoreKnowledge", p),
-      recordFeedback: (p, key) => this.call("private.recordFeedback", p, key),
-      projectConversationContext: (p) => this.call("private.projectConversationContext", p),
-      prepareConversationCompaction: (p) => this.call("private.prepareConversationCompaction", p),
-      commitConversationCompaction: (p, key) => this.call("private.commitConversationCompaction", p, key),
+      dreamQuestions: {
+        nextPending: (userId) => this.call("private.dreamQuestions.nextPending", { userId }),
+        list: (userId, status, limit) => this.call("private.dreamQuestions.list", { userId, status, limit }),
+        markAsked: (p, key) => this.call("private.dreamQuestions.markAsked", p, key),
+        dismiss: (p, key) => this.call("private.dreamQuestions.dismiss", p, key),
+      },
+      // #1660: present on the structural contract; abmind refuses both for
+      // signed peers at dispatch, so these always fail closed on a peer route.
+      findSealedSecrets: (p) => this.call("private.findSealedSecrets", p),
+      resolveSealedSecret: (p) => this.call("private.resolveSealedSecret", p),
     };
 
     this.sleep = {
@@ -220,10 +252,37 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       resume: (runId, level, key) => this.call("sleep.resume", { runId, level }, key) as Promise<{ status: string; runId?: string; reason?: string }>,
       events: (afterSeq, limit, waitMs) => this.call("sleep.events", { afterSeq, limit, waitMs }) as Promise<{ runId: string; events: Array<{ seq: number; at: number; event: { type: string; detail?: string } }>; nextSeq: number; gap: boolean; terminal: boolean }>,
       runtime: {
-        open: (id, key) => this.call("sleep.runtime.open", { providerInstanceId: id }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
+        open: (id, key, capabilities) => this.call("sleep.runtime.open", { providerInstanceId: id, ...(capabilities?.proposalOnly === true ? { capabilities: { proposalOnly: true } } : {}) }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
         next: (leaseId, waitMs) => this.call("sleep.runtime.next", { leaseId, waitMs }) as Promise<{ status: string; heartbeat?: true; completionRequest?: { completionId: string; runId: string; stepId: string; prompt: string; deadline: number } }>,
-        complete: (leaseId, completionId, text, key) => this.call("sleep.runtime.complete", { leaseId, completionId, text }, key) as Promise<{ status: string }>,
-        fail: (leaseId, completionId, code, key) => this.call("sleep.runtime.fail", { leaseId, completionId, code }, key) as Promise<{ status: string }>,
+        complete: (leaseId: string, completionId: string, text: string, outcomeOrKey?: string, key?: string) => {
+          let outcome: string | undefined;
+          let actualKey: string | undefined;
+          if (outcomeOrKey && ["text", "reaction", "no_reply", "empty"].includes(outcomeOrKey)) {
+            outcome = outcomeOrKey;
+            actualKey = key;
+          } else {
+            actualKey = outcomeOrKey;
+          }
+          const payload: Record<string, unknown> = { leaseId, completionId, text };
+          if (outcome) payload["outcome"] = outcome;
+          return this.call("sleep.runtime.complete", payload, actualKey) as Promise<{ status: string }>;
+        },
+        fail: (leaseId: string, completionId: string, code: string, failure?: unknown, key?: string) => {
+          // Support both legacy fail(leaseId, completionId, code, key) and new fail(..., failure, key)
+          let actualFailure: unknown;
+          let actualKey: string | undefined;
+          if (typeof failure === "string") {
+            actualKey = failure;
+          } else if (failure && typeof failure === "object") {
+            actualFailure = failure;
+            actualKey = key;
+          } else if (failure === undefined) {
+            actualKey = key;
+          }
+          const payload: Record<string, unknown> = { leaseId, completionId, code };
+          if (actualFailure) payload["failure"] = actualFailure;
+          return this.call("sleep.runtime.fail", payload, actualKey) as Promise<{ status: string }>;
+        },
         close: (leaseId, key) => this.call("sleep.runtime.close", { leaseId }, key) as Promise<{ status: string }>,
       },
     };
@@ -270,7 +329,9 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       if (p.resolve) {
-        p.resolve({ ok: false, requestId: p.requestId, error: { code: "unavailable", message: "Transport closed" } });
+        p.resolve({ ok: false, requestId: p.requestId, error: {
+          code: "unavailable", message: "Transport closed", retryable: true, action: "retry", stage: "response",
+        } });
       }
     }
     this.pending.clear();
@@ -284,40 +345,17 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     return (await this.call(method, payload, idempotencyKey)) as T;
   }
 
-  /**
-   * Semantic mutations expose their bounded failure contract as data, matching
-   * the abmind client contract consumed by the memory runtime: a rejected
-   * mutation returns { ok: false, code, ... } instead of throwing. Transport
-   * and protocol failures outside that contract still reject normally.
-   */
-  private async callPrivateMutation(
-    method: "private.edit",
-    payload: unknown,
-    idempotencyKey?: string,
-  ): Promise<Record<string, unknown>> {
-    try {
-      const result = await this.call(method, payload, idempotencyKey);
-      return (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
-    } catch (err) {
-      const e = err as Error & { code?: string; current?: unknown };
-      if (e.code === "conflict" || e.code === "not_found" || e.code === "unauthorized" || e.code === "validation_error") {
-        return { ok: false, code: e.code, current: e.current, message: e.message };
-      }
-      throw err;
-    }
-  }
-
   private async call(method: string, payload: unknown, idempotencyKey?: string): Promise<unknown> {
     const requestId = `wss-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     if (this.closed_) {
-      throw this.errorWithCode("unavailable", "Transport is closed");
+      throw this.errorWithCode("unavailable", "Transport is closed", requestId);
     }
     if (this.degraded_ || this.outbox.isQuarantined || this.outbox.isDegraded) {
-      throw this.errorWithCode("unavailable", "Outbox state is not usable");
+      throw this.errorWithCode("unavailable", "Outbox state is not usable", requestId);
     }
     // Fail-closed admission: only a ready current generation admits work.
     if (!this.controller.isReady()) {
-      throw this.errorWithCode("unavailable", "Route not ready");
+      throw this.errorWithCode("unavailable", "Route not ready", requestId);
     }
     const isMutating = METHOD_IS_MUTATING.has(method);
     let key: string | undefined = idempotencyKey;
@@ -337,7 +375,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     const appended = this.outbox.append(frameId, method, requestId, key, body, ABMIND_PROTOCOL_VERSION, payload);
     if (!appended) {
-      throw this.errorWithCode("unavailable", "Outbox persistence failed");
+      throw this.errorWithCode("unavailable", "Outbox persistence failed", requestId);
     }
 
     const response = await new Promise<AbmindResponseV1>((resolve) => {
@@ -347,15 +385,48 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     if (response.ok) {
       return response.result;
     }
-    throw this.errorWithCode(response.error?.code ?? "unavailable", response.error?.message ?? "Request failed", response.error?.current);
+    throw this.errorWithCode(
+      response.error?.code ?? "unavailable",
+      response.error?.message ?? "Request failed",
+      response.requestId,
+      response.error?.current,
+      response.error?.retryable,
+      response.error?.action,
+      response.error?.stage,
+    );
   }
 
   private idemCounter = 0;
 
-  private errorWithCode(code: string, message: string, current?: unknown): Error & { code: string; current?: unknown } {
-    const err = new Error(message) as Error & { code: string; current?: unknown };
-    err.code = code;
-    err.current = current;
+  private errorWithCode(
+    code: string,
+    message: string,
+    requestId: string,
+    current?: unknown,
+    retryableOverride?: boolean,
+    actionOverride?: AbmindFailureActionLike,
+    stageOverride?: AbmindFailureStageLike,
+  ): AbmindClientErrorLike {
+    const contract = errorContract(code);
+    const safeMessage = redactSecrets(String(message));
+    const boundedMessage = safeMessage.length <= ERROR_MESSAGE_MAX
+      ? safeMessage
+      : `${safeMessage.slice(0, ERROR_MESSAGE_MAX - 3)}...`;
+    const err = new Error(boundedMessage) as AbmindClientErrorLike;
+    Object.assign(err, {
+      name: "AbmindClientError",
+      code,
+      requestId: redactSecrets(String(requestId)).slice(0, ERROR_REQUEST_ID_MAX),
+      retryable: typeof retryableOverride === "boolean" ? retryableOverride : contract.retryable,
+      action: actionOverride === "fix_input" || actionOverride === "re_recall" || actionOverride === "retry"
+        || actionOverride === "reconcile" || actionOverride === "stop"
+        ? actionOverride
+        : contract.action,
+      stage: stageOverride === "pre_dispatch" || stageOverride === "dispatch" || stageOverride === "response"
+        ? stageOverride
+        : code === "outcome_unknown" ? "response" : "pre_dispatch",
+      ...(current !== undefined ? { current } : {}),
+    });
     return err;
   }
 
@@ -424,7 +495,10 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       clearTimeout(pending.timer);
       this.pending.delete(frameId);
       if (pending.resolve) {
-        pending.resolve({ ok: false, requestId, error: { code: "outcome_unknown", message: "Request outcome unknown after retry budget" } });
+        pending.resolve({ ok: false, requestId, error: {
+          code: "outcome_unknown", message: "Request outcome unknown after retry budget",
+          retryable: false, action: "reconcile", stage: "response",
+        } });
       }
     }
     this.sentOnGen.delete(frameId);
@@ -454,7 +528,9 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       if (p.resolve) {
-        p.resolve({ ok: false, requestId: p.requestId, error: { code: "unavailable", message: "Outbox persistence failed" } });
+        p.resolve({ ok: false, requestId: p.requestId, error: {
+          code: "unavailable", message: "Outbox persistence failed", retryable: true, action: "retry", stage: "response",
+        } });
       }
     }
     this.pending.clear();
@@ -570,8 +646,9 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
 // Methods that require an idempotency key on the wire (mirrors abmind's registry).
 const METHOD_IS_MUTATING = new Set([
-  "private.instantStore", "private.edit", "private.reclassify", "private.adjustRelevance",
+  "private.instantStore", "private.edit", "private.reclassify",
   "private.merge", "private.cascadeDelete", "private.rebuildFts", "private.recordMessage",
-  "private.recordFeedback", "private.commitConversationCompaction", "sleep.start", "sleep.resume", "sleep.cancel",
+  "private.dreamQuestions.markAsked",
+  "private.dreamQuestions.dismiss", "sleep.start", "sleep.resume", "sleep.cancel",
   "sleep.runtime.open", "sleep.runtime.complete", "sleep.runtime.fail", "sleep.runtime.close",
 ]);

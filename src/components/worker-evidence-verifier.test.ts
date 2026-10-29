@@ -1,0 +1,259 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { evaluateWorkerEvidence, resolveWorkspaceMember } from "./worker-evidence-verifier.js";
+import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
+
+let WS: string;
+
+function makeContract(overrides: Partial<WorkerAcceptanceContractV1> = {}): WorkerAcceptanceContractV1 {
+  return {
+    schema_version: 1,
+    id: "c_verify_test",
+    digest: "digest-verify",
+    goal: "produce evidence",
+    criteria: [
+      { id: "c1", description: "artifact present" },
+      { id: "c2", description: "check passes" },
+    ],
+    expected_artifacts: [
+      { id: "a1", kind: "file", ref: "out/result.md", required: true, criterion_ids: ["c1"] },
+    ],
+    verification_commands: [
+      { id: "v1", argv: ["test", "-s", "out/result.md"], timeout_ms: 5000, criterion_ids: ["c1"] },
+      { id: "v2", argv: ["grep", "-q", "done", "out/result.md"], timeout_ms: 5000, criterion_ids: ["c2"] },
+    ],
+    required_capabilities: [],
+    supports_root_criteria: ["r1"],
+    limits: {},
+    provenance: { root_card_id: 1, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  WS = mkdtempSync(join(tmpdir(), "abtars-verify-"));
+  mkdirSync(join(WS, "out"), { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(WS, { recursive: true, force: true });
+});
+
+describe("evaluateWorkerEvidence (#1656)", () => {
+  it("passes criteria against a real temp workspace with relative refs", () => {
+    writeFileSync(join(WS, "out", "result.md"), "all done\n");
+    const evaluation = evaluateWorkerEvidence(makeContract(), WS);
+    expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: true });
+    expect(evaluation.criteria.map(c => [c.criterion_id, c.status])).toEqual([["c1", "passed"], ["c2", "passed"]]);
+  });
+
+  it("resolves daily-ai lane refs from the task workspace without a duplicate prefix", () => {
+    const laneRefs = [
+      "lane1-x-handoff.md",
+      "lane2-rss-handoff.md",
+      "lane3-newsletter-handoff.md",
+      "lane4-web-handoff.md",
+    ];
+    const criteria = laneRefs.map((ref, index) => ({ id: `lane${index + 1}`, description: `${ref} exists` }));
+    const contract = makeContract({
+      criteria,
+      expected_artifacts: laneRefs.map((ref, index) => ({
+        id: `a${index + 1}`,
+        kind: "file" as const,
+        ref,
+        required: true,
+        criterion_ids: [`lane${index + 1}`],
+      })),
+      verification_commands: [],
+      supports_root_criteria: criteria.map(c => c.id),
+    });
+    for (const ref of laneRefs) writeFileSync(join(WS, ref), "Generated: 2026-09-11\nsource gap: test fixture\n");
+
+    const valid = evaluateWorkerEvidence(contract, WS);
+    expect(valid.artifacts.every(a => a.exists)).toBe(true);
+    expect(valid.criteria.every(c => c.status === "passed")).toBe(true);
+
+    const duplicatedPrefix = makeContract({
+      ...contract,
+      expected_artifacts: contract.expected_artifacts.map(artifact => ({
+        ...artifact,
+        ref: `daily-ai/${artifact.ref}`,
+      })),
+    });
+    const invalid = evaluateWorkerEvidence(duplicatedPrefix, WS);
+    expect(invalid.artifacts.map(a => a.error)).toEqual(laneRefs.map(() => "not found"));
+    expect(invalid.criteria.every(c => c.status === "failed")).toBe(true);
+  });
+
+  it("reports a safe missing artifact as not found and fails its criterion", () => {
+    const evaluation = evaluateWorkerEvidence(makeContract(), WS);
+    expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: false, error: "not found" });
+    expect(evaluation.criteria.find(c => c.criterion_id === "c1")!.status).toBe("failed");
+  });
+
+  it("fails all checks and criteria when the workspace is missing — never process.cwd()", () => {
+    const evaluation = evaluateWorkerEvidence(makeContract(), join(WS, "does-not-exist"));
+    expect(evaluation.checks.every(c => c.exit_code === null && c.timed_out === false)).toBe(true);
+    expect(evaluation.checks.every(c => c.stderr_excerpt.includes("workspace unavailable"))).toBe(true);
+    expect(evaluation.artifacts.every(a => a.exists === false && a.error === "workspace unavailable")).toBe(true);
+    expect(evaluation.criteria.every(c => c.status === "failed")).toBe(true);
+  });
+
+  it("fails all checks and criteria with no explicit workspace at all", () => {
+    const evaluation = evaluateWorkerEvidence(makeContract(), undefined);
+    expect(evaluation.checks.every(c => c.exit_code === null)).toBe(true);
+    expect(evaluation.checks.every(c => c.stderr_excerpt.includes("workspace unavailable"))).toBe(true);
+    expect(evaluation.criteria.every(c => c.status === "failed")).toBe(true);
+  });
+
+  it("resolves a nested command cwd inside the workspace", () => {
+    mkdirSync(join(WS, "sub"), { recursive: true });
+    writeFileSync(join(WS, "sub", "flag"), "x");
+    const contract = makeContract({
+      verification_commands: [
+        { id: "v1", argv: ["test", "-f", "flag"], cwd: "sub", timeout_ms: 5000, criterion_ids: ["c1"] },
+      ],
+    });
+    const evaluation = evaluateWorkerEvidence(contract, WS);
+    expect(evaluation.checks[0]!.exit_code).toBe(0);
+  });
+
+  it("rejects a command cwd escaping the workspace", () => {
+    const contract = makeContract({
+      verification_commands: [
+        { id: "v1", argv: ["true"], cwd: "../../../", timeout_ms: 5000, criterion_ids: ["c1"] },
+      ],
+    });
+    const evaluation = evaluateWorkerEvidence(contract, WS);
+    expect(evaluation.checks[0]!.exit_code).toBeNull();
+    expect(evaluation.checks[0]!.stderr_excerpt).toContain("escapes workspace");
+    expect(evaluation.criteria[0]!.status).toBe("failed");
+  });
+
+  it("rejects an artifact symlink escaping the workspace", () => {
+    const outside = mkdtempSync(join(tmpdir(), "abtars-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.md"), "secret");
+      symlinkSync(join(outside, "secret.md"), join(WS, "out", "result.md"));
+      const evaluation = evaluateWorkerEvidence(makeContract(), WS);
+      expect(evaluation.artifacts[0]!.error).toBe("path escapes workspace");
+      expect(evaluation.criteria[0]!.status).toBe("failed");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a missing target whose parent symlink escapes the workspace", () => {
+    const outside = mkdtempSync(join(tmpdir(), "abtars-outside-"));
+    try {
+      symlinkSync(outside, join(WS, "out", "link"));
+      const contract = makeContract({
+        expected_artifacts: [
+          { id: "a1", kind: "file", ref: "out/link/nonexistent.md", required: true, criterion_ids: ["c1"] },
+        ],
+      });
+      const evaluation = evaluateWorkerEvidence(contract, WS);
+      expect(evaluation.artifacts[0]!.error).toBe("path escapes workspace");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("text deliverables (#1844)", () => {
+  function textContract(overrides: Partial<WorkerAcceptanceContractV1> = {}): WorkerAcceptanceContractV1 {
+    return makeContract({
+      criteria: [{ id: "c1", description: "reply ok" }],
+      expected_artifacts: [
+        { id: "a1", kind: "logical", ref: "answer", required: true, criterion_ids: ["c1"] },
+      ],
+      verification_commands: [],
+      ...overrides,
+    });
+  }
+
+  it("passes a text deliverable from worker text without any workspace", () => {
+    const evaluation = evaluateWorkerEvidence(textContract(), undefined, "ok");
+    expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: true });
+    expect(evaluation.criteria).toEqual([{ criterion_id: "c1", status: "passed", evidence_ids: ["a1"] }]);
+  });
+
+  it("passes a text deliverable without touching the filesystem", () => {
+    // No file named "answer" exists in WS — the logical ref is never statted.
+    const evaluation = evaluateWorkerEvidence(textContract(), WS, "ok");
+    expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: true });
+    expect(evaluation.criteria[0]!.status).toBe("passed");
+  });
+
+  it("fails empty worker text naming the deliverable, never workspace unavailable", () => {
+    for (const text of ["", "   "]) {
+      const evaluation = evaluateWorkerEvidence(textContract(), undefined, text);
+      expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: false });
+      expect(evaluation.artifacts[0]!.error).toMatch(/answer/);
+      expect(evaluation.artifacts[0]!.error).not.toMatch(/workspace unavailable/);
+      expect(evaluation.criteria[0]!.status).toBe("failed");
+    }
+  });
+
+  it("report kind is envelope-observed like logical", () => {
+    const contract = textContract({
+      expected_artifacts: [
+        { id: "a1", kind: "report", ref: "summary", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(evaluateWorkerEvidence(contract, undefined, "done").criteria[0]!.status).toBe("passed");
+    const empty = evaluateWorkerEvidence(contract, undefined, "");
+    expect(empty.criteria[0]!.status).toBe("failed");
+    expect(empty.artifacts[0]!.error).toMatch(/summary/);
+  });
+
+  it("a missing file still fails even when worker text is present", () => {
+    const contract = textContract({
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "out/result.md", required: true, criterion_ids: ["c1"] },
+        { id: "a2", kind: "logical", ref: "answer", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    const evaluation = evaluateWorkerEvidence(contract, WS, "ok");
+    expect(evaluation.criteria[0]!.status).toBe("failed");
+    expect(evaluation.artifacts.find(a => a.artifact_id === "a1")).toMatchObject({ exists: false, error: "not found" });
+    expect(evaluation.artifacts.find(a => a.artifact_id === "a2")).toMatchObject({ exists: true });
+  });
+
+  it("mixed file + text delivery passes only when both exist", () => {
+    const contract = textContract({
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "out/result.md", required: true, criterion_ids: ["c1"] },
+        { id: "a2", kind: "logical", ref: "answer", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    writeFileSync(join(WS, "out", "result.md"), "data\n");
+    expect(evaluateWorkerEvidence(contract, WS, "ok").criteria[0]!.status).toBe("passed");
+    expect(evaluateWorkerEvidence(contract, WS, "").criteria[0]!.status).toBe("failed");
+  });
+});
+
+describe("resolveWorkspaceMember (#1656)", () => {
+  it("resolves an existing relative member", () => {
+    writeFileSync(join(WS, "out", "result.md"), "x");
+    const result = resolveWorkspaceMember(WS, "out/result.md");
+    expect(result.kind).toBe("ok");
+  });
+
+  it("returns not found for a safe missing member", () => {
+    const result = resolveWorkspaceMember(WS, "out/nope.md");
+    expect(result).toEqual({ kind: "missing", reason: "not found" });
+  });
+
+  it("rejects traversal lexically", () => {
+    const result = resolveWorkspaceMember(WS, "../../etc/passwd");
+    expect(result.kind).toBe("escape");
+  });
+
+  it("rejects an invalid workspace root", () => {
+    expect(resolveWorkspaceMember(join(WS, "gone"), "x").kind).toBe("invalid_workspace");
+    expect(resolveWorkspaceMember(undefined, "x").kind).toBe("invalid_workspace");
+  });
+});

@@ -25,6 +25,8 @@ function makeSnapshot(): StatusSnapshot {
   return {
     timestamp: new Date().toISOString(),
     uptimeMs: 1000,
+    version: "test",
+    commit: "test",
     platforms: {
       telegram: { configured: true, running: false },
       discord: { configured: false, running: false },
@@ -36,6 +38,13 @@ function makeSnapshot(): StatusSnapshot {
     transport: { type: "tmux", ready: true, contextPercent: 42 },
     memory: { enabled: false, stats: null },
     heartbeat: { running: false, intervalMs: 60000, taskNames: [] },
+    cron: [],
+    notebooklm: null,
+    gwsAuth: false,
+    xAuth: false,
+    agentApi: null,
+    model: { name: "test-model", provider: "test-provider", fallbackChain: [] },
+    subsystems: [],
   };
 }
 

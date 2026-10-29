@@ -1,63 +1,61 @@
 # Installation
 
-See [Prerequisites](./prerequisites.md) before starting.
+See [Prerequisites](./prerequisites.md) before starting. New to abTARS? Start with
+[Quick Start](./quickstart.md) for what you need and what to decide.
 
-## Quick install (4 steps)
+## Quick install
+
+### One-liner (recommended)
 
 ```bash
-# 1. Install CLI tools
-npm install -g abtars@alpha abmind@alpha
-
-# 2. Optional deps (recommended before first start)
-abtars deps install all
-
-# 3. Install + deploy + start bridge
-abtars install --non-interactive --accept-risk \
-  --instance-name "MyBot" \
-  --telegram-token "YOUR_BOT_TOKEN" \
-  --telegram-chat-id "YOUR_CHAT_ID" \
-  --user-name "yourname" \
-  --passphrase "your-encryption-passphrase" \
-  --default-provider openrouter \
-  --default-model "deepseek/deepseek-v4-flash" \
-  --api-key "sk-or-v1-..."
-
-# 4. Install memory system (picks up username + agent name from abtars config)
-abmind install --non-interactive \
-  --passphrase "your-passphrase"
+curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | sh
 ```
 
-Step 3 automatically clones source, builds, deploys, and starts the bridge (daemon mode). The bot is live after this completes. Step 4 discovers username and agent name from the abtars config created in step 3 — no need to pass them again.
+No download step — the script runs straight from the pipe and installs the latest
+dev commit by default. Variants: `| sh -s -- --stable`, `| sh -s -- --alpha`, or
+`| sh -s -- --dev [DIR]` (build a local checkout as-is).
 
-### What each step does
-
-| Step | What happens |
-|------|-------------|
-| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally |
-| `abtars deps install all` | Installs optional npm package groups (native, twitter, pdf, youtube, image) |
-| `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
-| `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
-
-### System dependencies (optional)
-
-`abtars deps` manages optional npm package groups (`native`, `twitter`, `pdf`, `youtube`, `image`, `pi`) and system binaries (`ollama`, `bwrap`, `lightpanda`). See [Dependencies](./dependencies.md) for the full command reference, group table, and the native-deps adoption/collision behavior shared with abmind.
+Omit `--non-interactive` and the wizard prompts for each value. When piped,
+interactive setup reattaches to your terminal; without one, pass unattended flags:
 
 ```bash
-abtars deps list          # shows every group + install status
-abtars deps install all   # installs the npm package groups
-abtars deps install ollama # prints ollama's manual install command (does not run it)
+curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | \
+  ABTARS_INSTALL_ARGS='--non-interactive --accept-risk --user-name "yourname" ...' sh
 ```
 
-## Interactive install
+abmind stays separate — install it with its own one-liner when memory is needed.
+The one-liner also installs the Pi runtime (`abtars deps install pi`) — the
+bridge cannot wire its pipeline without it.
 
-Omit `--non-interactive` and the wizard will prompt for each value:
+### Recommended order
+
+When setting up the full stack, install in this order:
+
+1. **abtars** (this page) — the wizard records your agent name
+2. **pi** (`abtars deps install pi`) — the provider engine
+3. **abmind** ([its install page](/abmind/install)) — memory, last
+
+abmind personalizes its `SOUL.md` with the agent name it can discover when
+it installs. Installing it after abtars means it picks up the name
+automatically (or pass it explicitly with `abmind install --agent-name
+<name>` on a fresh install). Installing it first leaves the default, which
+you then fix by editing the first line of `SOUL.md` by hand (see [Quick
+Start](./quickstart.md)).
+
+### Manual alternative
 
 ```bash
-npm install -g abtars@alpha abmind@alpha
+npm install -g abtars@alpha
 abtars deps install all
 abtars install
-abmind install
 ```
+
+`abtars install` creates config, clones source, builds, deploys the release, and
+starts the bridge. The install ships a pi-stack default model (`openai/gpt-5.6-luna`
+via OpenRouter) on all agents — no provider questions. Add your
+`OPENROUTER_API_KEY` to `~/.abtars/secret/` afterwards (`doctor` flags it until
+then). Install pi with `abtars deps install pi` and switch models anytime via
+`/model`.
 
 ## Install modes
 
@@ -66,157 +64,20 @@ abmind install
 | **daemon** (default) | launchd/systemd manages watchdog → auto-restart on crash | Production |
 | **simple** | No daemon, user runs `abtars start/stop` manually | Testing, development |
 
-Set during install. Daemon mode starts automatically after `abtars install`. Simple mode requires `abtars start`.
+Daemon mode starts automatically after `abtars install`. Simple mode requires
+`abtars start`.
 
-**Simple mode note:** If you use optional deps (`abtars deps install`), add to your shell profile:
+**Simple mode note:** if you use optional deps (`abtars deps install`), add to your
+shell profile:
+
 ```bash
 export NODE_PATH="$HOME/.local/lib/node_modules:$NODE_PATH"
 ```
-Daemon mode sets this automatically.
 
-## Install channels
+Daemon mode sets this automatically. See [Dependencies](./dependencies.md) for the
+full `abtars deps` reference.
 
-| Channel | Command | Who |
-|---|---|---|
-| **Stable** | `npm install -g abtars abmind` | Production use |
-| **Alpha** | `npm install -g abtars@alpha abmind@alpha` | Latest features, tested on live instances |
-| **Dev** | `git clone` + `abtars update --dev .` | Contributors |
-
-## Commands reference
-
-```bash
-abtars start          # Start bridge (simple mode) or load daemon
-abtars stop           # Stop bridge + watchdog
-abtars restart        # Warm restart (in-process)
-abtars restart --cold # Kill + fresh start
-abtars update         # Pull latest source, rebuild, deploy
-abtars doctor         # Health check
-abtars status         # Bridge status
-abtars deps list      # Show optional deps
-abtars deps install X # Install optional dep
-```
-
-## Updating
-
-```bash
-abtars update    # pulls latest source, rebuilds, deploys, restarts (daemon mode)
-```
-
-In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
-
-If `abtars` still behaves like the old version after updating, a stale `npm install -g abtars` may be shadowing the updated wrapper. See [troubleshooting](./troubleshooting.md#abtars-resolves-to-a-stale-version-after-update).
-
-## What gets created
-
-```
-~/.local/bin/
-├── abtars               # CLI wrapper (overwritten on every deploy)
-├── abtars-task          # task subprocess wrapper
-└── ...                  # other tool wrappers
-
-~/.abtars/
-├── config/              # .env, transport.json, users.json, peers.json
-├── secret/              # API keys (encrypted at rest after first boot)
-├── skills/              # core/ + custom/
-├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
-└── app -> releases/current  # symlink to active release
-
-~/.abtars-releases/
-├── src/                 # source checkouts (abtars/, abmind/)
-├── <version>/           # deployed releases (e.g., 0.3.4-alpha.6)
-├── current -> <version> # active release symlink
-└── history.json         # release history
-
-~/.local/lib/node_modules/   # unified native deps dir (better-sqlite3, optional deps)
-
-~/.abmind/
-└── memory/
-    ├── memory.db        # SQLite + FTS5 + embeddings
-    ├── core/            # SOUL.md, agent_notes.md, user_profile.md
-    └── sleep/           # sleep cycle state + logs
-```
-
-## Providers
-
-| Provider | What you need |
-|----------|---------------|
-| ollama | Running locally (`ollama serve`). Free, no API key. |
-| OpenRouter | An API key from [openrouter.ai](https://openrouter.ai) |
-| OpenAI | An API key from [platform.openai.com](https://platform.openai.com) |
-| Anthropic | An API key from [console.anthropic.com](https://console.anthropic.com) |
-| Kiro CLI | `kiro-cli` installed and on PATH |
-| Gemini CLI | `gemini` installed and on PATH |
-
-The install wizard asks for your provider and API key — it handles the rest.
-
-Configure in `~/.abtars/config/transport.json`.
-
-## Managing API keys
-
-abTARS stores all secrets in `~/.abtars/secret/` — one file per key, encrypted at rest (AES-256-GCM). You never edit config files for keys.
-
-### Adding a key after install
-
-```bash
-# Write the key (no trailing newline!)
-echo -n "sk-or-v1-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
-
-# Restart to pick it up (encrypted automatically on boot)
-abtars stop --force && abtars start
-```
-
-The filename becomes the environment variable name. That's the only rule.
-
-### Provider keys
-
-| Provider | Secret filename | Where to get it |
-|----------|----------------|-----------------|
-| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| OpenAI | `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
-
-### Service/skill keys (optional integrations)
-
-| Service | Secret filename | Settings (in `.env.skills`) |
-|---------|----------------|----------------------------|
-| Home Assistant | `HA_TOKEN` | `HA_URL=http://192.168.1.4:8123` |
-| Groq (voice STT) | `GROQ_API_KEY` | `STT_MODEL=whisper-large-v3` |
-| Google AI (images) | `GOOGLE_AI_API_KEY` | `GOOGLE_AI_MODEL=gemini-2.0-flash-preview-image-generation` |
-| Discord | `DISCORD_BOT_TOKEN` | `DISCORD_APP_ID=your-app-id` |
-
-Example — adding Home Assistant:
-
-```bash
-# 1. Drop the long-lived access token
-echo -n "eyJ0eXAi..." > ~/.abtars/secret/HA_TOKEN
-
-# 2. Add non-secret settings
-echo "HA_URL=http://192.168.1.4:8123" >> ~/.abtars/config/.env.skills
-
-# 3. Restart
-abtars stop --force && abtars start
-```
-
-Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide.
-
-### Removing a key
-
-```bash
-rm ~/.abtars/secret/OPENAI_API_KEY
-abtars stop --force && abtars start
-```
-
-### How it stays safe
-
-- Files are AES-256-GCM encrypted at rest after the first boot
-- Keys only exist as plaintext in memory while the bridge runs
-- All secret files are `chmod 600` (owner-read only)
-- `abtars doctor` checks vault integrity on every run
-- Logs never contain secret values
-
-See [Secrets Vault](./secrets.md) for the full technical details.
-
-## Post-install verification
+## Verify
 
 ```bash
 abtars doctor    # all green = healthy
@@ -225,8 +86,24 @@ abtars status    # shows PID, uptime, model
 
 Send a message to your bot on Telegram — it should respond.
 
+## Adding API keys later
+
+Provider credentials live in `~/.abtars/secret/`, one file per credential.
+The filename is the environment-variable name used by provider configuration:
+
+```bash
+read -rsp "OpenRouter API key: " api_key
+printf '%s' "$api_key" > ~/.abtars/secret/OPENROUTER_API_KEY
+unset api_key
+chmod 600 ~/.abtars/secret/OPENROUTER_API_KEY
+abtars restart --cold
+```
+
+See [Provider Credentials](./secrets.md) for details.
+
 ## Next steps
 
 - [Health Check](./healthcheck.md) — verify everything is running correctly
 - [Upgrading](./upgrade.md) — keep your bridge up to date
 - [Backup & Restore](./backup.md) — protect your data
+- [Deploy Pipeline](./deploy.md) — update/rollback reference and release layout

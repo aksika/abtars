@@ -19,6 +19,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     cliPath: "kiro-cli",
     workingDir: "/tmp",
     memoryRuntime: null,
+    // Required AgentApiDeps surface owned by other slices; not under test here.
+    runtime: {} as never,
   };
 }
 
@@ -242,7 +244,7 @@ describe("AgentApiServer", () => {
     ];
 
     function targetFor(e: ExpectedRoute) {
-      const [pathname] = e.path.split("?");
+      const pathname = e.path.split("?")[0] ?? "";
       return { pathname, query: {} };
     }
 
@@ -314,14 +316,12 @@ describe("AgentApiServer", () => {
       // real stores, fake transport, no Reconciler churn in the test process.
       const { RequesterContributionService } = await import("./peer-help/requester-contribution-service.js");
       const { ContributionStore } = await import("./peer-help/contribution-store.js");
-      const { ProjectReviewStore } = await import("./project-acceptance/project-review-store.js");
       const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
       const taskDb = requireTaskDatabase() as any;
       sends = [];
       const service = new RequesterContributionService({
         taskDb,
         contributionStore: new ContributionStore(taskDb, { kanbanGetCard: () => undefined, kanbanUpdate: () => {}, kanbanComplete: () => {}, kanbanFail: () => {} }),
-        reviewStore: new ProjectReviewStore(taskDb),
         askHelp: async (peer) => {
           sends.push(peer);
           return { version: 1, request_id: "x", decision: "accepted", contribution_ref: `help_${sends.length}` };
@@ -349,7 +349,7 @@ describe("AgentApiServer", () => {
       return { status: res.status, body: await res.json() };
     }
 
-    it("creates root+supervision+proxy+ledger before transport and replays with stable identities", async () => {
+    it("creates root+run+proxy+ledger before transport and replays with stable identities", async () => {
       const first = await postDelegate({ peer: "molty", goal: "reply ok", request_id: "orc_route_1" });
       expect(first.status).toBe(200);
       expect(first.body.ok).toBe(true);
@@ -375,8 +375,13 @@ describe("AgentApiServer", () => {
       expect(root.source).toBe("cli");
       expect(root.type).toBe("O");
       expect(root.status).toBe("queued");
-      const sup = d.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(first.body.project_card_id) as any;
-      expect(sup.state).toBe("awaiting_contract");
+      // #1792: the delegation root is supervised by a workflow run from
+      // birth — no project_supervision row. The run must exist, be owned by
+      // this root, and be nonterminal.
+      const run = d.prepare("SELECT run_id, state FROM workflow_runs WHERE root_card_id = ?").get(first.body.project_card_id) as any;
+      expect(run).toBeDefined();
+      expect(run.run_id).toBeTruthy();
+      expect(["admitted", "planning", "executing"]).toContain(run.state);
 
       const proxy = d.prepare("SELECT * FROM kanban_board WHERE id = ?").get(first.body.proxy_card_id) as any;
       expect(proxy.type).toBe("contribution");

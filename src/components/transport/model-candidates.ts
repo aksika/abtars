@@ -1,27 +1,17 @@
 /**
- * model-candidates.ts — Canonical candidate model + shared construction.
+ * model-candidates.ts — Canonical candidate model.
  *
  * #1418: One `ModelCandidate` type for the whole bridge. Every candidate
  * carries its full identity tuple (model, provider, endpoint, apiKey,
- * maxContext) so provider switching and success tracking preserve the
- * complete candidate, and specialist fallback can reuse the exact Main
- * candidate that last produced a non-empty response.
+ * maxContext).
  *
- * `candidateKey()` (model@endpoint) remains the health-registry identity.
- * Deduplication of the candidate *list* uses the richer `candidateIdentityKey()`
- * (provider/model@endpoint) so the same model on two providers is a distinct
- * candidate, while a true duplicate triple collapses.
+ * #1932: exactly one candidate serves a Pi transport — no fallback chains,
+ * no Main inheritance, no rotation. `candidateKey()` (model@endpoint) remains
+ * the telemetry/attribution identity.
  */
-import { logWarn } from "../logger.js";
 import type { ApiFormat, PiAiCandidate } from "./pi-ai-adapter.js";
 
-const TAG = "model-candidates";
-
-export type CandidateSource =
-  | "primary"
-  | "agent_fallback"
-  | "provider_chain"
-  | "inherited_chain";
+export type CandidateSource = "primary";
 
 /** Secret-free identity + context needed to rebuild a candidate. */
 export interface CandidateSpec {
@@ -30,7 +20,21 @@ export interface CandidateSpec {
   endpoint: string;
   maxContext: number;
   apiFormat?: ApiFormat;
+  /** #1757: Pi-managed auth mode carried per candidate so fallback rotation
+   *  can never inherit or borrow another candidate's credential path. A
+   *  Pi-managed candidate carries no apiKey; dispatch resolves auth from Pi's
+   *  configured runtime at request time. */
+  authSource?: "pi";
   thinking?: PiAiCandidate["thinking"];
+  /** #1770: resolved max output tokens (pi catalog wins, models.json floor).
+   *  Threaded from ResolvedAgent at construction; resolveCandidateModel falls
+   *  back to a live pi-catalog lookup when absent. Optional so ad-hoc and
+   *  test fixtures without resolved metadata keep compiling. */
+  maxOutput?: number;
+  /** #1748: provider-resolved prompt-cache retention for this candidate.
+   *  Keeping it on the candidate prevents a fallback provider from inheriting
+   *  the primary provider's retention policy. */
+  cacheRetention?: "none" | "short" | "long";
 }
 
 /** Full canonical candidate — provider identity is required (#1418). */
@@ -39,76 +43,24 @@ export interface ModelCandidate extends CandidateSpec {
   source: CandidateSource;
 }
 
-export interface CandidateDedupResult {
-  candidates: ModelCandidate[];
-  diagnostics: string[];
-}
-
 /** Health-registry identity: model + endpoint (provider-agnostic). */
 export function candidateKey(model: string, endpoint: string): string {
   return `${model}@${endpoint}`;
 }
 
-/** Candidate-list identity: provider + model + endpoint (#1418). */
-export function candidateIdentityKey(c: { model: string; provider: string; endpoint: string }): string {
-  return `${c.provider}/${c.model}@${c.endpoint}`;
-}
-
-export function deduplicateCandidates(candidates: ModelCandidate[]): CandidateDedupResult {
-  const seen = new Set<string>();
-  const result: ModelCandidate[] = [];
-  const diagnostics: string[] = [];
-
-  for (const c of candidates) {
-    const key = candidateIdentityKey(c);
-    if (seen.has(key)) {
-      diagnostics.push(`Duplicate skipped: ${c.model} @ ${c.endpoint} via ${c.provider} (${c.source})`);
-      continue;
-    }
-    seen.add(key);
-    result.push(c);
-  }
-
-  if (diagnostics.length > 0) {
-    for (const d of diagnostics) logWarn(TAG, d);
-  }
-
-  return { candidates: result, diagnostics };
-}
-
-export function formatCandidateChain(candidates: ModelCandidate[]): string {
-  return candidates
-    .map((c, i) => `${i + 1}. ${c.model} via ${c.provider} [${c.source}]`)
-    .join("\n");
-}
-
 /**
- * Build the ordered, deduplicated candidate list for one role.
- *
- * - Main: configured Main → top-level fallback chain.
- * - Specialist: configured role → last successful Main (or configured Main
- *   when none has succeeded yet) → top-level fallback chain.
- *
- * Inputs are pre-resolved into complete candidates (provider/endpoint/apiKey/
- * maxContext). Deduplication by provider/model/endpoint preserves first
- * occurrence and configured order. Provider/agent legacy fallback lists are
- * never appended here — only the top-level chain. hailMary is never appended.
+ * #1757: resolve the auth slice for one candidate from its provider entry.
+ * Pi-managed providers (`authSource: "pi"`) resolve no key here — dispatch
+ * owns auth at request time — and never inherit another candidate's key.
+ * Keyed providers resolve their own `apiKeyEnv`; providers with neither fall
+ * back to the inherited key (historical ollama-style behavior, unchanged).
  */
-export function buildCandidates(args: {
-  role: "main" | "specialist";
-  configured: ModelCandidate;
-  lastSuccessfulMain?: ModelCandidate | null;
-  fallbacks?: ModelCandidate[];
-}): ModelCandidate[] {
-  const ordered: ModelCandidate[] = [{ ...args.configured, source: "primary" }];
-
-  if (args.role === "specialist" && args.lastSuccessfulMain) {
-    ordered.push({ ...args.lastSuccessfulMain, source: "inherited_chain" });
-  }
-
-  for (const fb of args.fallbacks ?? []) {
-    ordered.push({ ...fb, source: "agent_fallback" });
-  }
-
-  return deduplicateCandidates(ordered).candidates;
+export function resolveCandidateAuth(
+  provider: { apiKeyEnv?: string; authSource?: string },
+  getApiKey: (envName: string) => string | undefined,
+  inheritKey?: string,
+): { apiKey?: string; authSource?: "pi" } {
+  if (provider.authSource === "pi") return { apiKey: undefined, authSource: "pi" };
+  if (provider.apiKeyEnv) return { apiKey: getApiKey(provider.apiKeyEnv) };
+  return { apiKey: inheritKey };
 }

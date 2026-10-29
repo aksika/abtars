@@ -7,6 +7,13 @@ const REACT_RE = /\[REACT:(.+?)\]/;
 const NO_REPLY_RE = /\s*\[NO[-_]REPLY\]\s*/gi;
 const LANG_TAG_RE = /^\[lang:\w{2}\]\s*/i;
 const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
+// #1928 M4: agent-declared answer support names owner ref keys, not numeric
+// IDs. Parsed before stripping; validated against host-observed evidence by
+// the pipeline, so a forged marker degrades to the eligible subset instead
+// of authorizing writes.
+const SUPPORT_RE = /\[SUPPORT:\s*([^\]]*)\]/gi;
+/** Delivery-time strip for the support marker (segments, TTS inputs). */
+export const SUPPORT_STRIP_RE = /\[SUPPORT:[^\]]*\]/gi;
 
 // Internal context markers — strip if model echoes them back
 const CONTEXT_BLOCK_RE = /\[CONTEXT[^\]]*\][\s\S]*?\[\/CONTEXT\]/gi;
@@ -26,6 +33,42 @@ export interface CleanedResponse {
   noReply: boolean;
   /** Keywords extracted from [TOPICS: kw1, kw2, kw3], if present. */
   topics?: string[];
+  /** Owner ref keys declared via [SUPPORT: ref, ...], if present. */
+  supportIds?: string[];
+}
+
+/** Owner ref key bound: 256-char principal + path + version + separators. */
+const SUPPORT_REF_MAX = 512;
+
+/**
+ * Extract declared support refs (order-preserving, deduplicated, capped).
+ *
+ * Each token must look like an owner ref key (`db:…`, `artifact:…`,
+ * `graph:…`); anything else — including legacy numeric IDs — is ignored and
+ * can never match host-observed evidence. The character class stays open
+ * (no whitespace/control/bracket characters) because principals are only
+ * bounded by 256 printable characters: production peers use `peer:<name>`
+ * and owner ids may contain characters a strict class would silently drop.
+ */
+export function extractSupportIds(raw: string): string[] {
+  SUPPORT_RE.lastIndex = 0;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = SUPPORT_RE.exec(raw)) !== null) {
+    for (const part of match[1]!.split(",")) {
+      const token = part.trim();
+      if (token.length === 0 || token.length > SUPPORT_REF_MAX) continue;
+      if (!/^(db|artifact|graph):/.test(token)) continue;
+      // eslint-disable-next-line no-control-regex
+      if (/[\s\u0000-\u001f\u007f]/.test(token)) continue;
+      if (seen.has(token)) continue;
+      seen.add(token);
+      out.push(token);
+      if (out.length >= 20) return out;
+    }
+  }
+  return out;
 }
 
 /** Strip known LLM tags and echoed internal context from a response string. */
@@ -37,6 +80,7 @@ export function cleanResponse(raw: string): CleanedResponse {
   // Extract structured tags before stripping
   let reactionEmoji: string | undefined;
   let topics: string[] | undefined;
+  const supportIds = extractSupportIds(text);
   const reactMatch = text.match(REACT_RE);
   if (reactMatch) {
     reactionEmoji = reactMatch[1]!;
@@ -50,6 +94,7 @@ export function cleanResponse(raw: string): CleanedResponse {
 
   // Strip echoed internal context — model should never output these
   text = text
+    .replace(SUPPORT_STRIP_RE, "")
     .replace(CONTEXT_BLOCK_RE, "")
     .replace(MEMORY_BLOCK_RE, "")
     .replace(COMPACT_BLOCK_RE, "")
@@ -60,5 +105,28 @@ export function cleanResponse(raw: string): CleanedResponse {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { text, reactionEmoji, noReply, topics };
+  return { text, reactionEmoji, noReply, topics, ...(supportIds.length > 0 ? { supportIds } : {}) };
+}
+
+/**
+ * #1651 v2: how a settled model turn should be interpreted, decided by Spin
+ * exactly once per turn and consumed downstream as the normalized fact.
+ *
+ * - `text`     — usable text content (text always wins over either marker)
+ * - `reaction` — only a `[REACT:emoji]`; a valid chat control, not domain text
+ * - `no_reply` — the model deliberately declined via `[NO_REPLY]`
+ * - `empty`    — the provider settled the turn with nothing at all
+ *
+ * Text wins: `"[NO_REPLY] here you go"` is `text`, mirroring the pipeline's
+ * own `if (!userResponse && noReply)` ordering. Spin classifies every settled
+ * turn with this and never fabricates a placeholder result.
+ */
+export type ContentOutcome = "text" | "reaction" | "no_reply" | "empty";
+
+/** Classify a raw provider response into a {@link ContentOutcome}. */
+export function classifyContent(raw: string): ContentOutcome {
+  const { text, reactionEmoji, noReply } = cleanResponse(raw);
+  if (text.trim()) return "text";
+  if (reactionEmoji) return "reaction";
+  return noReply ? "no_reply" : "empty";
 }

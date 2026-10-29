@@ -1,9 +1,54 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { KanbanCard } from "../tasks/kanban-board.js";
 
-const mockKanbanEnqueue = vi.fn(() => 42);
+const mockKanbanEnqueue = vi.fn((..._args: unknown[]) => 42);
 const mockKanbanUpdate = vi.fn();
 const mockKanbanFail = vi.fn();
-const mockKanbanGetCard = vi.fn(() => undefined);
+// Full-row fixture: kanbanGetCard returns KanbanCard | undefined — a partial
+// row would assert against a shape the database never produces.
+function makeKanbanCard(overrides?: Partial<KanbanCard>): KanbanCard {
+  return {
+    id: 42,
+    title: "help card",
+    source: "peer",
+    source_id: null,
+    assignee: "alpha",
+    priority: "normal",
+    status: "in_progress",
+    type: null,
+    goal: "do something",
+    notes: null,
+    result_summary: null,
+    result_path: null,
+    error: null,
+    delivery_attempts: 0,
+    approval: null,
+    due_at: null,
+    labels: null,
+    parent_id: null,
+    blocked_by: null,
+    created_at: "2026-09-22T00:00:00.000Z",
+    updated_at: "2026-09-22T00:00:00.000Z",
+    completed_at: null,
+    delivered_at: null,
+    max_tokens: null,
+    max_cost: null,
+    tokens_used: null,
+    delivery_mode: "direct",
+    chat_id: null,
+    source_peer: "alpha",
+    delivery_claimed_at: null,
+    delivery_result: null,
+    delivery_receipt: null,
+    delivery_ready: 0,
+    max_agents: null,
+    retry_count: 0,
+    next_retry_at: null,
+    progress: null,
+    ...overrides,
+  };
+}
+const mockKanbanGetCard = vi.fn((..._args: unknown[]): KanbanCard | undefined => undefined);
 const mockAskHelp = vi.fn();
 const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
@@ -57,10 +102,6 @@ vi.mock("../peer-transport/peer-ws-broker.js", () => ({
     getConnectedPeers: (...args: unknown[]) => mockGetConnectedPeers(...args),
     hasRoute: (...args: unknown[]) => mockHasRoute(...args),
   }),
-}));
-
-vi.mock("./orc-tools.js", () => ({
-  isActiveCardPeerSourced: () => false,
 }));
 
 vi.mock("./peer-resolver.js", () => ({
@@ -119,7 +160,7 @@ describe("peer_ask_help", () => {
     expect(result.error).toContain("peer_ask_help failed");
   });
 
-  it("sends help request to specified peer", async () => {
+  it("sends help request to specified peer from an owner-origin worker", async () => {
     mockGetConnectedPeers.mockReturnValue(["kp"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp.mockResolvedValue({
@@ -127,7 +168,7 @@ describe("peer_ask_help", () => {
     });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", peer: "kp", request_id: "req-1",
-    }));
+    }, { userId: "agent", workOrigin: { rootCardId: 7, rootKind: "interactive", sourcePeer: null } }));
     expect(result.decision).toBe("accepted");
     expect(result.contribution_ref).toBe("help_abc123");
     expect(mockAskHelp).toHaveBeenCalled();
@@ -146,14 +187,19 @@ describe("peer_ask_help", () => {
     expect(mockAskHelp).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects an explicit peer whose inventory contradicts requirements", async () => {
+  it("sends exactly once to an explicit peer whose inventory contradicts requirements, surfacing the receiver decline", async () => {
     mockGetPeerInventory.mockReturnValue({ peer: "kp", capabilities: ["docker"] });
     mockHasAllCapabilities.mockReturnValue(false);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-explicit-missing-cap", decision: "declined", reason_code: "policy_denied", proves_non_creation: true,
+    });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", peer: "kp", requires: ["pi-executor"], request_id: "req-explicit-missing-cap",
     }));
-    expect(result.error).toContain("required capabilities");
-    expect(mockAskHelp).not.toHaveBeenCalled();
+    expect(result.decision).toBe("declined");
+    expect(result.reason_code).toBe("policy_denied");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+    expect(mockAskHelp.mock.calls[0]?.[0]).toBe("kp");
   });
 
   it("surfaces decline from peer", async () => {
@@ -289,7 +335,7 @@ describe("peer_ask_help", () => {
     mockAskHelp
       .mockResolvedValueOnce({ version: 1, request_id: "req-hist", decision: "declined", reason_code: "executor_not_ready", proves_non_creation: true })
       .mockResolvedValueOnce({ version: 1, request_id: "req-hist-2", decision: "accepted", contribution_ref: "help_hist" });
-    mockKanbanGetCard.mockReturnValue({ id: 42, notes: JSON.stringify({ peer: "alpha", request_id: "req-hist", outcome: "declined" }) });
+    mockKanbanGetCard.mockReturnValue(makeKanbanCard({ notes: JSON.stringify({ peer: "alpha", request_id: "req-hist", outcome: "declined" }) }));
     await mod.peerAskHelpTool.execute({
       goal: "do something", requires: ["docker"], request_id: "req-hist",
     });

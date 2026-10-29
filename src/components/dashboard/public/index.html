@@ -56,12 +56,10 @@
     <div class="stat-row"><span class="stat-label">Messages</span><span class="stat-value" id="mem-messages">—</span></div>
     <div class="stat-row"><span class="stat-label">Extracted</span><span class="stat-value" id="mem-extracted">—</span></div>
     <div class="stat-row"><span class="stat-label">Consolidations (D/W/Q)</span><span class="stat-value" id="mem-consolidations">—</span></div>
-    <div class="stat-row"><span class="stat-label">Documents</span><span class="stat-value" id="mem-documents">—</span></div>
     <div class="stat-row"><span class="stat-label">DB Size</span><span class="stat-value" id="mem-dbsize">—</span></div>
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
   <div style="display:flex;gap:8px;flex-wrap:wrap;">
-    <button class="btn-search-toggle" data-action="load-universe">🌌 Universe</button>
     <button class="btn-search-toggle" data-action="toggle-overlay" data-target="search-overlay">🔍 Search</button>
   </div>
 </div>
@@ -138,22 +136,8 @@
     <div class="search-panel-row">
       <div class="search-box" style="margin:0;">
         <input type="text" id="mem-userid-input" placeholder="all users" style="width:100px;text-align:center;flex:none;">
-        <button data-action="list-chat-ids">LIST</button>
       </div>
-      <div class="layer-toggles" id="layer-toggles" style="margin:0;">
-        <button class="layer-btn active" data-layer="S1" data-action="toggle-layer">S1:en-fts</button>
-        <button class="layer-btn active" data-layer="S2" data-action="toggle-layer">S2:orig-fts</button>
-        <button class="layer-btn active" data-layer="S3" data-action="toggle-layer">S3:like</button>
-        <button class="layer-btn active" data-layer="S4" data-action="toggle-layer">S4:msg-fts</button>
-        <button class="layer-btn active" data-layer="S5" data-action="toggle-layer">S5:msg-like</button>
-        <button class="layer-btn active" data-layer="S6" data-action="toggle-layer">S6:consol</button>
-        <button class="layer-btn active" data-layer="S7" data-action="toggle-layer">S7:fallback</button>
-        <button class="layer-btn active" data-layer="Se" data-action="toggle-layer">Se:embed</button>
-        <button class="layer-btn" data-layer="NLM" data-action="toggle-layer">NLM</button>
-      </div>
-    </div>
     <div class="search-panel-row" style="margin-top:8px;">
-      <button class="layer-btn active" id="mode-toggle" data-action="toggle-search-mode" style="min-width:42px;">OR</button>
       <input type="text" id="mem-keyword-input" class="keyword-input" placeholder="Type keyword + Enter to add filter...">
       <input type="text" id="mem-entity-input" placeholder="Entity filter" style="width:120px;flex:none;">
       <button class="btn-search" data-action="search-memory">Search</button>
@@ -174,7 +158,6 @@
   </div>
 </div>
 
-<script src="/memory-universe.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

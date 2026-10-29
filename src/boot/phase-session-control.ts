@@ -2,17 +2,17 @@
  * phase-session-control.ts — boot composition of the session control service
  * (#1406).
  *
- * Registers the durable conversation adapter (abmind runtime + provider
- * summarizer) and the local Pi run adapter (PiRunService) once. The service
- * instance is exposed to command handlers through the module holder.
+ * Registers the local Pi run adapter (PiRunService) for natively supervised
+ * coding runs. abmind conversation compaction is retired (#1940 R8): Pi owns
+ * compaction on the Pi route and the system prompt survives it, so no
+ * durable adapter, summarizer, post-compaction rehydration, or bundle
+ * refresh is wired.
  */
 
 import type { BootCtx, PhaseResult } from "./context.js";
-import { logInfo, logWarn } from "../components/logger.js";
-import { SessionControlService, DurableConversationCompactionAdapter, LocalPiRunCompactionAdapter } from "../components/session-control/index.js";
+import { logInfo } from "../components/logger.js";
+import { SessionControlService, LocalPiRunCompactionAdapter } from "../components/session-control/index.js";
 import { setSessionControlService } from "../components/session-control/instance.js";
-import { createCompactionSummarizer } from "../components/compact-summarizer.js";
-import { spin as spinInstance } from "../components/spin.js";
 import { recordCompaction } from "../components/metrics-collector.js";
 
 const TAG = "boot-session-control";
@@ -35,22 +35,6 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
       });
     },
   });
-
-  // Durable conversation compaction needs the daemon-backed runtime plus the
-  // provider summarizer. The adapter self-gates per call; registering it even
-  // with a degraded runtime keeps the target resolvable.
-  const summarizer = createCompactionSummarizer(spinInstance);
-  service.register(new DurableConversationCompactionAdapter({
-    runtime: ctx.memoryRuntime,
-    summarizer,
-  }));
-  if (ctx.memoryRuntime.state === "ready") {
-    logInfo(TAG, "Durable conversation compaction adapter registered");
-  } else {
-    // The runtime may recover after WSS renegotiation. Keep the target
-    // registered so capability checks begin succeeding without a reboot.
-    logWarn(TAG, `Durable compaction registered but unavailable (memory state: ${ctx.memoryRuntime.state})`);
-  }
 
   // Locally supervised Pi-owned coding runs (native RPC compaction).
   if (ctx.piExecutorService) {

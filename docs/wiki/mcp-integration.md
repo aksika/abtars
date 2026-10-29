@@ -147,7 +147,9 @@ mcporter add slack --command "npx -y @modelcontextprotocol/slack" --env SLACK_BO
 
 ### Google Drive / Gmail / Calendar
 
-Accessed via `gws-cli` (Google Workspace CLI), not MCP. The agent calls it directly through the `execute_bash` tool:
+If you have a Google Workspace CLI (for example `gog`) installed on the
+bridge host, the agent calls it directly through the `execute_bash` tool —
+not through MCP:
 
 ```bash
 gog gmail send --to user@example.com --subject "Report" --body "..."
@@ -155,7 +157,8 @@ gog drive list
 gog calendar events
 ```
 
-Not an MCP server — `gog` is a standalone CLI already on PATH and pre-approved for exec.
+This is an operator-provided binary, not a bundled integration: install it
+yourself and approve it for exec before the agent can use it.
 
 ## Adding any MCP server
 
@@ -174,7 +177,7 @@ abmind itself exposes an MCP server for other tools (Cursor, Windsurf, Claude Co
 abmind mcp
 ```
 
-This gives external tools access to `memory_recall`, `memory_store`, `memory_edit`, `memory_status`. Used by the Claude Code and Gemini CLI integrations.
+This gives external tools access to `memory_recall`, `memory_store`, `memory_status`, `memory_context`. Used by the Claude Code and Gemini CLI integrations.
 
 ## Troubleshooting
 

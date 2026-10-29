@@ -26,7 +26,9 @@ export function migrateIfNeeded(home: string): boolean {
   try {
     const manifest = JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"));
     version = manifest.commit ?? manifest.version ?? "migrated";
-  } catch {}
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
 
   const targetDir = join(releasesDir, version);
 
@@ -45,7 +47,9 @@ export function migrateIfNeeded(home: string): boolean {
     try {
       const pkg = JSON.parse(readFileSync(join(prevDir, "package.json"), "utf-8"));
       prevVersion = pkg.version ?? "prev";
-    } catch {}
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
     const prevTarget = join(releasesDir, prevVersion);
     if (!existsSync(prevTarget)) renameSync(prevDir, prevTarget);
     else rmSync(prevDir, { recursive: true, force: true });
@@ -67,8 +71,16 @@ export function migrateIfNeeded(home: string): boolean {
 
   // Create symlinks
   const currentLink = join(releasesDir, "current");
-  try { symlinkSync(targetDir, currentLink); } catch {}
-  try { symlinkSync(targetDir, appDir); } catch {}
+  try {
+    symlinkSync(targetDir, currentLink);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  try {
+    symlinkSync(targetDir, appDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
 
   // Write history.json
   const history = [version];

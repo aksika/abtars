@@ -5,7 +5,7 @@
  */
 
 import type { AbtarsMemoryRuntime, RuntimeRecallHit } from "./memory-runtime.js";
-import { logWarn } from "./logger.js";
+import { logDebug, logWarn, redactSecrets } from "./logger.js";
 import type { MemorySearchResponse, WebSearchResult } from "./dashboard/dashboard-config.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -26,14 +26,6 @@ export class MemorySearchController {
     this.deps = deps;
   }
 
-  listChats(): { status: number; body: object } {
-    return { status: 501, body: { error: "chat enumeration is not exposed by the bounded memory runtime" } };
-  }
-
-  listAll(): { status: number; body: object } {
-    return { status: 501, body: { error: "memory enumeration is not exposed by the bounded memory runtime" } };
-  }
-
   async handle(params: URLSearchParams): Promise<{ status: number; body: object }> {
     const keywordsRaw = params.get("keywords")?.trim() ?? "";
     if (!keywordsRaw) return { status: 400, body: { error: "keywords required" } };
@@ -49,19 +41,24 @@ export class MemorySearchController {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : undefined;
     };
-    const stagesRaw = params.get("stages")?.trim();
-    const stages = stagesRaw ? stagesRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
 
     try {
+      const t0 = Date.now();
+      // #1928 M4 — deliberate dashboard search: the already-parsed keywords
+      // cross as the explicit normal anchor (never joined back into a single
+      // phrase for retrieval), so this path always searches.
       const result = await this.deps.memoryRuntime.recall({
         query: translated.join(" "),
-        original: params.get("original")?.trim() || keywordsRaw,
+        profile: "recall_normal",
+        text: translated.join(" "),
+        keywords: translated,
         userId,
         limit: 10,
         timeStart: parseNumber(params.get("timeStart")),
         timeEnd: parseNumber(params.get("timeEnd")),
-        stages,
       });
+      // #1837 — dashboard search summary.
+      logDebug(TAG, `search: user=${userId} keywords=${translated.length} → ${result.hits.length} hits (${Date.now() - t0}ms) query="${redactSecrets(translated.join(" ")).slice(0, 60)}"`);
 
       const response: MemorySearchResponse = {
         results: result.hits.map(hitToWebResult),
@@ -80,14 +77,8 @@ function hitToWebResult(hit: RuntimeRecallHit): WebSearchResult {
   return {
     content: hit.content,
     date: hit.date,
-    source: hit.source ?? "abmind.runtime",
-    score: hit.score,
-    contentOriginal: hit.contentOriginal,
-    memoryType: hit.memoryType,
-    trust: hit.trust,
-    integrity: hit.integrity,
-    credibility: hit.credibility,
+    source: hit.ref,
+    score: hit.score ?? 0,
     classification: hit.classification,
-    emotionScore: hit.emotionScore,
   };
 }

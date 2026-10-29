@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PI_COMPATIBILITY, classifyPiPin, formatPiPinWarning } from "./pi-compatibility.js";
+import { PI_COMPATIBILITY, classifyPiPin, formatPiPinWarning, formatPiPinnedInstallCommand } from "./pi-compatibility.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
@@ -94,12 +94,12 @@ describe("lockfile resolutions match PI_COMPATIBILITY (#1438)", () => {
 
 describe("classifyPiPin (#1572)", () => {
   it.each([
-    ["0.83.0", "at-pin"],
-    ["0.83.7", "at-pin"],
-    ["0.83.0-alpha.1", "at-pin"],
-    ["0.84.0", "above-pin"],
-    ["0.90.0", "above-pin"],
-    ["1.0.0", "above-pin"],
+    ["1.3.0", "at-pin"],
+    ["1.3.9", "at-pin"],
+    ["1.3.0-alpha.1", "at-pin"],
+    ["1.4.0", "above-pin"],
+    ["1.10.0", "above-pin"],
+    ["2.0.0", "above-pin"],
     ["garbage", "above-pin"],
   ] as const)("classifies %s as %s", (version, expected) => {
     expect(classifyPiPin(version)).toBe(expected);
@@ -108,18 +108,32 @@ describe("classifyPiPin (#1572)", () => {
 
 describe("formatPiPinWarning (#1572)", () => {
   it("returns null for at-pin versions", () => {
-    expect(formatPiPinWarning("0.83.0")).toBeNull();
-    expect(formatPiPinWarning("0.83.9")).toBeNull();
+    expect(formatPiPinWarning("1.3.0")).toBeNull();
+    expect(formatPiPinWarning("1.3.9")).toBeNull();
   });
 
   it("returns the warning with the exact downgrade command for above-pin", () => {
-    const warning = formatPiPinWarning("0.85.1");
+    const warning = formatPiPinWarning("1.4.0");
     expect(warning).not.toBeNull();
-    expect(warning).toContain("0.85.1");
+    expect(warning).toContain("1.4.0");
     expect(warning).toContain(`npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`);
   });
 
   it("returns a warning for unparseable versions (unknown shape is not tested)", () => {
     expect(formatPiPinWarning("9.9")).not.toBeNull();
+  });
+});
+
+describe("formatPiPinnedInstallCommand (#1573)", () => {
+  it("returns the exact pinned install command", () => {
+    expect(formatPiPinnedInstallCommand()).toBe(
+      `npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`,
+    );
+  });
+
+  it("is the single command reused by the pin warning", () => {
+    const warning = formatPiPinWarning("1.4.0");
+    expect(warning).toContain(formatPiPinnedInstallCommand());
+    expect(warning!.split(formatPiPinnedInstallCommand())).toHaveLength(2);
   });
 });

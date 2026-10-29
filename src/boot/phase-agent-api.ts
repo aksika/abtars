@@ -10,6 +10,7 @@
 import { AgentApiServer } from "../components/agent-api-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import { logInfo, logError } from "../components/logger.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { sendNotification } from "../components/notification.js";
 import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -27,7 +28,8 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
-  // #978: Create A2A platform adapter (routes peer chat through Spin → Orc)
+  // #978/#1786: A2A platform adapter — lane-1 shared P chat receiver.
+  // Delegation (lane 2) stays in PeerHelpService below.
   const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
   const a2aAdapter = new AgentApiAdapter();
 
@@ -81,18 +83,26 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         const { PeerHelpStore } = await import("../components/peer-help/store.js");
         const { ContributionStore } = await import("../components/peer-help/contribution-store.js");
         const { RequesterContributionService } = await import("../components/peer-help/requester-contribution-service.js");
-        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
         const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
         const { nerve } = await import("../components/nerve.js");
         const { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail } = await import("../components/tasks/kanban-board.js");
         const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
         const db = requireTaskDatabase();
-        const reviewStore = new ProjectReviewStore(db);
+        const { WorkflowRunner } = await import("../components/orc-project/orc-workflow-runner.js");
+        const { WorkflowStore } = await import("../components/orc-project/orc-workflow-store.js");
+        const peerRunner = new WorkflowRunner(new WorkflowStore(db));
         const store = new PeerHelpStore(
           db as any,
           { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail },
           nerve,
-          { ensureAwaitingContract: (projectCardId) => reviewStore.ensureAwaitingContract(projectCardId) },
+          {
+            admitReceiverProject: (cardId, sourcePeer, sourceId) => {
+              const admitted = peerRunner.admitSupervised({ rootCardId: cardId, source: "peer", sourcePeer, sourceId });
+              if (admitted.kind === "conflict") {
+                throw new Error(`receiver project admission failed: ${admitted.reason}`);
+              }
+            },
+          },
         );
         const contributionStore = new ContributionStore(db, {
           kanbanGetCard,
@@ -106,7 +116,6 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         agentApiServer.setRequesterContributionService(new RequesterContributionService({
           taskDb: db,
           contributionStore,
-          reviewStore,
           kanbanUpdate,
           kanbanFail,
         }));
@@ -173,7 +182,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
             // PiRunStore.createPiCardAndRun inside the same transaction as the
             // run row (mechanism A). Here we only trigger opportunistic push.
             const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
-            getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(() => {});
+            getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(err => logAndSwallow(TAG, "push accepted Pi events", err));
             return { ok: true, runId: result.runId, cardId: result.cardId, generation: result.generation, sessionId: result.sessionId };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -184,6 +193,20 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
 
         // Register broker request handler for help + remote Pi wire methods
         broker.registerRequestHandler(async (peer, method, payload, _frameId) => {
+          if (method === "peer.chat.v1") {
+            // #1786 lane 1: authenticated peer identity comes from the
+            // socket/signature (already verified) — never payload text.
+            const { parsePeerChatRequest } = await import("../components/peer-transport/peer-chat.js");
+            const parsed = parsePeerChatRequest(payload);
+            if (!parsed.ok) throw new Error(`invalid_request: ${parsed.detail}`);
+            const req = parsed.request;
+            if (req.deadline_at <= Date.now()) throw new Error("timeout: chat deadline already expired");
+            const text = await a2aAdapter.handlePeerChat(peer, req.session_id, {
+              messages: req.messages,
+              deadlineAt: req.deadline_at,
+            });
+            return { version: 1, text };
+          }
           if (method === "help.request.v1") return helpService.handleHelpRequest(peer, payload);
           if (method === "help.status.v1") return helpService.handleHelpStatus(peer, payload);
           if (method === "help.withdraw.v1") return helpService.handleHelpWithdraw(peer, payload);
@@ -242,7 +265,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
                   version: 1,
                   run_id: result.runId,
                   sequence: result.sequence,
-                }).catch(() => {});
+                }).catch(err => logAndSwallow(TAG, "send cumulative ack", err));
               } else if (result.gapDetected) {
                 // Gap detected — initiate catch-up using the committed
                 // latest_sequence, NOT acknowledged_sequence. Pull missing
@@ -261,7 +284,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
                         throw new Error(`Catch-up: failed to reduce event ${e.event_id} for run ${runId}`);
                       }
                     },
-                  ).catch(() => {});
+                  ).catch(err => logAndSwallow(TAG, "catch-up push", err));
                 }
               }
             } catch { /* best effort */ }

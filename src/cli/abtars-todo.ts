@@ -99,7 +99,7 @@ export function main(argv: string[] = process.argv): void {
   abtars-todo done <number>
   abtars-todo remove <number>
 
-File: ~/.abtars/memory/todo.md`);
+File: ~/.abtars/workspace/todo/todo.md`);
     process.exit(0);
   }
 

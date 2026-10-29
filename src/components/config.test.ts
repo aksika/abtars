@@ -21,8 +21,6 @@ function setValidEnv() {
   process.env["MAIN_CHAT_ID"] = "111";
   process.env["AGENT_CLI_PATH"] = "kiro-cli";
   process.env["WORKING_DIR"] = process.cwd();
-  delete process.env["TRUST_MODE"];
-  delete process.env["PERMISSION_TIMEOUT_SEC"];
   delete process.env["POLL_TIMEOUT_S"];
   delete process.env["AGENT_TRANSPORT"];
   delete process.env["TMUX_SESSION"];
@@ -56,8 +54,6 @@ describe("loadAndValidateConfig", () => {
     expect(config.telegram.allowedUserIds.has(111)).toBe(true);
     expect(config.transport.agentCliPath).toBe("kiro-cli");
     expect(config.transport.workingDir).toBe(process.cwd());
-    expect(config.transport.trustMode).toBe(false);
-    expect(config.transport.permissionTimeoutMs).toBe(60_000);
     expect(config.telegram.pollTimeoutS).toBe(30);
   });
 
@@ -119,41 +115,6 @@ describe("loadAndValidateConfig", () => {
     process.env["WORKING_DIR"] = "/some/file.txt";
     vi.mocked(fs.stat).mockResolvedValue({ isDirectory: () => false } as any);
     await expect(loadAndValidateConfig()).rejects.toThrow("WORKING_DIR");
-  });
-
-  // --- TRUST_MODE ---
-
-  it("parses TRUST_MODE=true", async () => {
-    process.env["TRUST_MODE"] = "true";
-    const config = await loadAndValidateConfig();
-    expect(config.transport.trustMode).toBe(true);
-  });
-
-  it("parses TRUST_MODE=1 as true", async () => {
-    process.env["TRUST_MODE"] = "1";
-    const config = await loadAndValidateConfig();
-    expect(config.transport.trustMode).toBe(true);
-  });
-
-  it("parses TRUST_MODE=false as false", async () => {
-    process.env["TRUST_MODE"] = "false";
-    const config = await loadAndValidateConfig();
-    expect(config.transport.trustMode).toBe(false);
-  });
-
-  // --- PERMISSION_TIMEOUT_SEC ---
-
-  it("parses PERMISSION_TIMEOUT_SEC as a number", async () => {
-    process.env["PERMISSION_TIMEOUT_SEC"] = "30";
-    _resetEnv();
-    const config = await loadAndValidateConfig();
-    expect(config.transport.permissionTimeoutMs).toBe(30_000);
-  });
-
-  it("throws when PERMISSION_TIMEOUT_SEC is not a number", async () => {
-    process.env["PERMISSION_TIMEOUT_SEC"] = "abc";
-    _resetEnv();
-    await expect(loadAndValidateConfig()).rejects.toThrow("PERMISSION_TIMEOUT_SEC");
   });
 
   // --- POLL_TIMEOUT_S ---

@@ -17,7 +17,8 @@ The agent reads the task skill, picks the right command, and confirms what it cr
 
 ## How it works
 
-The bridge heartbeat checks every 5 minutes for due tasks. When one fires:
+The bridge heartbeat ticks every 60 seconds (`HEARTBEAT_INTERVAL_SEC=60`)
+and checks for due tasks. When one fires:
 
 | Type | Behavior |
 |------|----------|
@@ -30,10 +31,19 @@ The bridge heartbeat checks every 5 minutes for due tasks. When one fires:
 | Command | Description |
 |---------|-------------|
 | `/tasks` | List all tasks with today's status |
-| `/tasks trigger <id>` | Run a task immediately |
+| `/tasks run <id>` | Run a task immediately |
 | `/tasks log <id>` | Show last 5 runs |
+| `/task validate` | Dry-run check of the task registry (read-only) |
 
 Or just ask: "show my scheduled tasks", "cancel the morning reminder", "pause the backup task".
+
+`/task validate` runs the same read-only validation as `abtars-task validate` in
+chat: it checks the live task registry for invalid entries, duplicate IDs,
+missing task files, missing required report files, and orphaned task package
+directories, and reports `OK` or `FAILED` with the findings. It is a dry run —
+it never schedules, runs, pauses, or changes any task, and it is not an
+execution simulation. The chat form always checks the live registry and takes
+no path argument; use `abtars-task validate [path]` to check a staged file.
 
 ## Example: "Every Friday at 5pm, summarize my week"
 
@@ -67,7 +77,19 @@ abtars-task remove <id>
 abtars-task pause <id>
 abtars-task resume <id>
 abtars-task history <id>
+abtars-task validate [path]   # dry-run check of tasks.json (default: the live file)
 ```
+
+`abtars-task validate` reads the given tasks.json (or `~/.abtars/tasks/tasks.json`
+when no path is given) and reports every problem as a single JSON value: invalid
+entries, duplicate IDs, missing task files, missing required report files, and
+orphaned task package directories. It exits `0` when the file is clean and `1`
+otherwise, and never modifies files or task state — it is a safe pre-deploy
+check after hand-editing `tasks.json`.
+
+To validate a staged tree, point `HOME` and `ABTARS_HOME` at that tree's root
+before running the command, so `~`-relative paths and the task package root
+match the staged layout.
 
 ## Task file structure
 
@@ -108,9 +130,13 @@ Standard cron: `minute hour day month weekday`
 ## Status indicators
 
 ```
-✓  ran successfully today
-✗  failed today
+/tasks list tick marks:
++  succeeded today, or scheduled and pending
 ~  currently running
-+  scheduled, not yet run
-—  not scheduled for today
+x  failed today
+-  not scheduled for today
+p  paused (auto-paused shows the resume command)
 ```
+
+Kanban cards (`/kanban`) use a different set: `✓` delivered, `+` done,
+`~` running, `✗` failed, `-` anything else.

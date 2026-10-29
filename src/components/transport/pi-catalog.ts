@@ -15,7 +15,7 @@
  *   - Precedence (C1): pi wins ONLY when fully resolvable — warmed ∧ provider maps (C2) ∧
  *     getModel() hits. Custom gateways / ollama / kiro never resolve → always models.json.
  *
- * Contracts verified against @earendil-works/pi-ai@~0.83.0 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~1.3.0 via devDependency.
  */
 
 import type { Models } from "@earendil-works/pi-ai";
@@ -29,12 +29,32 @@ const TAG = "pi-catalog";
 /** pi-ai's built-in provider ids (KnownProvider). abtars provider names map by identity. */
 const KNOWN_PI_PROVIDERS = new Set<string>([
   "amazon-bedrock", "ant-ling", "anthropic", "google", "google-vertex", "openai",
-  "azure-openai-responses", "openai-codex", "nvidia", "deepseek", "github-copilot", "xai",
+  "azure", "openai-codex", "nvidia", "deepseek", "github-copilot", "xai",
   "groq", "cerebras", "openrouter", "vercel-ai-gateway", "zai", "zai-coding-cn", "mistral",
   "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
-  "together", "opencode", "opencode-go", "kimi-coding", "cloudflare-workers-ai",
-  "cloudflare-ai-gateway", "xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",
+  "together", "baseten", "opencode", "opencode-go", "kimi-coding", "cloudflare-workers-ai",
+  "cloudflare-ai-gateway", "radius", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual",
+  "xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",
 ]);
+
+/**
+ * Log once per process when a configured `transport === "api"` provider has no
+ * pi mapping. Makes the picker's silent fallback to models.json observable
+ * (#1748 split of #1747) without changing fallback behavior.
+ */
+const warnedUnmappedProviders = new Set<string>();
+
+export function logUnmappedProviderOnce(providerName: string): void {
+  if (mapProviderName(providerName)) return;
+  if (warnedUnmappedProviders.has(providerName)) return;
+  warnedUnmappedProviders.add(providerName);
+  logWarn(TAG, `provider "${providerName}" has transport="api" but no pi mapping (KNOWN_PI_PROVIDERS) — falling to models.json; pi cost/metadata unavailable`);
+}
+
+/** @internal Reset the dedup set between unit tests. */
+export function _resetUnmappedWarnForTest(): void {
+  warnedUnmappedProviders.clear();
+}
 
 /**
  * Map an abtars provider name → pi provider id, or null if there is no pi mapping
@@ -73,6 +93,47 @@ export function isWarmed(): boolean {
 export async function loadPiModels(): Promise<Models | null> {
   if (_warmAttempted) return _warmed;
   _warmAttempted = true;
+  _warmed = await warmCatalog();
+  return _warmed;
+}
+
+let _refreshInflight: Promise<Models | null> | null = null;
+
+/**
+ * Re-warm the catalog outside boot (#1875: `/change` entry). Concurrent
+ * callers share one in-flight rebuild; a failed re-warm keeps serving the
+ * previous snapshot. Never throws. The rebuild is local-only
+ * (`allowNetwork: false`): it re-reads installed builtins and the
+ * revision-checked local store, never fetches over the network.
+ */
+export function refreshPiCatalog(): Promise<Models | null> {
+  if (!_refreshInflight) {
+    _warmAttempted = true;
+    _refreshInflight = warmCatalog({ allowNetwork: false }).then(
+      (models) => {
+        // A failed re-warm yields null — keep the previous snapshot, not an empty one.
+        if (models) _warmed = models;
+        _refreshInflight = null;
+        return _warmed;
+      },
+      (err) => {
+        // warmCatalog is best-effort and not expected to reject; unblock
+        // future refreshes either way and keep the previous snapshot.
+        _refreshInflight = null;
+        logWarn(TAG, `catalog re-warm failed — using previous snapshot: ${err instanceof Error ? err.message : String(err)}`);
+        return _warmed;
+      },
+    );
+  }
+  return _refreshInflight;
+}
+
+/**
+ * One warm pass over Pi's catalog, shared by the boot warm (network allowed,
+ * preserving historical behavior) and `/change` refresh (local-only).
+ * Best-effort: returns null on any failure, never throws.
+ */
+async function warmCatalog(opts?: { allowNetwork?: boolean }): Promise<Models | null> {
   try {
     const result = resolvePiInstallation();
     if (result.state !== "compatible") {
@@ -85,11 +146,16 @@ export async function loadPiModels(): Promise<Models | null> {
     const mod = await loadPiModule<{ builtinModels: (opts?: Record<string, unknown>) => Models }>(result.installation, providerSpec);
     const models = mod.builtinModels();
     try {
-      await models.refresh?.();
+      // Boot warms with Pi's default (network allowed); /change refresh
+      // passes allowNetwork: false so a chat command never fetches (#1875).
+      if (opts?.allowNetwork === false) {
+        await models.refresh?.({ allowNetwork: false });
+      } else {
+        await models.refresh?.();
+      }
     } catch (err) {
       logWarn(TAG, `catalog refresh failed (static providers still usable): ${err instanceof Error ? err.message : String(err)}`);
     }
-    _warmed = models;
     const all = models.getModels();
     logInfo(TAG, `pi-ai catalog warmed (${all.length} models)`);
     const byProvider: Record<string, number> = {};
@@ -101,11 +167,11 @@ export async function loadPiModels(): Promise<Models | null> {
     const elapsedMs = Date.now() - t0;
     const sample = all.slice(0, 3).map(m => m.id).join(",");
     logTrace(TAG, `catalog fetch: ${all.length} models in ${elapsedMs}ms; sample=${sample}`);
+    return models;
   } catch (err) {
     logWarn(TAG, `pi-ai catalog unavailable — using models.json floor: ${err instanceof Error ? err.message : String(err)}`);
-    _warmed = null;
+    return null;
   }
-  return _warmed;
 }
 
 // ── C1: precedence — pi metadata when fully resolvable ───────────────────────
@@ -124,9 +190,9 @@ export interface ResolvedModelMeta {
  * caller falls to models.json / defaults. `models` is injectable for tests (defaults to the
  * warmed cache). Never throws.
  *
- * Cost contract (#1614): pi catalog rates are $/1M tokens; the returned `cost` is normalized
- * to $/token (÷1e6) to match abtars's ModelCost contract ("$/token — used for arithmetic").
- * contextWindow/maxOutput pass through untouched.
+ * Cost contract (#1830): pi catalog rates are $/1M tokens and pass through
+ * untouched, matching abtars's ModelCost contract. contextWindow/maxOutput
+ * pass through untouched.
  */
 export function resolveModelMeta(
   modelId: string,
@@ -141,7 +207,7 @@ export function resolveModelMeta(
   return {
     contextWindow: m.contextWindow,
     maxOutput: m.maxTokens,
-    cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 },
+    cost: { input: m.cost.input, output: m.cost.output },
     source: "pi",
   };
 }
@@ -178,8 +244,8 @@ export async function modelsForProvider(providerName: string): Promise<PiPickerM
       // getAuth rejects on credential-store failure / expired OAuth → user must (re)login.
       authStatus = "needs-login";
     }
-    // Cost normalized to $/token (pi rates are $/1M) — #1614.
-    out.push({ id: m.id, contextWindow: m.contextWindow, cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 }, authStatus });
+    // Cost passes through in $/1M — #1830. No normalization.
+    out.push({ id: m.id, contextWindow: m.contextWindow, cost: { input: m.cost.input, output: m.cost.output }, authStatus });
   }
   return out;
 }
@@ -200,10 +266,10 @@ export function modelsForProviderSync(providerName: string): Array<{ id: string;
   if (!models) return null;
   const piProvider = mapProviderName(providerName);
   if (!piProvider) return null;
-  // Cost normalized to $/token (pi rates are $/1M) — #1614. This is the picker/
-  // display boundary: formatCost/computeCostDisplay expect ModelCost's $/token
-  // contract and multiply by 1e6 for display.
-  return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 }, contextWindow: m.contextWindow }));
+  // Costs pass through in $/1M — #1830. This is the picker/
+  // display boundary: formatCost/computeCostDisplay expect ModelCost's $/1M
+  // contract and render it directly.
+  return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input, output: m.cost.output }, contextWindow: m.contextWindow }));
 }
 
 /**
@@ -212,8 +278,8 @@ export function modelsForProviderSync(providerName: string): Array<{ id: string;
  * configured candidate's provider is not stored per usage entry). null if not warmed.
  *
  * CONTRACT: rates stay $/1M tokens (raw pi values). The sole consumer (handlers-system.ts
- * /usage costOf) divides by 1_000_000. This is the arithmetic boundary — do NOT convert
- * here; per-token normalization lives in resolveModelMeta / modelsForProvider(Sync) (#1614).
+ * /usage costOf) divides by 1_000_000, as does the models.json path now that
+ * ModelCost is $/1M. This is the arithmetic boundary — do NOT convert here (#1830).
  */
 export function piCostRatesByModel(): Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> | null {
   const models = getWarmedModels();

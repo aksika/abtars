@@ -1,92 +1,31 @@
 /**
  * pi-core-transport-steering.test.ts — #1531 execution slot and per-lease
- * steering delegation.
+ * steering handoff (#1940: handoff to Pi resolves the lease).
  *
- * Uses a mocked PiCoreExecutionHost (and mocked Pi core loading) so the
- * transport's slot lifecycle can be driven deterministically: pre-host
- * waiting, host readiness, generation isolation, and post-settlement
- * rejection. These tests protect against dead-host delivery and
- * cross-execution handoff, not private field shape.
+ * Uses an injected fake AgentSession factory so the transport's slot
+ * lifecycle can be driven deterministically: pre-open waiting, readiness,
+ * generation isolation, lease handoff, and post-settlement rejection.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { InstructionLease } from "../spin-types.js";
+import type { PiAgentSessionFactoryLoader } from "./pi-agent-session-store.js";
 
-const { hostInstances, FakeHost, makeDeferred } = vi.hoisted(() => {
-  type Deferred<T = void> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void };
-  function makeDeferred<T = void>(): Deferred<T> {
-    let resolve!: (v: T) => void;
-    let reject!: (e: unknown) => void;
-    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-    return { promise, resolve, reject };
-  }
-
-  const hostInstances: Array<{
-    executionId: string;
-    sessionId: string;
-    state: string;
-    isSettled: boolean;
-    ready: Promise<void>;
-    becomeSteerable: () => void;
-    failReadiness: (e: unknown) => void;
-    steer: ReturnType<typeof vi.fn>;
-    followUp: ReturnType<typeof vi.fn>;
-    cancel: ReturnType<typeof vi.fn>;
-    start: ReturnType<typeof vi.fn>;
-    waitForSettlement: ReturnType<typeof vi.fn>;
-    startDeferred: Deferred<void>;
-    settlementDeferred: Deferred<void>;
-  }> = [];
-
-  class FakeHost {
-    executionId: string;
-    sessionId: string;
-    state = "created";
-    isSettled = false;
-    ready: Promise<void>;
-    private resolveReady!: () => void;
-    private rejectReady!: (e: unknown) => void;
-    startDeferred = makeDeferred<void>();
-    settlementDeferred = makeDeferred<void>();
-    steer: ReturnType<typeof vi.fn>;
-    followUp: ReturnType<typeof vi.fn>;
-    cancel = vi.fn();
-    start: ReturnType<typeof vi.fn>;
-    waitForSettlement: ReturnType<typeof vi.fn>;
-
-    constructor(opts: { executionId: string; sessionId: string }) {
-      this.executionId = opts.executionId;
-      this.sessionId = opts.sessionId;
-      this.ready = new Promise<void>((res, rej) => { this.resolveReady = res; this.rejectReady = rej; });
-      this.steer = vi.fn();
-      this.followUp = vi.fn();
-      this.start = vi.fn(async () => { this.state = "running"; await this.startDeferred.promise; });
-      this.waitForSettlement = vi.fn(() => this.settlementDeferred.promise);
-      hostInstances.push(this);
-    }
-
-    becomeSteerable(): void { this.resolveReady(); }
-    failReadiness(e: unknown): void { this.rejectReady(e); }
-  }
-
-  return { hostInstances, FakeHost, makeDeferred };
-});
-
-vi.mock("./pi-core-host.js", () => ({
-  PiCoreExecutionHost: FakeHost,
-}));
-
-vi.mock("./pi-core-types.js", () => ({
-  createCurrentTurnMessage: (message: string) => ({ role: "abtars_current_turn", content: message }),
-  loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
-    module: {},
-    installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
-  }),
+vi.mock("./pi-runtime-contract.js", () => ({
+  validatePiRuntimeContract: vi.fn(async () => {}),
 }));
 
 import { PiCoreTransport } from "./pi-core-transport.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
+
+interface FakeSession {
+  calls: string[];
+  steered: string[];
+  followedUp: string[];
+  prompted: string[];
+  streaming: boolean;
+  listeners: Set<(event: { type: string } & Record<string, unknown>) => void>;
+}
 
 function makeCandidates(): ModelCandidate[] {
   return [{
@@ -99,13 +38,100 @@ function makeCandidates(): ModelCandidate[] {
   }];
 }
 
-function makeTransport(): PiCoreTransport {
+interface SteeringHarness {
+  loader: PiAgentSessionFactoryLoader;
+  sessions: FakeSession[];
+  releaseCreate: () => void;
+  created: Array<Record<string, unknown>>;
+}
+
+function makeHarness(): SteeringHarness {
+  const sessions: FakeSession[] = [];
+  const created: Array<Record<string, unknown>> = [];
+  let releaseCreate!: () => void;
+  let createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  const loader = (async () => ({
+    createAgentSession: async (options: Record<string, unknown>) => {
+      // Gate session creation so tests can steer mid-opening.
+      await createGate;
+      created.push(options);
+      const session: FakeSession = {
+        calls: [],
+        steered: [],
+        followedUp: [],
+        prompted: [],
+        streaming: false,
+        listeners: new Set(),
+      };
+      const record = session as FakeSession & {
+        subscribe: (l: (e: { type: string } & Record<string, unknown>) => void) => () => void;
+        prompt: (text: string) => Promise<void>;
+        abort: () => Promise<void>;
+        clearQueue: () => unknown;
+        waitForIdle: () => Promise<void>;
+        dispose: () => void;
+        steer: (text: string) => void;
+        followUp: (text: string) => void;
+        setModel: () => Promise<void>;
+        setThinkingLevel: () => void;
+        compact: () => Promise<unknown>;
+        getContextUsage: () => undefined;
+        getActiveToolNames: () => string[];
+        setActiveToolsByName: (names: string[]) => void;
+        readonly isStreaming: boolean;
+      };
+      Object.assign(record, {
+        subscribe: (l: (e: { type: string } & Record<string, unknown>) => void) => {
+          session.listeners.add(l);
+          return () => { session.listeners.delete(l); };
+        },
+        prompt: async (text: string) => {
+          session.calls.push("prompt");
+          session.prompted.push(text);
+          session.streaming = true;
+        },
+        abort: async () => { session.calls.push("abort"); session.streaming = false; },
+        clearQueue: () => { session.calls.push("clearQueue"); return {}; },
+        waitForIdle: async () => { session.calls.push("waitForIdle"); },
+        dispose: () => { session.calls.push("dispose"); session.streaming = false; },
+        steer: (text: string) => { session.calls.push("steer"); session.steered.push(text); },
+        followUp: (text: string) => { session.calls.push("followUp"); session.followedUp.push(text); },
+        setModel: async () => { session.calls.push("setModel"); },
+        setThinkingLevel: () => { session.calls.push("setThinkingLevel"); },
+        compact: async () => { session.calls.push("compact"); return {}; },
+        getContextUsage: () => undefined,
+        getActiveToolNames: () => [],
+        setActiveToolsByName: () => {},
+      });
+      Object.defineProperty(record, "isStreaming", { get: () => session.streaming });
+      sessions.push(session);
+      return { session: record };
+    },
+    SessionManager: { inMemory: () => ({}) },
+    SettingsManager: { inMemory: () => ({}) },
+    ModelRuntime: {
+      create: async () => ({
+        getModel: () => ({ id: "m" }),
+        registerProvider: () => {},
+      }),
+    },
+    DefaultResourceLoader: class {
+      async reload(): Promise<void> {}
+    },
+  })) as PiAgentSessionFactoryLoader;
+  return {
+    loader, sessions, created,
+    releaseCreate: () => releaseCreate(),
+  };
+}
+
+function makeTransport(harness: SteeringHarness): PiCoreTransport {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "You are a helpful assistant.",
-    candidates: makeCandidates(),
-    healthRegistry: new ModelHealthRegistry(),
+    candidate: makeCandidates()[0]!,
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    sessionFactoryLoader: harness.loader,
   });
 }
 
@@ -120,108 +146,98 @@ function makeLease(overrides?: Partial<InstructionLease>): InstructionLease {
   };
 }
 
-/** Resolve every deferred of a fake host so its sendPrompt can finish. */
-function finishHost(host: (typeof hostInstances)[number]): void {
-  host.startDeferred.resolve();
-  host.settlementDeferred.resolve();
+function latestSession(harness: SteeringHarness): FakeSession {
+  const session = harness.sessions[harness.sessions.length - 1];
+  if (!session) throw new Error("expected a created session");
+  return session;
 }
 
-describe("PiCoreTransport — #1531 execution slot steering", () => {
+function settle(session: FakeSession, text: string): void {
+  for (const listener of [...session.listeners]) {
+    listener({ type: "message_end", message: { role: "assistant", content: text } });
+  }
+  for (const listener of [...session.listeners]) {
+    listener({ type: "agent_settled", aborted: false });
+  }
+  session.streaming = false;
+}
+
+describe("PiCoreTransport — #1531 execution slot steering (#1940 handoff)", () => {
+  let harness: SteeringHarness;
+
   beforeEach(() => {
-    hostInstances.length = 0;
+    harness = makeHarness();
   });
 
   it("steer without an active execution slot throws an explicit error", async () => {
-    const t = makeTransport();
+    const t = makeTransport(harness);
     await expect(t.steer("steer me", makeLease())).rejects.toThrow(/No active Pi execution to steer/);
   });
 
-  it("steer waits for the opening execution's host readiness and delegates per-lease", async () => {
-    const t = makeTransport();
-    // sendPrompt suspends at host.start (held) — slot and hostReady exist.
-    const sendP = t.sendPrompt("session_1", "hello");
-    const host = hostInstances[0]!;
-    expect(host).toBeDefined();
-
-    const steerP = t.steer("steer me", makeLease({ sessionId: "session_1" }));
-    // Host not steerable yet — steer must wait, not fail.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(host.steer).not.toHaveBeenCalled();
-
-    host.becomeSteerable();
-    await vi.waitFor(() => expect(host.steer).toHaveBeenCalledTimes(1));
+  it("steer waits for the opening execution and resolves on Pi handoff", async () => {
+    const t = makeTransport(harness);
+    await t.initialize();
+    // Session creation is gated: the conversation is still opening — steer
+    // must wait, not fail.
+    const sendP = t.sendPrompt("session_1", "hello", undefined, { executionId: "exec-1" });
+    const lease = makeLease({ sessionId: "session_1" });
+    const steerP = t.steer("steer me", lease);
+    await vi.waitFor(() => expect(harness.sessions).toHaveLength(0));
+    harness.releaseCreate();
     await steerP;
+    // #1940: the handoff to Pi's queue resolves the lease — plain steer
+    // text reaches Pi (no instruction wrapper).
+    const session = latestSession(harness);
+    expect(session.steered).toEqual(["steer me"]);
+    expect(session.prompted).toEqual(["hello"]);
 
-    // A second lease awaits its per-lease acknowledgement.
-    const ack = makeDeferred<void>();
-    host.steer.mockReturnValueOnce(ack.promise);
-    const secondSteer = t.steer("second", makeLease({ leaseId: "lease_2", sessionId: "session_1" }));
-    await vi.waitFor(() => expect(host.steer).toHaveBeenCalledTimes(2));
-    let secondSettled = false;
-    secondSteer.then(() => { secondSettled = true; });
-    await new Promise((r) => setTimeout(r, 20));
-    expect(secondSettled).toBe(false);
-
-    ack.resolve();
-    await secondSteer;
-    expect(secondSettled).toBe(true);
-
-    // sendPrompt never interacted with the execution-wide settlement latch
-    // for these steers and is still open while the host is held at start.
-    expect(host.waitForSettlement).not.toHaveBeenCalled();
-    finishHost(host);
-    await expect(sendP).resolves.toBe("");
+    settle(session, "done");
+    await expect(sendP).resolves.toBe("done");
   });
 
-  it("steer rejects when the execution fails before host readiness", async () => {
-    const t = makeTransport();
-    const sendP = t.sendPrompt("session_1", "hello");
-    const host = hostInstances[0]!;
-    host.failReadiness(new Error("provider exploded"));
-
-    await expect(t.steer("steer me", makeLease({ sessionId: "session_1" })))
-      .rejects.toThrow(/never became steerable/);
-    expect(host.steer).not.toHaveBeenCalled();
-
-    finishHost(host);
-    await expect(sendP).resolves.toBe("");
+  it("steer rejects when the execution fails before readiness", async () => {
+    const failing = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "sys",
+      candidate: makeCandidates()[0]!,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      sessionFactoryLoader: async () => null,
+    });
+    await failing.initialize();
+    const sendP = failing.sendPrompt("session_1", "hello").catch((e: unknown) => e);
+    await expect(failing.steer("steer me", makeLease({ sessionId: "session_1" })))
+      .rejects.toThrow(/failed before steer readiness/);
+    await sendP;
   });
 
   it("steer never delivers to a replaced execution (generation isolation)", async () => {
-    const t = makeTransport();
-    const sendP1 = t.sendPrompt("session_1", "hello");
-    const host1 = hostInstances[0]!;
+    const t = makeTransport(harness);
+    await t.initialize();
+    harness.releaseCreate();
+    const sendP1 = t.sendPrompt("session_1", "hello", undefined, { executionId: "exec-1" });
 
-    const steerP = t.steer("steer me", makeLease({ sessionId: "session_1" }));
-    // A second send replaces the active slot before the first's host becomes ready.
-    const sendP2 = t.sendPrompt("session_1", "again");
-    const host2 = hostInstances[1]!;
-    expect(host2).not.toBe(host1);
+    // #1691: a second send while the first slot is active is rejected instead
+    // of replacing it — generation isolation is guaranteed by admission, so
+    // a steer can never be routed to a successor conversation.
+    await expect(t.sendPrompt("session_1", "again")).rejects.toThrow(/already active/);
 
-    host1.becomeSteerable();
-    await expect(steerP).rejects.toThrow(/no longer current/);
-    expect(host1.steer).not.toHaveBeenCalled();
+    // The first execution keeps its slot; its steer still delivers.
+    const lease = makeLease({ sessionId: "session_1" });
+    await vi.waitFor(() => expect(latestSession(harness).prompted).toEqual(["hello"]));
+    await t.steer("steer me", lease);
+    expect(latestSession(harness).steered).toEqual(["steer me"]);
 
-    finishHost(host1);
-    finishHost(host2);
-    await sendP1.catch(() => {});
-    await sendP2.catch(() => {});
+    settle(latestSession(harness), "");
+    await sendP1;
   });
 
   it("steer after execution settlement is rejected, not silently dropped", async () => {
-    const t = makeTransport();
+    const t = makeTransport(harness);
+    await t.initialize();
+    harness.releaseCreate();
     const sendP = t.sendPrompt("session_1", "hello");
-    const host = hostInstances[0]!;
-    host.becomeSteerable();
-    host.startDeferred.resolve();
-
-    // While the execution is still active (settlement pending), steering works.
-    await t.steer("live", makeLease({ sessionId: "session_1" }));
-    expect(host.steer).toHaveBeenCalledTimes(1);
-
-    // Settle the execution — the slot is cleared on finalization.
-    host.settlementDeferred.resolve();
-    host.isSettled = true;
+    await vi.waitFor(() => expect(latestSession(harness).prompted).toEqual(["hello"]));
+    settle(latestSession(harness), "done");
     await sendP;
 
     await expect(t.steer("dead", makeLease({ sessionId: "session_1" })))
@@ -229,16 +245,17 @@ describe("PiCoreTransport — #1531 execution slot steering", () => {
   });
 
   it("followUp uses the same slot machinery", async () => {
-    const t = makeTransport();
-    const sendP = t.sendPrompt("session_1", "hello");
-    const host = hostInstances[0]!;
-    host.becomeSteerable();
+    const t = makeTransport(harness);
+    await t.initialize();
+    harness.releaseCreate();
+    const sendP = t.sendPrompt("session_1", "hello", undefined, { executionId: "exec-1" });
+    await vi.waitFor(() => expect(latestSession(harness).prompted).toEqual(["hello"]));
 
-    const followP = t.followUp("continue", makeLease({ leaseId: "lease_f", sessionId: "session_1" }));
-    await vi.waitFor(() => expect(host.followUp).toHaveBeenCalledTimes(1));
-    await followP;
+    const lease = makeLease({ leaseId: "lease_f", sessionId: "session_1", kind: "followUp" });
+    await t.followUp("continue", lease);
+    expect(latestSession(harness).followedUp).toEqual(["continue"]);
 
-    finishHost(host);
+    settle(latestSession(harness), "");
     await sendP;
   });
 });

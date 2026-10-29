@@ -25,8 +25,7 @@ echo "Building abmind..."
 # 3. Build abtars bundle
 echo "Building abtars..."
 [ -d "$SRC_DIR/node_modules" ] || (cd "$SRC_DIR" && npm install --silent)
-(cd "$SRC_DIR" && node esbuild.config.js)
-rm -rf "$SRC_DIR/bundle/public" && cp -r "$SRC_DIR/src/components/dashboard/public" "$SRC_DIR/bundle/public"
+(cd "$SRC_DIR" && npm run bundle)
 
 # 4. Stop bridge (kill watchdog only if NOT managed by launchd)
 echo "Stopping..."

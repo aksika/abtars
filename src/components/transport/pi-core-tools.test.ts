@@ -2,18 +2,30 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createPiAgentTools } from "./pi-core-tools.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
+import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
+import { executeToolCall } from "./tool-registry.js";
+import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
 import type { SessionType } from "../spin-types.js";
 
-function makeRegistry() {
-  return new ModelHealthRegistry();
-}
+// #1677: a typed tool rejection envelope carries a `reason` code. Only the
+// registry's execution boundary is overridden here (a canned typed
+// rejection); every other tool still routes through the real registry
+// execution path. #1792: the review_project Orc tool is deleted, so the
+// canned rejection rides on secret_get via mockResolvedValueOnce per test.
+vi.mock("./tool-registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./tool-registry.js")>();
+  return {
+    ...actual,
+    executeToolCall: vi.fn(async (name: string, params: Record<string, unknown>, context: unknown) => {
+      return (actual.executeToolCall as (name: string, params: Record<string, unknown>, context: unknown) => Promise<string>)(name, params, context);
+    }),
+  };
+});
 
 function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
   return {
@@ -28,13 +40,9 @@ function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
 }
 
 describe("createPiAgentTools", () => {
-  let registry: ModelHealthRegistry;
-  let policy: FallbackPolicy;
   let depsHolder: MemoryToolDependenciesHolder;
 
   beforeEach(() => {
-    registry = makeRegistry();
-    policy = new FallbackPolicy([makeCandidate()], registry);
     depsHolder = { current: null };
   });
 
@@ -47,7 +55,7 @@ describe("createPiAgentTools", () => {
       executionId: "exec_1",
       userId: "user_1",
       sandboxPolicy: buildPolicy("owner"),
-      safety: createPiExecutionSafetyController(policy),
+      safety: createPiExecutionSafetyController(),
       memoryToolDeps: depsHolder,
       ...overrides,
     };
@@ -121,6 +129,65 @@ describe("createPiAgentTools", () => {
     }
   });
 
+  it("#1677 delivers a typed tool rejection reason to onToolFailure, never unknown", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      onToolFailure,
+    });
+    // #1792: the review_project Orc tool is deleted — pin the same
+    // typed-reason plumbing through a live tool with a canned rejection.
+    vi.mocked(executeToolCall).mockResolvedValueOnce(
+      JSON.stringify({ error: "Project generation mismatch: expected 1, got 2", reason: "project_generation_mismatch" }),
+    );
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "secret_get");
+    expect(tool).toBeDefined();
+    if (tool) {
+      await tool.execute("call_1", { name: "x" });
+      expect(onToolFailure).toHaveBeenCalledTimes(1);
+      expect(onToolFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "project_generation_mismatch", tool: "secret_get" }),
+      );
+      const diag = onToolFailure.mock.calls[0]![0] as ToolFailureDiagnosticV1;
+      expect(diag.stderr_excerpt).toContain("Project generation mismatch: expected 1, got 2");
+      expect(diag.command_preview).toBeUndefined();
+    }
+  });
+
+  describe("#1772 Pi result policy", () => {
+    it("returns a 30,000-character authoritative result exactly", async () => {
+      const big = "a".repeat(30000);
+      vi.mocked(executeToolCall).mockResolvedValueOnce(big);
+      const ctx = makeContext({
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      });
+      const tools = createPiAgentTools(ctx);
+      const tool = tools.find((t) => t.name === "secret_get");
+      expect(tool).toBeDefined();
+      const result = await tool!.execute("call_1772_exact", { name: "x" });
+      expect(result.content[0]).toMatchObject({ type: "text", text: big });
+      expect(result.details).toEqual({ tool: "secret_get" });
+    });
+
+    it("announces over-limit results with the true length inside the bound", async () => {
+      const over = "b".repeat(PI_CORE_TOOL_RESULT_MAX_CHARS + 1000);
+      vi.mocked(executeToolCall).mockResolvedValueOnce(over);
+      const ctx = makeContext({
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      });
+      const tools = createPiAgentTools(ctx);
+      const tool = tools.find((t) => t.name === "secret_get");
+      expect(tool).toBeDefined();
+      const result = await tool!.execute("call_1772_over", { name: "y" });
+      const first = result.content[0] as unknown as { type: string; text: string };
+      const text = first.text ?? "";
+      expect(text).toContain(`[TRUNCATED: tool returned ${over.length} chars`);
+      expect(text.length).toBeLessThanOrEqual(PI_CORE_TOOL_RESULT_MAX_CHARS);
+      expect(result.details).toEqual({ tool: "secret_get" });
+    });
+  });
+
   it("treats repeated unavailable private writes as completed non-failures", async () => {
     const instantStore = vi.fn();
     const client = {
@@ -147,7 +214,10 @@ describe("createPiAgentTools", () => {
 
     for (const [index, translated] of ["one", "two", "three"].entries()) {
       const result = await storeTool!.execute(`call_${index}`, { translated, type: "fact" });
-      expect(result.content[0]?.text).toContain('"retryable":false');
+      const first = result.content[0];
+      expect(first?.type).toBe("text");
+      if (first?.type !== "text") throw new Error("expected text content");
+      expect(first.text).toContain('"retryable":false');
     }
 
     expect(instantStore).not.toHaveBeenCalled();
@@ -159,7 +229,7 @@ describe("createPiAgentTools", () => {
   it.each([
     ["B", "Browse"], ["C", "Code"], ["T", "Task"], ["P", "Peer"], ["S", "System"],
     ["O", "Orc"], ["W", "Worker"], ["H", "Healer"], ["K", "Skill"],
-  ] as const)("hides memory_store from %s sessions while A and D see it", (type) => {
+  ] as const)("hides memory_store from %s sessions while A and D see it", (type, _label) => {
     const ctx = makeContext({
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
       sessionType: type as SessionType,
@@ -223,7 +293,7 @@ describe("createPiAgentTools", () => {
   });
 
   it("skips tool on safety controller skip decision", async () => {
-    const safety = createPiExecutionSafetyController(policy);
+    const safety = createPiExecutionSafetyController();
     const ctx = makeContext({
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       safety,
@@ -236,7 +306,157 @@ describe("createPiAgentTools", () => {
     if (tool) {
       const result = await tool.execute("call_1", { name: "hi" });
       expect(result.details).toEqual({ skipped: true });
-      expect(result.content[0]?.text).toContain("skipped");
+      const skipped = result.content[0];
+      expect(skipped?.type).toBe("text");
+      if (skipped?.type !== "text") throw new Error("expected text content");
+      expect(skipped.text).toContain("skipped");
     }
+  });
+
+  // #1663: unattended scheduled executions must not see or reach the
+  // platform delivery tool. Presentation hiding is a model-behavior aid; the
+  // registry execution boundary is the authority (tool-registry.test.ts).
+  describe("#1663 send_document availability for unattended scheduled executions", () => {
+    const ownerWithSend = () => buildPolicy("owner", { allowedTools: ["send_document", "review_project"] });
+
+    it("hides send_document from an unattended one-shot T execution", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
+    it("hides send_document from an unattended scheduled Orc", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "O",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+      // #1792: review_project deleted with the supervised surface.
+      expect(tools.find(t => t.name === "review_project")).toBeUndefined();
+    });
+
+    it("hides send_document from an unattended scheduled Worker W execution", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "W",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
+    it("hides send_document when scheduled provenance is unverified", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unverified",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
+    it("keeps send_document for an interactive execution with the same sandbox", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "interactive",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeDefined();
+    });
+
+    it("keeps send_document when the trusted authorization mode is absent (interactive compatibility)", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: undefined,
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeDefined();
+    });
+
+    it("ignores a forged authorizationMode tool argument — the trusted context wins", async () => {
+      const ctx = makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unattended-task",
+      });
+      const tools = createPiAgentTools(ctx);
+      // The tool is not even presented; proving a forged argument cannot
+      // re-introduce it would need the execution boundary, which is covered
+      // in tool-registry.test.ts. Here we prove the schema is absent.
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+  });
+});
+
+describe("peer deny-all policy (#1786)", () => {
+  function peerContext(overrides?: Partial<PiCoreToolContext>): PiCoreToolContext {
+    return {
+      executionId: "exec_peer_1",
+      userId: "peer:molty",
+      sandboxPolicy: buildPolicy("peer"),
+      safety: createPiExecutionSafetyController(),
+      memoryToolDeps: { current: null },
+      sessionType: "P",
+      ...overrides,
+    };
+  }
+
+  it("presents zero tool schemas to a peer-denied session", () => {
+    const tools = createPiAgentTools(peerContext());
+    expect(tools).toEqual([]);
+  });
+
+  it("denies forged direct dispatch without execution (peer_sandbox)", async () => {
+    const { executeToolCall: realExecute } = await vi.importActual<typeof import("./tool-registry.js")>("./tool-registry.js");
+    const out = await realExecute("peer_session", { peer_name: "kp", message: "hi" }, {
+      sandboxPolicy: buildPolicy("peer"),
+    } as never);
+    const parsed = JSON.parse(out);
+    expect(parsed.error).toMatch(/not available/);
+    expect(parsed.reason).toBe("peer_sandbox");
+  });
+
+  it("denies forged memory_recall dispatch without touching the backend (peer_sandbox)", async () => {
+    const { executeToolCall: realExecute } = await vi.importActual<typeof import("./tool-registry.js")>("./tool-registry.js");
+    const backendRecall = vi.fn().mockResolvedValue({ results: [] });
+    const out = await realExecute("memory_recall", { query: " recall secrets" }, {
+      userId: "peer:molty",
+      sessionType: "P",
+      sandboxPolicy: buildPolicy("peer"),
+      memoryToolDeps: { current: { runtime: { recall: backendRecall } } },
+    } as never);
+    const parsed = JSON.parse(out);
+    expect(parsed.error).toMatch(/not available/);
+    expect(parsed.reason).toBe("peer_sandbox");
+    expect(backendRecall).not.toHaveBeenCalled();
+  });
+});
+
+describe("#1895 memory_recall Pi boundary", () => {
+  function makeRecallContext(): PiCoreToolContext {
+    return {
+      executionId: "exec_kw",
+      userId: "user_1",
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
+      safety: createPiExecutionSafetyController(),
+      memoryToolDeps: { current: null },
+    };
+  }
+
+  it("keywords array survives the Pi boundary intact", async () => {
+    const ctx = makeRecallContext();
+    const tools = createPiAgentTools(ctx);
+    const recallTool = tools.find((t) => t.name === "memory_recall");
+    expect(recallTool).toBeDefined();
+    const keywords = ["Migration", "AND", "rollback", "rollback"];
+    await recallTool!.execute("call_kw", { keywords, limit: 5 });
+    const registry = await import("./tool-registry.js");
+    expect(vi.mocked(registry.executeToolCall)).toHaveBeenCalledWith(
+      "memory_recall",
+      { keywords, limit: 5 },
+      expect.objectContaining({ userId: "user_1" }),
+    );
   });
 });

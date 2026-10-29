@@ -10,6 +10,7 @@
 import type { ManagedSession, SessionType } from "./spin-types.js";
 import { sessionType, sessionCreatedAt, typeLabel } from "./spin-types.js";
 import { logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 
 const MAX_LOG = 5;
 const TAG = "spin-sessions";
@@ -26,19 +27,26 @@ export function pushLog(session: ManagedSession, event: string): void {
 }
 
 /**
- * #1502 §7: cancel any active execution bound to the session and release its
- * transport. Called by endSession/killSession so a terminating session does
- * not leave a Pi execution running or a transient transport cached. Both the
- * control's requestCancel and the transport release are idempotent / guarded.
+ * #1502 §7: cancel any active execution bound to the session. Called by
+ * endSession/killSession so a terminating session does not leave a Pi
+ * execution running. Both the control's requestCancel and the sealed cleanup
+ * are idempotent / guarded.
+ *
+ * Transport release lives in Spin.releaseSessionTransport, which disposes only
+ * the ending session's Pi session and skips destroying a runtime transport
+ * still shared by other live sessions. Releasing here would destroy that
+ * shared transport and end every other live session on it.
  */
 export function cancelSessionExecution(session: ManagedSession, reason: import("./swarm-executor-types.js").CancelReason): void {
+  if (session.activeExecutionId) {
+    const executionId = session.activeExecutionId;
+    void import("./transport/tool-registry.js")
+      .then(({ revokeSealedSecretExecution }) => { revokeSealedSecretExecution(executionId); })
+      .catch(() => { /* terminal cleanup is best effort */ });
+  }
   const ctrl = session.executionControl;
   if (ctrl && !ctrl.terminal) {
-    void ctrl.requestCancel(reason).catch(() => {});
-  }
-  const release = session.releaseTransport;
-  if (release) {
-    try { void release(); } catch { /* best effort */ }
+    void ctrl.requestCancel(reason).catch(err => logAndSwallow(TAG, `cancel session execution`, err));
   }
 }
 
@@ -72,6 +80,10 @@ export interface SpinSessionRegistry {
   getById(sessionId: string): ManagedSession | undefined;
   /** #1336: look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */
   getByGlobalIndex(index: number): ManagedSession | undefined;
+  /** #1635: resolve the session an indexed lifecycle command will target,
+   * WITHOUT ending it. Mirrors `findAddressableSession` so callers can run a
+   * pre-teardown (e.g. coding-session resource release) before finalizing. */
+  resolveAddressable(userId: string, platform: string, index?: number): ManagedSession | undefined;
   switch(userId: string, platform: string, index: number): ManagedSession | SessionRejection;
   /** End an addressable session; reconciles the local active/Main after termination. */
   end(userId: string, platform: string, index?: number): ManagedSession | SessionRejection;
@@ -111,12 +123,12 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
       messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [],
       shortIndex: idx,
+      // #1654: reasoning display off by default — quiet unless /thinking show.
+      showThinking: false,
       // Pipeline state defaults (#1040)
       busy: false, queue: [], fullMode: false, pendingStart: false,
-      seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
+      seen: false,
       primingTerms: [], completions: [],
-      // #1248: Bounded /wait FIFO
-      pendingWait: [],
       // #1332/#1361: Steering queue and acceptance gate
       instructionQueue: [],
       steeringAccepting: false,
@@ -146,6 +158,14 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
       s.platform === platform &&
       s.status !== "ended",
     );
+  }
+
+  /** #1635 — resolve the indexed target without ending it (active session when
+   * no index given), exactly as end/pause/resume would. */
+  function resolveAddressable(userId: string, platform: string, index?: number): ManagedSession | undefined {
+    const targetIdx = index ?? getActiveSession(userId, platform)?.shortIndex;
+    if (!targetIdx) return undefined;
+    return findAddressableSession(userId, platform, targetIdx);
   }
 
   /**
@@ -221,6 +241,10 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
         if (s.shortIndex === index && s.status !== "ended") return s;
       }
       return undefined;
+    },
+
+    resolveAddressable(userId, platform, index) {
+      return resolveAddressable(userId, platform, index);
     },
 
     switch(userId, platform, index) {

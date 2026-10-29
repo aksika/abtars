@@ -3,17 +3,24 @@
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { logWarn, redactSecrets } from "../logger.js";
+import { logDebug, logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
+import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
+import { authorizeA2ATool, authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
+import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
+import { runBashCommand } from "../bash-runner.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
-import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
-import { checkCommand, classifyCommand } from "../guardrails.js";
+import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
+import { formatRunReason } from "../orc-project/orc-project-contracts.js";
+import { OrcProjectRunStore } from "../orc-project/orc-project-run-store.js";
+import { orcToolAllowedOnIntent } from "../orc-project/orc-intent-policy.js";
+import { isRootScopeAllow } from "../guardrails.js";
+import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
 
 const TAG = "tool_registry";
 
@@ -25,18 +32,91 @@ function audit(entry: Record<string, unknown>): void {
   try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow(TAG, "audit write", err); }
 }
 
+type BashAuditStatus = "ok" | "error" | "timeout" | "abort" | "cleanup_incomplete_timeout";
+
+interface CompletionClassification {
+  status: BashAuditStatus;
+  chars?: number;
+  exit_code?: number;
+  process_error_code?: string;
+  error?: string;
+  parse_warning?: boolean;
+}
+
+function boundedAuditText(value: unknown): string {
+  const raw = value instanceof Error ? value.message : String(value);
+  return redactSecrets(raw).slice(0, 512);
+}
+
+export function classifyBashCompletion(result: string | undefined, failed: boolean, err: unknown): CompletionClassification {
+  if (failed) {
+    return { status: "error", error: boundedAuditText(err) };
+  }
+  const chars = typeof result === "string" ? result.length : 0;
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const candidate = JSON.parse(result ?? "") as unknown;
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      parsed = candidate as Record<string, unknown>;
+    }
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) {
+    return { status: "ok", chars, parse_warning: true };
+  }
+  const cleanupIncomplete = parsed["cleanup_incomplete"] === true;
+  const timedOut = parsed["timed_out"] === true;
+  const aborted = parsed["aborted"] === true;
+  const processErrorCode = typeof parsed["process_error_code"] === "string" ? parsed["process_error_code"] : undefined;
+  const structuredError = typeof parsed["error"] === "string" ? parsed["error"] : undefined;
+  if (cleanupIncomplete) return { status: "cleanup_incomplete_timeout", chars };
+  if (timedOut) return { status: "timeout", chars };
+  if (aborted) return { status: "abort", chars };
+  if (processErrorCode) return { status: "error", chars, process_error_code: processErrorCode, error: processErrorCode };
+  if (structuredError) return { status: "error", chars, error: boundedAuditText(structuredError) };
+  const exitCode = typeof parsed["exit_code"] === "number" ? parsed["exit_code"] : undefined;
+  return { status: "ok", chars, ...(exitCode !== undefined ? { exit_code: exitCode } : {}) };
+}
+
 export interface ToolExecutionContext {
   userId: string;
   signal?: AbortSignal;
   executionScope?: ToolExecutionScope;
-  orcContext?: OrcInvocationContextV1;
+  orcContext?: OrcInvocationContextV2;
   /** #1552: trusted session type (from Spin); missing/invalid fails closed for memory_store. */
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
-  /** #1629: trusted tool authorization mode (from Spin via the Pi tool context).
-   *  Never read from tool arguments — missing values fail closed to interactive. */
+  /** #1629/#1663: trusted tool authorization mode (from Spin via the Pi tool
+   *  context). Never read from tool arguments. `unverified` is reserved for a
+   *  card-backed execution whose scheduled provenance could not be confirmed. */
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1660: active execution id — sealed handles bind to it and expire with it. */
+  executionId?: string;
+  /** #1680: host-owned one-shot turn control for the bound Orc turn. A tool
+   *  whose durable intent postcondition is satisfied requests completion
+   *  through this control; the transport stops the turn when it wins. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor (resolved once at dispatch
+   *  from host-owned durable state, never from model input — same treatment
+   *  as sessionType and authorizationMode). Present on card-backed worker
+   *  turns; absent on owner chats, TUI, and composition turns, which keep
+   *  legacy behavior. A present-but-unresolvable origin fails closed at the
+   *  relay guard. */
+  workOrigin?: WorkOrigin;
+}
+
+/**
+ * #1850: which root project a card-backed worker execution belongs to and
+ * whether that root is peer-originated. Resolved at dispatch from
+ * `kanban_board.source`/`source_peer` plus the workflow run kind; both
+ * facts are host-owned and durable.
+ */
+export interface WorkOrigin {
+  readonly rootCardId: number;
+  readonly rootKind: "scheduled" | "interactive" | "peer" | "unknown";
+  readonly sourcePeer: string | null;
 }
 
 export type ToolDefinition = {
@@ -50,6 +130,91 @@ export type ToolDefinition = {
   execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
 };
 
+export interface ToolAvailabilityContext {
+  readonly authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1680: the bound Orc invocation context. When present, the central intent
+   *  policy decides the allowed tool surface at both schema presentation and
+   *  execution time; a missing intent kind fails closed. */
+  readonly orcContext?: OrcInvocationContextV2;
+  /** #1850/#1856: trusted worker origin for relay containment. Relay tools
+   *  stay offered to peer-origin workers so an attempt reaches the execution
+   *  boundary, which refuses it and records the correlated denial there.
+   *  Absent on non-worker turns, which are unaffected. */
+  readonly workOrigin?: WorkOrigin;
+}
+
+/**
+ * #1663: one shared contextual availability decision for canonical tool names
+ * plus trusted execution context. Both schema presentation
+ * (createPiAgentTools) and the execution boundary (executeToolCall) consume
+ * this function — never duplicate the conditional in two modules.
+ *
+ * #1680: for a project-bound Orc turn the central intent policy is
+ * authoritative — the allowed tool surface is the policy's set, and a forged,
+ * stale, or intent-less context fails closed. For operator turns the full
+ * operator surface remains available.
+ *
+ * The decision is provider-neutral and derived only from trusted host context;
+ * model arguments, prompt text, agent names, and provider candidates cannot
+ * select or override it.
+ */
+export function checkToolAvailability(toolName: string, context: ToolAvailabilityContext): import("../tool-sandbox.js").CheckResult {
+  if (
+    toolName === "send_document"
+    && (context.authorizationMode === "unattended-task" || context.authorizationMode === "unverified")
+  ) {
+    return {
+      allowed: false,
+      reason: "Tool 'send_document' is unavailable during unattended or unverified scheduled execution; delivery is owned by scheduled settlement",
+    };
+  }
+  // #1856: relay tools are deliberately NOT filtered here. Peer-originated
+  // workers must be able to attempt them so the attempt reaches the
+  // execution boundary, which refuses peer relay and records the
+  // correlated auditDeny (the live gate observes that record). Hiding the
+  // tools only guarantees the denial is never produced. Owner roots and
+  // contexts without a worker origin are unaffected.
+  const bound = context.orcContext;
+  if (bound) {
+    if (!bound.intentKind) {
+      return {
+        allowed: false,
+        reason: "Orc invocation context carries no intent kind — project-bound tool calls fail closed",
+      };
+    }
+    if (!orcToolAllowedOnIntent(toolName, bound.intentKind)) {
+      return {
+        allowed: false,
+        reason: `Tool '${toolName}' is outside the ${bound.intentKind} intent surface`,
+      };
+    }
+
+    // #1680: an Orc context is only usable after Spin has bound it to a live
+    // execution. The coordinator's pre-bind context is suitable for composing
+    // a turn spec, but it must never authorize a direct/provider-bypassed tool
+    // call. Re-read the exact run row here so released, superseded, foreign,
+    // generation-stale, or intent-substituted contexts fail closed before the
+    // tool implementation is reached.
+    if (bound.sessionId !== undefined || bound.executionId !== undefined) {
+      try {
+        const validation = new OrcProjectRunStore().validateCurrentContext(bound);
+        if (!validation.ok) {
+          return {
+            allowed: false,
+            reason: `Orc invocation context is not current: ${formatRunReason(validation.reason)}`,
+          };
+        }
+      } catch {
+        return {
+          allowed: false,
+          reason: "Orc invocation context could not be validated against durable ownership",
+        };
+      }
+    }
+  }
+  return { allowed: true };
+}
+
 /** Tool implementations may still consume textual CLI-style values, but the
  * registry boundary preserves the provider's JSON types until that point. */
 function stringValue(value: unknown): string {
@@ -62,245 +227,75 @@ function optionalStringValue(value: unknown): string | undefined {
   return value === undefined || value === null ? undefined : stringValue(value);
 }
 
-const BASH_TIMEOUT_MS = 300_000;
-const CLI_TIMEOUT_MS = 60_000;
-
-/**
- * #1595: parse-only shell validation before any execution. A malformed command
- * must never reach the executor: return a structured `shell_syntax_error` with
- * bounded diagnostics and an actionable correction hint for recognizable
- * truncated redirection operators. The command itself is never rewritten —
- * the model must re-submit a corrected command explicitly.
- */
-export function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: string; hint?: string } {
-  try {
-    // Do not source BASH_ENV or user startup files during validation. This is
-    // a parse-only probe and must not run ambient shell initialization before
-    // the real, authorized command is started.
-    execFileSync("bash", ["--noprofile", "--norc", "-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
-    return { ok: true };
-  } catch (err) {
-    const e = err as { stderr?: Buffer | string; message?: string; code?: string | number; killed?: boolean; signal?: string };
-    // Fail OPEN on infrastructure failures — these are not syntax verdicts
-    // and must never block a possibly-valid command as shell_syntax_error:
-    // bash absent (ENOENT), oversized stderr/stdout (maxBuffer), or a
-    // hung/killed parse (timeout).
-    const msg = e.message ?? "";
-    if (e.code === "ENOENT" || e.code === "ETIMEDOUT" || e.code === "ENOBUFS" || e.killed === true || e.signal || /maxBuffer|timed out/i.test(msg)) return { ok: true };
-    const raw = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString("utf-8") : "";
-    const stderr = redactSecrets(raw || msg || "syntax error").slice(0, 1000);
-    const trimmed = cmd.trimEnd();
-    let hint: string | undefined;
-    // Recognizable truncated redirection operator (e.g. trailing `2>&`) gets
-    // an actionable hint; other syntax errors rely on bash's own stderr.
-    if (/\b2>&\s*$/.test(trimmed)) {
-      hint = 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.';
-    }
-    return { ok: false, stderr, hint };
-  }
+/** #1895 — ingress guard for the memory_recall keywords array: non-empty,
+ * every element a non-blank string. Accepted arrays cross verbatim. */
+function isNonBlankStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
 
-function shellSyntaxErrorResult(cmd: string, check: { stderr: string; hint?: string }): string {
-  logWarn("tool-registry", `Shell syntax error [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-  const result: Record<string, unknown> = {
-    error: "shell_syntax_error",
-    stderr: check.stderr,
-    exit_code: 2,
-    command_fingerprint: fingerprintCommand(cmd),
-    command_preview: previewCommand(cmd),
-  };
-  if (check.hint) result["syntax_hint"] = check.hint;
-  return JSON.stringify(result);
+const CLI_TIMEOUT_MS = 60_000;
+const MEMORY_TOOL_ERROR_MAX = 512;
+
+function boundedMemoryToolError(err: unknown): string {
+  const raw = err instanceof Error
+    ? err.message
+    : err && typeof err === "object" && "message" in err && typeof (err as { message?: unknown }).message === "string"
+      ? (err as { message: string }).message
+      : String(err);
+  const redacted = redactSecrets(raw);
+  return redacted.length <= MEMORY_TOOL_ERROR_MAX
+    ? redacted
+    : `${redacted.slice(0, MEMORY_TOOL_ERROR_MAX - 3)}...`;
 }
 
 // #1266: when no in-process memory backend is wired, return this error
 // rather than silently shelling out to a CLI on PATH we don't trust.
 const MEMORY_BACKEND_ERROR = "memory backend not initialized — abmind failed to load or below supported floor";
 
-/**
- * Patterns that would spawn or restart a bridge/watchdog process.
- * Blocked to prevent the LLM (especially fallback models) from accidentally
- * starting a second bridge instance, which would cause port conflicts,
- * Telegram 409 errors, and bridge.lock PID confusion.
- *
- * See post-mortem of 2026-04-22 outage: cron agent ran execute_bash that
- * spawned a rogue bridge alongside the watchdog-supervised one.
- */
-const BLOCKED_PATTERNS: readonly RegExp[] = [
-  /\bmain\.js\b/,                                  // node .../current/dist/main.js ...
-  /\babtars\.sh\b/,                           // the launcher
-  /\bwatchdog\.sh\b/,                              // the watchdog
-  /\blaunchctl\s+(load|bootstrap|kickstart|start)\b/, // launchd bridge start
-];
-
-export function isBridgeSpawnCommand(cmd: string): boolean {
-  return BLOCKED_PATTERNS.some(p => p.test(cmd));
+// #1797: fixed-command CLI spawn. cmd carries the display/audit spelling
+// only and is never parsed; argv is the execution boundary — no shell, no
+// syntax validation, no command policy on this path. Do not supply cwd,
+// env, signal or graceMs: the nine callers never had them.
+function runToolCli(bin: "abtars-task" | "abtars-todo", argv: readonly string[]): Promise<string> {
+  return runBashCommand({
+    cmd: [bin, ...argv].join(" "),
+    bin,
+    args: argv,
+    timeoutMs: CLI_TIMEOUT_MS,
+  }).then((result) => JSON.stringify(result));
 }
 
-/** Block kill/pkill/killall targeting the bridge's own PID or process patterns (#414). */
-function isBridgeKillCommand(cmd: string): boolean {
-  const pid = process.pid;
-  const ppid = process.ppid;
-  // Direct kill of own PID or parent
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${pid}\\b`).test(cmd)) return true;
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${ppid}\\b`).test(cmd)) return true;
-  // pkill/killall targeting bridge patterns
-  if (/\b(pkill|killall)\b.*\b(abtars|main\.js|watchdog)\b/.test(cmd)) return true;
-  if (/\bkill\b.*\$\(.*pgrep.*abtars/.test(cmd)) return true;
-  return false;
+// #1660: the single shared host bash service and the execution-scoped sealed
+// handle store. Wired once at boot; PiCore and ACP both route through them.
+let _hostToolService: import("../host-tool-service.js").HostToolService | null = null;
+let _sealedHandles: import("../sealed-secret-handles.js").SealedSecretHandles | null = null;
+
+export function setHostToolService(service: import("../host-tool-service.js").HostToolService | null): void {
+  _hostToolService = service;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
-  // Guardrails: command check
-  const cmdBlock = checkCommand(cmd);
-  if (cmdBlock) {
-    logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-    return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
+export function getHostToolService(): import("../host-tool-service.js").HostToolService | null {
+  return _hostToolService;
+}
+
+export function getSealedSecretHandles(): import("../sealed-secret-handles.js").SealedSecretHandles {
+  if (!_sealedHandles) {
+    _sealedHandles = new (staticSealedHandles)();
   }
-
-  // Action gate: auth-required commands
-  const tier = classifyCommand(cmd);
-  if (tier === "auth-required" && _actionGate) {
-    // #1629: the trusted mode comes from the execution context, never from
-    // the command text or tool arguments. ActionGate applies persistent rules
-    // first, then its bash-only unattended fallback.
-    return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
-      if (!granted) {
-        logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
-      }
-      return executeBash(cmd, timeout, signal, executionScope);
-    });
-  }
-
-  if (isBridgeSpawnCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-spawn command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-    return Promise.resolve(JSON.stringify({
-      error: "policy_rejected",
-      stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
-      exit_code: 126,
-      command_fingerprint: fingerprintCommand(cmd),
-      command_preview: previewCommand(cmd),
-    }));
-  }
-  if (isBridgeKillCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-kill command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-    return Promise.resolve(JSON.stringify({
-      error: "policy_rejected",
-      stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
-      exit_code: 126,
-      command_fingerprint: fingerprintCommand(cmd),
-      command_preview: previewCommand(cmd),
-    }));
-  }
-  return executeBash(cmd, timeout, signal, executionScope);
+  return _sealedHandles;
 }
 
-let _seatbeltActive = false;
-let _seatbeltPolicy: import("../seatbelt/policy.js").SeatbeltPolicy | null = null;
-
-/** Wire seatbelt for OS-level command sandboxing (#906). */
-export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy.js").SeatbeltPolicy): void {
-  _seatbeltActive = active;
-  _seatbeltPolicy = policy ?? null;
+export function setSealedSecretHandles(handles: import("../sealed-secret-handles.js").SealedSecretHandles | null): void {
+  _sealedHandles = handles;
 }
 
-import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
-
-function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
-  // #1595: parse-only validation before any execution (every caller routes
-  // through this choke point, including the auth-granted path). A malformed
-  // command is never executed; the model receives a structured
-  // shell_syntax_error and must re-submit a corrected command. The original
-  // command text is never rewritten (fingerprint/preview are untouched).
-  const syntaxCheck = validateBashSyntax(cmd);
-  if (!syntaxCheck.ok) return Promise.resolve(shellSyntaxErrorResult(cmd, syntaxCheck));
-
-  // Check pre-aborted signal BEFORE spawning — a cancelled request must
-  // never execute side effects (#1497 review).
-  if (signal?.aborted) {
-    return Promise.resolve(JSON.stringify({
-      exit_code: null,
-      timed_out: false,
-      aborted: true,
-      stderr: "Execution cancelled before start",
-      command_fingerprint: fingerprintCommand(cmd),
-      command_preview: previewCommand(cmd),
-    }));
-  }
-
-  return new Promise((resolve) => {
-    let bin = "bash";
-    let args = ["-c", cmd];
-    let timedOut = false;
-    let aborted = false;
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-
-    // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
-    if (_seatbeltActive && _seatbeltPolicy) {
-      const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
-      if (shouldSandbox(cmd)) {
-        const wrapped = wrapCommand(cmd, _seatbeltPolicy);
-        bin = wrapped.bin;
-        args = wrapped.args;
-      }
-    }
-
-    const child = execFile(bin, args, {
-      maxBuffer: 1024 * 1024,
-      cwd: executionScope?.cwd,
-      env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
-    }, (err, stdout, stderr) => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-
-      const result: Record<string, unknown> = {
-        command_fingerprint: fingerprintCommand(cmd),
-        command_preview: previewCommand(cmd),
-        timed_out: timedOut,
-        aborted,
-      };
-      if (stdout) result["stdout"] = stdout.slice(0, 50_000);
-      if (stderr) result["stderr"] = stderr.slice(0, 10_000);
-      if (err) {
-        const nodeErr = err as NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean };
-        if (nodeErr.code !== undefined && typeof nodeErr.code === "number") {
-          result["exit_code"] = nodeErr.code;
-        } else {
-          result["exit_code"] = null;
-          if (typeof nodeErr.code === "string") result["process_error_code"] = nodeErr.code;
-        }
-        if (nodeErr.signal) result["signal"] = nodeErr.signal;
-      } else {
-        result["exit_code"] = 0;
-      }
-      resolve(JSON.stringify(result));
-    });
-
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
-    }, timeout);
-
-    if (signal) {
-      const onAbort = (): void => {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        aborted = true;
-        child.kill("SIGTERM");
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      child.on("exit", () => signal.removeEventListener("abort", onAbort));
-    }
-  });
+/** Delete every sealed handle bound to one completed/cancelled execution. */
+export function revokeSealedSecretExecution(executionId: string): number {
+  if (!executionId) return 0;
+  return getSealedSecretHandles().revokeExecution(executionId);
 }
 
-let _actionGate: import("../action-gate.js").ActionGate | null = null;
-
-/** Wire action gate for auth-required commands. */
-export function setActionGate(gate: import("../action-gate.js").ActionGate | null): void {
-  _actionGate = gate;
-}
 
 let _peerActivityCb: ((msg: string) => void) | null = null;
 
@@ -313,13 +308,45 @@ export function setPeerActivityCallback(cb: ((msg: string) => void) | null): voi
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised. For credentials, use secret_find first and reference the returned ABTARS_SECRET_* variables in secret_env — never paste the secret into the command text.",
   parameters: {
     type: "object",
-    properties: { command: { type: "string", description: "The bash command to execute" } },
+    properties: {
+      command: { type: "string", description: "The bash command to execute" },
+      secret_env: {
+        type: "object",
+        additionalProperties: { type: "string" },
+        description: "Optional. Maps ABTARS_SECRET_* variable names (uppercase letters, digits, underscore) to opaque sealed handles returned by secret_find. The child process receives the real values only in its environment; outputs are scrubbed.",
+      },
+    },
     required: ["command"],
   },
-  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode),
+  async execute(args, context) {
+    const command = stringValue(args["command"]);
+    const secretEnvRaw = args["secret_env"];
+    const secretEnv = secretEnvRaw && typeof secretEnvRaw === "object" && !Array.isArray(secretEnvRaw)
+      ? secretEnvRaw as Record<string, unknown>
+      : undefined;
+    const service = getHostToolService();
+    if (service) {
+      return service.runBash(
+        { command, secretEnv: secretEnv ? Object.fromEntries(Object.entries(secretEnv).map(([k, v]) => [k, stringValue(v)])) : undefined },
+        {
+          userId: context?.userId ?? getMasterUserId(),
+          executionId: context?.executionId ?? "",
+          signal: context?.signal,
+          executionScope: context?.executionScope,
+          authorizationMode: context?.authorizationMode,
+          // #1854: peer-originated bash is decided by the A2A whitelist.
+          origin: resolveAuthorizationOrigin({ workOrigin: context?.workOrigin, userId: context?.userId }),
+        },
+      );
+    }
+    // #1797: no service, no execution. The unwired fallback is deleted;
+    // return a structured failure without spawning anything (no syntax
+    // probe either) and without echoing command text or secret_env values.
+    return JSON.stringify({ error: "service_unavailable", stderr: "Host tool service is not initialized", exit_code: 126 });
+  },
 };
 
 /** #1552: resolve the current memory-tool dependencies from the execution
@@ -335,27 +362,29 @@ const PRIVATE_WRITE_UNAVAILABLE = {
   message: "Explicit memory storage is unavailable in this runtime. Do not retry this call.",
 };
 
-const EDIT_UNAVAILABLE = {
-  edited: false,
-  code: "private_write_unavailable",
-  retryable: false,
-  message: "Explicit memory editing is unavailable in this runtime. Do not retry this call.",
-};
+/** #1659: pre-dispatch inline guards carry a synthetic requestId — no transport
+ *  request was issued, so no server id exists, but the structured contract
+ *  requires the field to be present. */
+function preDispatchRequestId(): string {
+  return `pre-dispatch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
-  description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering.",
+  description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering. For credentials (classification=3) provide the EXACT value in 'original' and a short descriptive 'label' — never a paraphrase of the value; the label is what you will search by later.",
   parameters: {
     type: "object",
     properties: {
       translated: { type: "string", description: "Memory content in English" },
-      original: { type: "string", description: "Memory content in original language (if not English)" },
+      original: { type: "string", description: "Memory content in original language (if not English). For classification=3 this is the exact credential value — required." },
       type: { type: "string", enum: ["fact", "preference", "decision", "experience", "skill", "relationship", "goal"], description: "Memory type" },
       emotion: { type: "integer", description: "Emotion score -5 to +5 (0=neutral)" },
       confidence: { type: "integer", description: "Confidence 1-5 (3=default)" },
-      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string, never paraphrase, never wait for Dreamy)" },
+      classification: { type: "integer", minimum: 0, maximum: 3, description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string in 'original', never paraphrase, never wait for Dreamy)" },
+      label: { type: "string", description: "Required for classification=3: a short descriptive label that does NOT contain the value (e.g. \"OpenRouter API key\"). Searched via secret_find." },
+      keyword: { type: "string", description: "Optional for classification=3: non-sensitive retrieval keyword." },
     },
-    required: ["translated", "type"],
+    required: ["type"],
   },
   async execute(args, context): Promise<string> {
     // #1552 R1: execution-time allowlist — a forged or direct call with any
@@ -364,19 +393,48 @@ const memoryStoreTool: ToolDefinition = {
     if (sessionType !== "A" && sessionType !== "D") {
       return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
     }
+    // #1660: class-3 stores are Main-only — a Dreamy session cannot mint
+    // credentials, matching secret_find's own session-type gate.
+    const rawClassification = args["classification"];
+    const classification = rawClassification === undefined || rawClassification === null || stringValue(rawClassification).trim() === ""
+      ? 1
+      : Number(rawClassification);
+    if (!Number.isSafeInteger(classification) || classification < 0 || classification > 3) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "classification must be an integer from 0 to 3" });
+    }
+    const isSecret = classification >= 3;
+    if (isSecret && sessionType !== "A") {
+      return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
+    }
     const deps = memoryDeps(context);
     if (!deps || !deps.runtime.supports("instantStore")) {
       return JSON.stringify(PRIVATE_WRITE_UNAVAILABLE);
     }
     const userId = context?.userId ?? getMasterUserId();
+    const label = stringValue(args["label"] ?? "").trim();
+    if (isSecret && !label) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "class-3 memory_store requires a descriptive label that does not contain the value" });
+    }
+    // #1660: at class 3, original is the exact value (required) and the
+    // `original ?? translated` fallback must NOT apply — otherwise the label
+    // silently becomes the value. The runtime's sealed projection encrypts it.
+    const original = stringValue(args["original"]);
+    if (isSecret && !original) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "class-3 memory_store requires the exact credential value in 'original'" });
+    }
+    if (!isSecret && !stringValue(args["translated"]).trim()) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "memory_store requires translated content" });
+    }
     const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
       userId,
-      contentEn: stringValue(args["translated"]),
-      contentOriginal: stringValue(args["original"] ?? args["translated"]),
+      contentEn: isSecret ? label : stringValue(args["translated"]),
+      contentOriginal: isSecret ? original : stringValue(args["original"] ?? args["translated"]),
       memoryType: stringValue(args["type"] ?? "fact"),
       emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
       confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-      classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+      classification,
+      sealedLabel: isSecret ? label : undefined,
+      sealedKeyword: isSecret ? optionalStringValue(args["keyword"]) : undefined,
     });
 
     // #1552 R2/R5: Main reserves exactly once before the first attempt; the
@@ -407,46 +465,77 @@ const memoryStoreTool: ToolDefinition = {
     }
     try {
       const result = await storeOnce();
-      // #1552 R3/R5: only a final stored:true commits the reservation; a
-      // definitively unsuccessful write releases it so it does not count.
-      if (reservationId) {
-        if (result.stored === true) deps.quota.commit(reservationId);
-        else deps.quota.release(reservationId);
-      }
-      return JSON.stringify(result);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // #706: FTS corruption self-heal — rebuild indexes and retry once,
-      // still inside the same reservation.
-      if ((msg.includes("fts5") || msg.includes("corruption")) && deps.runtime.supports("rebuildFts")) {
+
+      // #706/#1659: FTS corruption self-heal may run only for a definitive
+      // typed pre-dispatch FTS failure — never from a substring match on an
+      // unknown post-dispatch message. The reservation stays pending across
+      // the retry and is finalized exactly once by the exhaustive rule.
+      if (!result.stored
+        && isDefinitivePreDispatchFailure(result.code, result.stage)
+        && /fts5|corruption/i.test(result.message)
+        && deps.runtime.supports("rebuildFts")) {
         try {
           await deps.runtime.rebuildFtsIndexes();
           logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
-          const result = await storeOnce();
-          if (reservationId) {
-            if (result.stored === true) deps.quota.commit(reservationId);
-            else deps.quota.release(reservationId);
-          }
-          return JSON.stringify(result);
-        } catch (retryErr) { /* fall through */ }
+          const retried = await storeOnce();
+          if (reservationId) finalizeStoreQuota(deps, reservationId, retried);
+          return JSON.stringify(retried);
+        } catch (retryErr) { /* fall through to the finalize below */ }
       }
-      // Known thrown failure after all retry handling: release the slot.
-      if (reservationId) deps.quota.release(reservationId);
-      return JSON.stringify({ error: msg });
+
+      // #1552 R3/R5: only a final stored:true commits the reservation.
+      // Definitive failures (typed rejection, proven pre-dispatch refusal)
+      // release it so it does not count; an outcome-unknown store commits
+      // conservatively because the mutation may have been accepted (#1659).
+      if (reservationId) finalizeStoreQuota(deps, reservationId, result);
+      return JSON.stringify(result);
+    } catch (err) {
+      // An unclassified thrown error after invoking the client may have
+      // committed: commit the reservation conservatively and surface
+      // `unknown` — never release on the assumption it failed.
+      if (reservationId) deps.quota.commit(reservationId);
+      return JSON.stringify({ error: boundedMemoryToolError(err) });
     }
   },
 };
 
+/**
+ * #1659: exhaustive quota finalization for one memory-store attempt.
+ * - success -> commit;
+ * - definitive rejection / proven pre-dispatch refusal -> release;
+ * - outcome_unknown (or anything else) -> commit conservatively.
+ */
+function finalizeStoreQuota(
+  deps: import("../memory-store-quota.js").MemoryToolDependencies,
+  reservationId: string,
+  result: import("../memory-runtime.js").InstantStoreResult,
+): void {
+  if (result.stored === true) {
+    deps.quota.commit(reservationId);
+    return;
+  }
+  if (isDefinitivePreDispatchFailure(result.code, result.stage)) {
+    deps.quota.release(reservationId);
+    return;
+  }
+  deps.quota.commit(reservationId);
+}
+
 const memoryRecallTool: ToolDefinition = {
   name: "memory_recall",
-  description: "Search memories by keyword or semantic query. Returns relevant stored memories.",
+  description: "Search long-term memory for relevant facts, preferences, and past conversations. Returns the owner packet: status, owner-rendered text, and source-safe refs. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored. Preserve evidence from earlier successful reads; a cautionary lesson is not a contradiction. Distinguish a remembered joke from an actual event and correct claims only when evidence warrants it. When your answer uses returned memories, end that answer or text segment with [SUPPORT: ref, ...], using only their ref values. Do not declare unused results.",
   parameters: {
     type: "object",
     properties: {
-      query: { type: "string", description: "Search query" },
-      limit: { type: "integer", description: "Max results (default 10)" },
+      // #1928 M4 — explicit tools select normal/full; the keywords cross
+      // verbatim as the anchor. The free-text query is the deprecated
+      // alternative, split into keywords at arrival.
+      keywords: { type: "array", items: { type: "string" }, description: "Discrete search keywords (preferred). Non-empty, non-blank strings; wins over query." },
+      query: { type: "string", description: "Deprecated: free-text query, split into keywords at arrival. Prefer keywords." },
+      profile: { type: "string", enum: ["recall_normal", "recall_full"], description: "Deliberate breadth: normal precision (default) or full expansion." },
+      limit: { type: "integer", description: "Max results (default 10, bounded by the profile ceiling)" },
     },
-    required: ["query"],
+    required: [],
   },
   async execute(args, context): Promise<string> {
     const runtime = memoryDeps(context)?.runtime;
@@ -456,66 +545,65 @@ const memoryRecallTool: ToolDefinition = {
     try {
       const t0 = Date.now();
       const userId = context?.userId ?? getMasterUserId();
-      const { loadUsers } = await import("../user-registry.js");
-      const userEntry = loadUsers().byUserId.get(userId);
+      // #1790: peer identities resolve their disclosure ceiling from
+      // peers.json via the single cap helper — never from the user registry
+      // (peer:* ids have no UserEntry) and never from model arguments
+      // (the schema exposes no identity/capability fields). Peer lookup takes
+      // precedence even if a users.json entry happens to use that ID.
+      // Human path is unchanged.
+      let maxClassification: number;
+      if (userId.startsWith("peer:")) {
+        const { getPeerRecallCap } = await import("../peer-config.js");
+        maxClassification = getPeerRecallCap(userId.slice("peer:".length));
+      } else {
+        const { loadUsers } = await import("../user-registry.js");
+        const userEntry = loadUsers().byUserId.get(userId);
+        maxClassification = userEntry?.maxClass ?? 1;
+      }
+      // #1928 M4 — explicit tool: deliberate keywords select normal/full.
+      // The keyword contract is unchanged (array wins, non-empty/blanks
+      // rejected); the runtime serves the owner packet with source-safe
+      // refs and owner text. No floors, numeric-ref selection, flag
+      // stripping, or local rendering at this boundary.
+      const rawKeywords = args["keywords"];
+      let terms: string[];
+      if (rawKeywords !== undefined && rawKeywords !== null) {
+        if (!isNonBlankStringArray(rawKeywords)) {
+          return JSON.stringify({ error: "memory_recall: keywords must be a non-empty array of non-blank strings" });
+        }
+        terms = rawKeywords;
+      } else {
+        const rawQuery = args["query"];
+        if (typeof rawQuery !== "string") {
+          return JSON.stringify({ error: "memory_recall: either keywords or query is required" });
+        }
+        const split = rawQuery.match(/[\p{L}\p{N}]+/gu) ?? [];
+        if (split.length === 0) {
+          return JSON.stringify({ error: "memory_recall: query produced no keywords and no keywords were supplied" });
+        }
+        terms = split;
+      }
+      const rawProfile = args["profile"];
+      const profile = rawProfile === undefined || rawProfile === null ? "recall_normal" : rawProfile;
+      if (profile !== "recall_normal" && profile !== "recall_full") {
+        return JSON.stringify({ error: "memory_recall: profile must be recall_normal or recall_full" });
+      }
       const result = await runtime.recall({
-        query: stringValue(args["query"]),
+        // The joined string stays for logging/compatibility; the array below
+        // is the retrieval anchor and is never replaced by this string.
+        query: terms.join(" "),
+        profile,
+        text: terms.join(" "),
+        keywords: terms,
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
-        maxClassification: userEntry?.maxClass ?? 1,
+        maxClassification,
       });
-      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
+      // #1837 — tool-path recall summary (the runtime boundary logs detail).
+      logDebug(TAG, `memory_recall: user=${userId} profile=${profile} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
+      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
       return JSON.stringify(result);
     } catch (err) {
-      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-    }
-  },
-};
-
-const memoryEditTool: ToolDefinition = {
-  name: "memory_edit",
-  description: "Edit an existing memory by ID. Requires the expected_revision from a prior recall call to avoid stale overwrites. Change content, type, emotion, confidence, or classification.",
-  parameters: {
-    type: "object",
-    properties: {
-      memory_id: { type: "integer", description: "Memory ID to edit" },
-      expected_revision: { type: "integer", description: "Semantic revision from the most recent recall read of this memory. Required for safe concurrent edits." },
-      translated: { type: "string", description: "New English content" },
-      original: { type: "string", description: "New original language content" },
-      type: { type: "string", description: "New memory type" },
-      emotion: { type: "integer", description: "New emotion score" },
-      confidence: { type: "integer", description: "New confidence" },
-      classification: { type: "integer", description: "New classification" },
-    },
-    required: ["memory_id", "expected_revision"],
-  },
-  async execute(args, context): Promise<string> {
-    const runtime = memoryDeps(context)?.runtime;
-    if (!runtime || !runtime.supports("editMemory")) {
-      return JSON.stringify(EDIT_UNAVAILABLE);
-    }
-    try {
-      const expectedRevision = parseInt(stringValue(args["expected_revision"] ?? "0"), 10);
-      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
-        return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
-      }
-      const result = await runtime.editMemory({
-        memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
-        expectedRevision,
-        userId: context?.userId ?? getMasterUserId(),
-        contentEn: optionalStringValue(args["translated"]),
-        contentOriginal: optionalStringValue(args["original"]),
-        memoryType: optionalStringValue(args["type"]),
-        emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
-        confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
-        classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
-      });
-      return JSON.stringify(result);
-    } catch (err) {
-      const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
-      if (code === "conflict") {
-        return JSON.stringify({ ok: false, error: "Stale revision: memory was modified since you last read it. Please re-recall and retry.", retryable: false, code: "conflict" });
-      }
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
   },
@@ -535,10 +623,10 @@ const todoTool: ToolDefinition = {
   },
   execute: (args) => {
     const action = stringValue(args["action"] ?? "list");
-    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(stringValue(args["text"]))}`, CLI_TIMEOUT_MS);
-    if (action === "done") return runBash(`abtars-todo done ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-todo remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    return runBash("abtars-todo list", CLI_TIMEOUT_MS);
+    if (action === "add") return runToolCli("abtars-todo", ["add", stringValue(args["text"])]);
+    if (action === "done") return runToolCli("abtars-todo", ["done", stringValue(args["id"])]);
+    if (action === "remove") return runToolCli("abtars-todo", ["remove", stringValue(args["id"])]);
+    return runToolCli("abtars-todo", ["list"]);
   },
 };
 
@@ -618,27 +706,27 @@ const taskTool: ToolDefinition = {
       const result = remediateEscalate(id, ask, undefined);
       return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
     }
-    if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-task remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "pause") return runBash(`abtars-task pause ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "resume") return runBash(`abtars-task resume ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "list") return runToolCli("abtars-task", ["list"]);
+    if (action === "remove") return runToolCli("abtars-task", ["remove", stringValue(args["id"])]);
+    if (action === "pause") return runToolCli("abtars-task", ["pause", stringValue(args["id"])]);
+    if (action === "resume") return runToolCli("abtars-task", ["resume", stringValue(args["id"])]);
     if (action === "run") {
       if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
       const id = stringValue(args["id"]);
       const err = _enqueueCron(id, true);
       return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${id} enqueued for immediate execution` }));
     }
-    let cmd = `abtars-task add --message ${JSON.stringify(stringValue(args["message"]))}`;
-    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(stringValue(args["schedule"]))}`;
-    if (args["type"]) cmd += ` --type ${stringValue(args["type"])}`;
-    if (args["chat_id"]) cmd += ` --chat-id ${stringValue(args["chat_id"])}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    const argv: string[] = ["add", "--message", stringValue(args["message"])];
+    if (args["schedule"]) argv.push("--schedule", stringValue(args["schedule"]));
+    if (args["type"]) argv.push("--type", stringValue(args["type"]));
+    if (args["chat_id"]) argv.push("--chat-id", stringValue(args["chat_id"]));
+    return runToolCli("abtars-task", argv);
   },
 };
 
 const peerSessionTool: ToolDefinition = {
   name: "peer_session",
-  description: "Open or continue a peer-to-peer session with another agent. Messages persist across turns. Use only when the user explicitly asks to contact another agent.",
+  description: "Quick discussion with another agent (lane 1: chat, NOT delegation). Cardless Q&A over the peer route — no Kanban card, no Orc run. For durable work with results, use peer_ask_help instead. Use only when the user explicitly asks to contact another agent.",
   parameters: {
     type: "object",
     properties: {
@@ -650,14 +738,17 @@ const peerSessionTool: ToolDefinition = {
   },
   async execute(args, context) {
     // #1301/#1480 — no relay for a currently authenticated peer-originated Orc run.
+    // #1856: record the correlated denial — the execution boundary is the only
+    // layer that still refuses relay, and the live gate observes this record.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(context)) {
+      auditDeny("peer_session", undefined, context?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", context?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { resolvePeerName } = await import("./peer-resolver.js");
-    const { callPeer } = await import("../peer-client.js");
+    const { callPeer, PeerCallError } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
-    const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
+    const { getOrCreateSession, addTurn, tryBeginTurn, endTurn, isEnded, destroySession } = await import("../peer-sessions.js");
 
     const peerNameRaw = stringValue(args.peer_name).trim();
     const message = stringValue(args.message).trim();
@@ -670,8 +761,15 @@ const peerSessionTool: ToolDefinition = {
     }
     const peerName = resolved.peer;
     const config = loadPeerConfig();
+    const callerId = context?.userId ?? "unknown";
 
-    const session = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName);
+    // #1786: conversation ownership binds caller + peer. Unknown/expired IDs
+    // fail here; only omission allocates. Nothing is sent before this check.
+    const lookup = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName, callerId);
+    if (!lookup.ok) {
+      return JSON.stringify({ error: lookup.message, code: lookup.code, ended: true });
+    }
+    const session = lookup.session;
 
     // Check turn cap before sending
     if (session.messages.length >= 20) {
@@ -679,13 +777,19 @@ const peerSessionTool: ToolDefinition = {
       return JSON.stringify({ session_id: session.id, response: "[SESSION_END] Turn limit reached.", ended: true, reason: "max-turns" });
     }
 
+    // Serialize: one in-flight turn per conversation.
+    if (!tryBeginTurn(session)) {
+      return JSON.stringify({ error: `Conversation ${session.id} already has a turn in flight`, code: "session_busy", session_id: session.id, ended: false });
+    }
+
     addTurn(session, "user", message);
 
-    // Build full conversation for peer (OpenAI messages format)
-    const prompt = session.messages.map(m => `${m.role === "user" ? "You" : "Peer"}: ${m.content}`).join("\n") + "\n\nRespond to the latest message.";
-
     try {
-      const response = await callPeer(peerName, prompt, config.maxHops);
+      // Requester-owned structured history — never flattened role text.
+      const response = await callPeer(peerName, message, config.maxHops, {
+        sessionId: session.id,
+        messages: session.messages.map(m => ({ role: m.role, content: m.content })),
+      });
       addTurn(session, "assistant", response);
       _peerActivityCb?.(`🤖 Agents: ${config.self.name} ↔ ${peerName} session. [turn ${session.messages.length}]`);
 
@@ -694,8 +798,11 @@ const peerSessionTool: ToolDefinition = {
 
       return JSON.stringify({ session_id: session.id, response, ended, reason });
     } catch (err) {
+      const code = err instanceof PeerCallError ? err.code : undefined;
       destroySession(session.id);
-      return JSON.stringify({ error: `peer_session failed: ${err instanceof Error ? err.message : String(err)}`, session_id: session.id, ended: true });
+      return JSON.stringify({ error: `peer_session failed: ${err instanceof Error ? err.message : String(err)}`, code, session_id: session.id, ended: true });
+    } finally {
+      endTurn(session);
     }
   },
 };
@@ -712,8 +819,10 @@ const peerDoorbellTool: ToolDefinition = {
   },
   async execute(args, context) {
     // #1301 — no relay: a peer-originated request must never reach a third peer via us.
+    // #1856: record the correlated denial (see peer_session above).
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(context)) {
+      auditDeny("peer_doorbell", undefined, context?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", context?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { resolvePeerName } = await import("./peer-resolver.js");
@@ -764,6 +873,53 @@ const secretGetTool: ToolDefinition = {
   },
 };
 
+// #1660: owner-only sealed credential discovery. Returns labels + opaque
+// execution-scoped handles — never memory ids or values. Handles are
+// consumable by execute_bash's secret_env in the same execution.
+const secretFindTool: ToolDefinition = {
+  name: "secret_find",
+  description: "Find stored credentials (classification=3) by a descriptive label and return opaque execution-scoped handles. Pass each handle as the value of an ABTARS_SECRET_* variable in execute_bash's secret_env — the value is injected into the child environment only and never shown to you. Never paste a handle into command text you do not own, and never print the resolved value.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Label or keyword to search (e.g. \"OpenRouter API key\")" },
+      limit: { type: "integer", description: "Maximum results (1-25, default 10)" },
+    },
+    required: ["query"],
+  },
+  async execute(args, context): Promise<string> {
+    // #1660: Main-only (trusted session type A) with an active execution;
+    // every other session type — including Dreamy — fails closed.
+    if (context?.sessionType !== "A" || !context.executionId) {
+      return JSON.stringify({ error: "secret_find_not_allowed", reason: "secret_find requires a Main session with an active execution" });
+    }
+    const deps = memoryDeps(context);
+    if (!deps || !deps.runtime.supports("sealedSecrets")) {
+      return JSON.stringify({ error: "sealed_secrets_unavailable", reason: "Sealed secret lookup is unavailable in this runtime." });
+    }
+    const userId = context?.userId ?? getMasterUserId();
+    const query = stringValue(args["query"]).trim();
+    if (!query) return JSON.stringify({ error: "query is required" });
+    const limit = Number.isSafeInteger(args["limit"]) ? Math.min(Math.max(args["limit"] as number, 1), 25) : 10;
+    try {
+      const refs = await deps.runtime.findSealedSecrets({ userId, query, limit });
+      const handles = getSealedSecretHandles();
+      const results = refs.map((ref) => ({
+        label: ref.label,
+        handle: handles.issue({
+          executionId: context.executionId!,
+          userId,
+          memoryId: ref.memoryId,
+          semanticRevision: ref.semanticRevision,
+        }),
+      }));
+      return JSON.stringify({ ok: true, results });
+    } catch (err) {
+      return JSON.stringify({ error: "sealed_find_failed", reason: err instanceof Error ? err.message : String(err) });
+    }
+  },
+};
+
 import { skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 import { getDelegationTools } from "./delegation-tools.js";
@@ -773,7 +929,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, secretFindTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {
@@ -808,20 +964,63 @@ function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
 }
 
 export async function executeToolCall(name: string, args: Record<string, unknown>, context?: ToolExecutionContext & { sandboxPolicy?: SandboxPolicy }): Promise<string> {
+  // #1663: the shared contextual availability policy is enforced BEFORE tool
+  // lookup/invocation can reach a platform callback. It is authoritative even
+  // if schema presentation was bypassed (forged, stale, replayed, or future
+  // transport-level calls). The trusted authorization mode comes only from
+  // the execution context — a model argument can never override it. Denied
+  // attempts are recorded through the existing safe audit mechanism and
+  // never touch delivery claims, delivery_ready, card status, or settlement.
+  const availability = checkToolAvailability(name, context ?? {});
+  if (!availability.allowed) {
+    auditDeny(name, undefined, context?.authorizationMode ?? "unknown", availability.reason!, context?.workOrigin?.rootCardId);
+    // #1680: an Orc intent-surface denial is distinct from the scheduled
+    // delivery denial — the stable reason lets tests and operators tell a
+    // forged/stale project-bound call from an unattended delivery.
+    // #1856: relay refusal lives at the tool handlers (isActiveCardPeerSourced
+    // + auditDeny), not in availability, so no relay branch belongs here.
+    const reason = availability.reason?.includes("no intent kind") === true
+      || availability.reason?.includes("intent surface") === true
+      ? "orc_intent_surface"
+      : availability.reason?.startsWith("Orc invocation context") === true
+        ? "orc_context_invalid"
+        : "unattended_scheduled_delivery";
+    return JSON.stringify({
+      error: `Tool '${name}' is not available in this session`,
+      reason,
+      detail: availability.reason,
+    });
+  }
+
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
+    const origin = resolveAuthorizationOrigin({ workOrigin: context.workOrigin, userId: context.userId });
     const toolCheck = checkTool(name, context.sandboxPolicy);
     if (!toolCheck.allowed) {
       const available = ALL_TOOLS.filter(t => checkTool(t.name, context.sandboxPolicy!).allowed).map(t => t.name);
       auditDeny(name, undefined, "session", toolCheck.reason!);
       return JSON.stringify({ error: `Tool '${name}' not available in this session`, available_tools: available, reason: "peer_sandbox" });
     }
+    // #1854: the peer's own tool surface from peers.json allowedTools, applied
+    // after the session policy so an existing deny keeps its reason code. This
+    // only refuses what the session would otherwise have allowed.
+    const a2aToolCheck = authorizeA2ATool(name, origin);
+    if (!a2aToolCheck.allowed) {
+      return JSON.stringify({ error: a2aToolCheck.reason, reason: "a2a_guardrails" });
+    }
     const filePath = stringValue(args["path"] ?? args["file_path"]);
     if (filePath) {
       const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
-      const pathCheck = checkPath(filePath, mode, context.sandboxPolicy);
+      // #1851: the authorization owner audits path denials itself — no second
+      // sandbox_deny row for the same decision.
+      const pathCheck = authorizePath(
+        filePath,
+        mode,
+        context.sandboxPolicy,
+        // #1854: peer-originated reads/writes are bounded by the A2A whitelist.
+        origin,
+      );
       if (!pathCheck.allowed) {
-        auditDeny(name, filePath, "session", pathCheck.reason!);
         return JSON.stringify({ error: pathCheck.reason, reason: "peer_sandbox" });
       }
     }
@@ -833,18 +1032,37 @@ export async function executeToolCall(name: string, args: Record<string, unknown
 
   // #621: redact abmind_store args based on classification
   const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(stringValue(args.classification ?? args.class ?? "1"), 10) : 0;
-  const auditArgs = storeClass >= 2
+  let auditArgs = storeClass >= 2
     ? `{"class":${storeClass},"[REDACTED]":true}`
     : redactSecrets(JSON.stringify(args));
-  audit({ ts, tool: name, args: auditArgs, userId: context?.userId });
+  // #1660: sealed handle values must never reach the audit sink.
+  if (name === "execute_bash" && typeof auditArgs === "string") {
+    auditArgs = auditArgs.replace(/secret:[A-Za-z0-9_-]+/g, "[SEALED_HANDLE]");
+  }
+  const callId = randomUUID();
+  // #1771: tag in-root executions so pre-pass allows stay traceable in the
+  // audit sink. Audit-only: result shape and diagnostics are untouched.
+  const rootScope = name === "execute_bash" && typeof args["command"] === "string"
+    && isRootScopeAllow(args["command"], context?.executionScope?.cwd);
+  audit({ ts, tool: name, call_id: callId, args: auditArgs, userId: context?.userId, ...(rootScope ? { policy: "root-scope-allow" } : {}) });
 
+  let result: string | undefined;
+  let failed = false;
+  let failure: unknown;
   try {
-    const result = await tool.execute(args, context);
-    audit({ ts, tool: name, status: "ok", chars: result.length });
+    result = await tool.execute(args, context);
     checkSkillRead(name, args);
     return result;
   } catch (err) {
-    audit({ ts, tool: name, status: "error", error: err instanceof Error ? err.message : String(err) });
+    failed = true;
+    failure = err;
     throw err;
+  } finally {
+    const cls = name === "execute_bash"
+      ? classifyBashCompletion(result, failed, failure)
+      : failed
+        ? { status: "error" as const, error: failure instanceof Error ? failure.message : String(failure) }
+        : { status: "ok" as const, chars: typeof result === "string" ? result.length : 0 };
+    audit({ ts, tool: name, call_id: callId, ...cls });
   }
 }

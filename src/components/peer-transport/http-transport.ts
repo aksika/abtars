@@ -4,6 +4,7 @@ import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemoteP
 import { loadPeerConfig, type PeerConfig, type PeerEntry } from "../peer-config.js";
 import { resolvePeerName } from "../transport/peer-resolver.js";
 import { logInfo, logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
 import { createPinnedPeerHttpsAgent } from "./pinned-peer-tls.js";
 import { getPeerWsBroker } from "./peer-ws-broker.js";
@@ -135,7 +136,7 @@ export class HttpTransport implements PeerTransport {
       const { getRemotePiDelivery } = require("./remote-pi-registry.js") as typeof import("./remote-pi-registry.js");
       const delivery = getRemotePiDelivery();
       if (delivery && typeof delivery.drainPeer === "function") {
-        delivery.drainPeer(peer).catch(() => {});
+        delivery.drainPeer(peer).catch(err => logAndSwallow(TAG, "drain remote-Pi pending events", err));
       }
     } catch { /* best effort */ }
   }
@@ -216,6 +217,7 @@ export class HttpTransport implements PeerTransport {
 
   async send(peer: string, message: PeerMessage): Promise<unknown> {
     if (message.type === "ask") {
+      // #1786: lane-1 chat over the WS broker (ephemeral). No direct dial.
       const { callPeer } = await import("../peer-client.js");
       const config = loadPeerConfig();
       return callPeer(peer, message.payload.prompt as string, config.maxHops);
@@ -247,7 +249,7 @@ export class HttpTransport implements PeerTransport {
   }
 
   dispatchInbound(from: string, message: PeerMessage): void {
-    for (const h of this.handlers) { try { h(from, message); } catch {} }
+    for (const h of this.handlers) { try { h(from, message); } catch (err) { logAndSwallow(TAG, "dispatch inbound message to handler", err, "warn"); } }
   }
 
   // ── Peer Help Transport ──────────────────────────────────────────────────

@@ -119,7 +119,7 @@ export class IncrementalBlockDeliveryController {
       // arrive while the adapter is still sending the previous block; those
       // later thoughts must not be dropped or reorder the visible stream.
       const delivery = this._inflight.then(() => this._deliverBlock(clean));
-      this._inflight = delivery.catch(() => {});
+      this._inflight = delivery.catch(() => { /* delivery failures are observed inside _deliverBlock; this only keeps the queue chain alive */ });
     }
     return this._inflight;
   }
@@ -211,7 +211,7 @@ export class IncrementalBlockDeliveryController {
         }),
         Promise.resolve(),
       )
-      .catch(() => {});
+      .catch(() => { /* each block's send failure is already observed inside the reduce body; this only keeps the outer chain settled */ });
   }
 
   private _startTimer(): void {
@@ -234,11 +234,13 @@ export class IncrementalBlockDeliveryController {
   }
 }
 
-/** #1619: exact eligibility for master-chat progress blocks. */
+/** #1619: exact eligibility for master-chat progress blocks.
+ *  #1654: gated additionally on the session's display toggle. */
 export function isIncrementalEligible(opts: {
   role: string | undefined;
   isGroup: boolean;
   platform: string;
+  showThinking: boolean;
 }): boolean {
-  return opts.role === "master" && !opts.isGroup && opts.platform !== "tui";
+  return opts.role === "master" && !opts.isGroup && opts.platform !== "tui" && opts.showThinking;
 }

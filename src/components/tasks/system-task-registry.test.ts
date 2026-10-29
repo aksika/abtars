@@ -20,7 +20,7 @@ function systemEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     priority: "medium",
     delivery: "silent",
     ...overrides,
-  };
+  } as ScheduledTask;
 }
 
 describe("#1321 SystemTaskRegistry", () => {
@@ -30,14 +30,15 @@ describe("#1321 SystemTaskRegistry", () => {
     const reg = getSystemTaskRegistry();
     let seen: ScheduledTask | null = null;
     reg.register("sleep-cycle", (entry) => {
-      seen = entry as ScheduledTask;
+      seen = entry;
       return { status: "ok", detail: "completed" };
     });
     const entry = systemEntry();
     const result = await reg.dispatch(entry, { progress: () => {}, signal: new AbortController().signal });
     expect(result).toEqual({ status: "ok", detail: "completed" });
     expect(seen).not.toBeNull();
-    expect((seen as ScheduledTask).id).toBe("sleep-cycle");
+    const entryId = (seen as ScheduledTask | null)?.id;
+    expect(entryId).toBe("sleep-cycle");
   });
 
   it("forwards the run context (progress + signal) to the handler (#1603)", async () => {

@@ -3,18 +3,11 @@
  * Both ACP and tmux transports implement this contract.
  */
 
-import type { PiDurableContextProvider } from "./pi-core-context.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
-import type { DurableContextIntent } from "../spin-types.js";
 
 /**
  * Per-call request metadata threaded from the pipeline through to the
- * transport. #1529: `durableContextIntent` is the explicit discriminated
- * durable-context intent computed in prompt construction. An omitted intent
- * means the caller is outside the inbound durable pipeline and defaults to
- * not-required — it never implies a failed durable cursor.
- *
- * `userId` replaces the previous positional 4th argument so call-site
+ * transport. `userId` replaces the previous positional 4th argument so call-site
  * readability and tool-execution delivery are preserved.
  */
 export interface PromptRequestContext {
@@ -22,8 +15,6 @@ export interface PromptRequestContext {
   /** #1552: trusted session type from Spin's allocated ManagedSession. Never
    *  selectable by model arguments; transports may use it to scope tools. */
   sessionType?: import("../spin-types.js").SessionType;
-  /** #1529: explicit durable-context intent for Pi transport enforcement. */
-  durableContextIntent?: DurableContextIntent;
   /** #1445: execution ID for Pi-core host correlation. */
   executionId?: string;
   /** #1506: caller-owned absolute execution deadline. */
@@ -47,10 +38,26 @@ export interface PromptRequestContext {
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
   /** #1502 Task 10: task-local cwd/env; never mutate process.env. */
   executionScope?: ToolExecutionScope;
-  /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
-  contextProvider?: PiDurableContextProvider;
+  /**
+   * #1786: per-execution sandbox override from Spin (`spec.tools`). When
+   * present the transport must prefer it over its constructed default for
+   * both tool schema presentation and dispatch. A transport that cannot
+   * honor it must reject before generation.
+   */
+  sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./tool-registry.js").WorkOrigin;
+  /** #1680: host-owned one-shot turn control for the bound Orc turn. The Pi
+   *  transport stops the active turn when its durable intent completes; other
+   *  transports carry it unchanged so the same signal reaches every adapter. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound for the bound Orc turn. When
+   *  present it overrides transport defaults so contract authoring stays at
+   *  its narrow 3-round ceiling while execution turns keep the wide bound. */
+  maxPromptRounds?: number;
   /** #1629: trusted authorization mode derived by Spin from durable Kanban
    *  provenance. Optional so callers outside Spin fail closed at the
    *  ActionGate default; production Spin executions always set it. */

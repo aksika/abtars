@@ -11,6 +11,9 @@
  *  - acp-transport.ts / direct-api-transport.ts / kiro-transport.ts
  *    (transport machinery — sendPrompt is the protocol method, not a model turn
  *    from a caller; it's invoked by spin()'s persistent path)
+ *  - emergency-execution-service.ts (#1468 — the structural fast path calls
+ *    its dedicated AcpTransport.sendPrompt() directly by design; it never
+ *    enters Spin, prompt building, hooks, memory, or compaction)
  *  - subagent-runtime.ts (transports cached here; sendPrompt called by spin()
  *    via the runtime.complete + runtime.session paths)
  *  - idle-save.ts (`/chat save` slash command — a write to the ACP subprocess
@@ -35,6 +38,8 @@ const ALLOWLIST = new Set([
   "src/components/transport/kiro-transport.ts",
   // SubagentRuntime — transports cached here, called via runtime.complete / runtime.session
   "src/components/subagent-runtime.ts",
+  // #1468 structural emergency fast path — dedicated ACP client, direct call
+  "src/components/emergency-execution-service.ts",
   // /chat save slash command — not a model turn
   "src/components/idle-save.ts",
   // Defensive fallback when sessionManager not wired
@@ -89,8 +94,7 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
       const lines = stripped.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+      for (const [i, line] of lines.entries()) {
         if (/\.sendPrompt\s*\(/.test(line)) {
           violations.push(`${rel}:${i + 1}: caller-turn .sendPrompt() call must go through spin(spec): ${line.trim()}`);
         }
@@ -134,6 +138,32 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
       // them from elsewhere means the single supervisor is being bypassed.
       if (/import\s*\{[^}]*\b(?:registerControl|getControl|removeControl|registerWorkerControl|removeControlByAttempt|hasLiveControl)\b/.test(stripped)) {
         violations.push(`${rel}: import of removed module-global execution-control helper`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("transport files never directly import the Spin session manager (#1555)", () => {
+    const TRANSPORT_DIR = join(SRC_DIR, "components", "transport");
+    const violations: string[] = [];
+    for (const file of walkTsFiles(TRANSPORT_DIR)) {
+      const rel = relative(process.cwd(), file);
+      const content = readFileSync(file, "utf-8");
+      // Strip JSDoc block comments and line comments to avoid matching doc text.
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      // Type-only imports are erased at runtime and may reference spin-types.
+      const lines = stripped.split("\n").filter(line => !/^\s*import\s+type\b/.test(line));
+      for (const [i, line] of lines.entries()) {
+        // Direct runtime references to ../spin.js (the concrete session
+        // manager); ../spin-types.js and other type modules do not match.
+        if (
+          /\bfrom\s*["']\.\.\/spin\.js["']/.test(line) ||
+          /\b(?:import|require)\s*\(\s*["']\.\.\/spin\.js["']\s*\)/.test(line)
+        ) {
+          violations.push(`${rel}:${i + 1}: direct runtime import of ../spin.js — inject SessionDispatch instead: ${line.trim()}`);
+        }
       }
     }
     expect(violations).toEqual([]);

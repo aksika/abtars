@@ -17,6 +17,7 @@ export type FailureClass =
   | "operator_cancelled"
   | "policy_or_security_denied"
   | "invalid_contract"
+  | "input_requested"
   | "unknown";
 
 export type Confidence = "observed" | "derived" | "inferred" | "ambiguous";
@@ -53,6 +54,7 @@ export const FAILURE_CLASSES: readonly FailureClass[] = [
   "operator_cancelled",
   "policy_or_security_denied",
   "invalid_contract",
+  "input_requested",
   "unknown",
 ];
 
@@ -303,6 +305,22 @@ export function classify(input: ClassifyInput): ClassifyResult {
     factors.length = 0;
     recommendedActions.length = 0;
     recommendedActions.push("invalid contract — no retry");
+  }
+
+  // #1638 input_requested — highest precedence, unconditional, applied last.
+  // A live answerable question dominates every other signal (including a
+  // nonzero exit or failed verification, which are consequences of the
+  // worker stopping to ask). `review_required`, never `needs_input`: the
+  // decision must admit Orc's answer-retry (retry-store.ts:246) and must
+  // never fall through to automatic retry with no answer.
+  if (input.envelope?.error?.code === "INPUT_REQUESTED") {
+    primary = "input_requested";
+    confidence = "observed";
+    retryability = "review_required";
+    stableCodes.push("input_requested");
+    factors.length = 0;
+    recommendedActions.length = 0;
+    recommendedActions.push("live question pending — Orc must answer before retry");
   }
 
   const attemptId = input.attempt_id;

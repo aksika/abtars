@@ -3,19 +3,26 @@ process.umask(0o077);
 import { reloadSecrets } from "./boot/env.js";
 import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
-import { logInfo } from "./components/logger.js";
+import { logInfo, logError, flushLogs } from "./components/logger.js";
 import { resetAbmindCache } from "./utils/abmind-lazy.js";
+import { writeOwnedExitFields } from "./components/transport/bridge-lock-transport.js";
 
 initEnv();
 
 import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateBridgeLock } from "./supervisor/identity.js";
+import { validateBridgeLock, potentialHomeBridgeProcesses } from "./supervisor/identity.js";
 
 // Duplicate-bridge gate runs BEFORE the circuit breaker: a duplicate bridge
 // must exit without touching rollback counters or release links (R6).
+// #1711 R3: boot follows the same zero-process rule as the watchdog — only a
+// complete enumeration proving zero OTHER could-be-same-home processes
+// authorizes this boot to proceed. A live process behind a corrupt lock is
+// caught here even when its own lock no longer validates.
+// #1711 R2.1: unattributable relative-spelled processes block loudly — the PID
+// list is printed before exiting; a silent freeze is a spec violation (B13).
 try {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
   const lockPath = join(home, "bridge.lock");
@@ -26,7 +33,29 @@ try {
     console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
     process.exit(1);
   }
-} catch { /* proceed */ }
+  const scope = potentialHomeBridgeProcesses(home);
+  if (!scope.complete) {
+    console.error(`[FATAL] Duplicate gate: process enumeration failed (${scope.reason}) — refusing to start`);
+    process.exit(1);
+  }
+  const others = scope.blockers.filter((p) => p.pid !== process.pid);
+  if (others.length > 0) {
+    const detail = others.map((p) => `PID ${p.pid} (${p.argv.join(" ")})`).join("; ");
+    console.error(`[FATAL] Another bridge process present — refusing to start: ${detail}`);
+    for (const u of scope.unattributable) {
+      console.error(
+        `[FATAL] blocked-unattributable PID ${u.pid} (${u.argv.join(" ")}): ${u.reason} — this process predates the canonical spawn target; restart or terminate it to restore supervision`,
+      );
+    }
+    process.exit(1);
+  }
+} catch (err) {
+  // The duplicate gate is an authorization boundary. An unexpected read or
+  // predicate failure is uncertainty, not permission to start beside a process.
+  const detail = err instanceof Error ? err.message : String(err);
+  console.error(`[FATAL] Duplicate gate failed closed: ${detail}`);
+  process.exit(1);
+}
 
 checkCircuitBreaker();
 
@@ -36,20 +65,25 @@ process.on("uncaughtException", (err) => {
     console.error(`[WARN] Suppressed spawn ENOENT (binary not found, bridge continues): ${e.syscall} — ${e.message}`);
     return;
   }
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL uncaught exception`, err); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);
 });
 
 process.on("exit", (code) => {
   const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL exit code=${code}`, stack); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
   try {
-    const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-    const lockPath = join(home, "bridge.lock");
-    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
-    lock.lastExitCode = code;
-    lock.lastExitAt = Date.now();
-    writeFileSync(lockPath, JSON.stringify(lock));
+    // #1711 R1: exit fields are bridge-owned — written through the owner gate
+    // so a non-owner process can never forge them. Warn-only; never masks exit.
+    writeOwnedExitFields(code, Date.now());
   } catch { /* lock missing/corrupt — do not mask exit */ }
 });
 
@@ -61,6 +95,10 @@ process.on("unhandledRejection", (reason) => {
     console.error(`[WARN] Suppressed ACP rejection (transport will reinit): ${msg}`);
     return;
   }
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL unhandled rejection`, reason); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[FATAL] Unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : reason}`);
   process.exit(1);
 });

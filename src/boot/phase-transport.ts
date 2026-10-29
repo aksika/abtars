@@ -1,5 +1,5 @@
 import type { ModelCandidate } from "../components/transport/model-candidates.js";
-import { buildCandidates } from "../components/transport/model-candidates.js";
+import { resolveCandidateAuth } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -27,36 +27,40 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1311 C8: warm pi-ai's catalog before buildTransport() resolves agents — resolveAgent is a
   // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
-  const { anyProviderUseProviderLib } = await import("../components/transport-config.js");
-  if (anyProviderUseProviderLib()) {
-    const { loadPiModels } = await import("../components/transport/pi-catalog.js");
+  const { anyApiProviderConfigured } = await import("../components/transport-config.js");
+  if (anyApiProviderConfigured()) {
+    const { loadPiModels, logUnmappedProviderOnce, mapProviderName } = await import("../components/transport/pi-catalog.js");
     await loadPiModels();
+    // #1747: surface configured api providers with no pi mapping so the
+    // models.json fallback is observable instead of silently skipped.
+    const { loadTransport } = await import("../components/transport-config.js");
+    for (const [name, p] of Object.entries(loadTransport()?.providers ?? {})) {
+      if (p.transport === "api" && !mapProviderName(name)) logUnmappedProviderOnce(name);
+    }
+    // #1746: capture pi's thinking clamp before buildTransport() constructs
+    // PiCoreTransport — resolveCandidateModel() clamps synchronously in the
+    // constructor (#1619), so the clamp must already be populated. The same
+    // boot-order invariant the #1311 C8 catalog warm above carries: a sync
+    // hot path reads a warm populated here.
+    const { ensurePiThinkingClamp } = await import("../components/transport/pi-ai-adapter.js");
+    await ensurePiThinkingClamp();
   }
 
   await buildTransport(ctx);
 
-  // Docker detection (#478)
-  const { isDockerActive, isSeatbeltActive } = await import("../components/guardrails.js");
-  if (isDockerActive()) {
-    const { dockerAvailable } = await import("../components/sandbox-runtime.js");
-    if (dockerAvailable()) {
-      ctx.sandboxEnabled = true;
-      logInfo("main", "🐳 Docker mode active — W/B/C sessions will run in Docker containers");
-    } else {
-      logWarn("main", "SECURITY_MODE=docker but Docker not available — falling back to seatbelt");
-    }
+  // #1851: seatbelt/docker are accepted mode values but their OS containment
+  // is not wired (#1758), so they run as guardrails. Say so instead of
+  // claiming an active sandbox.
+  const { resolveSecurityMode } = await import("../components/authorization.js");
+  const securityMode = resolveSecurityMode();
+  if (securityMode.fallback) {
+    logWarn("main", `SECURITY_MODE=${securityMode.configured} — OS containment not wired, falling back to guardrails`);
   }
 
-  // Seatbelt detection (#906)
-  if (isSeatbeltActive()) {
-    const { isAvailable, mechanismName } = await import("../components/seatbelt/index.js");
-    if (isAvailable()) {
-      ctx.seatbeltActive = true;
-      logInfo("main", `🛡️ Seatbelt active — bash commands sandboxed via ${mechanismName()}`);
-    } else {
-      logWarn("main", `SECURITY_MODE=seatbelt but ${mechanismName()} not available — falling back to guardrails`);
-    }
-  }
+  // #1854: the A2A guardrail ceiling applies independently of SECURITY_MODE,
+  // so the operator sees it even when the mode is off.
+  const { logA2AWhitelist } = await import("../components/a2a-guardrails.js");
+  logA2AWhitelist();
 
   // Initialize context-window-start for all known users
   if (memoryConfig.memoryEnabled) {
@@ -93,7 +97,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (!loadResult.ok && loadResult.state === "invalid") {
     if (ctx.transport) {
       logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — keeping existing transport alive`);
-      return "ran";
+      return "skipped";
     }
     logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — running transportless (primary unchanged, .env fallback not activated)`);
     ctx.transport = null;
@@ -147,7 +151,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     setTimeout(() => {
       import("../components/notification.js").then(({ sendNotification }) =>
         sendNotification(ctx, `⚠️ transport.json missing, no backup. Running emergency model: ${fb.model}. Fix: /update deploy`))
-        .catch(() => {});
+        .catch(err => logAndSwallow("main", "emergency-mode transport notification", err));
     }, 10_000);
   } else {
     // transport.json valid — walk primary + fb chain
@@ -158,14 +162,21 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       logWarn("main", `${prof!.model}: ${compat.reason} — trying fallbacks`);
     }
     const validation = compat.ok ? validateProviderReady(prof!.providerName, prof!.provider, getEnv()) : null;
-    if (validation?.ok) {
+    // #1757: Pi-managed entries pass sync validation on shape; confirm live
+    // Pi auth here so an unconfigured login never becomes the transport.
+    const { checkPiManagedSelection } = await import("../components/transport/pi-runtime.js");
+    const piGate = validation?.ok ? await checkPiManagedSelection(prof!.providerName, prof!.provider) : null;
+    if (validation?.ok && (!piGate || piGate.ok)) {
       logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
       resolved = prof;
     } else {
       if (!compat.ok) logDebug("main", `${prof!.model}: skipping (incompatible pair)`);
-      else if (validation) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      else if (piGate && !piGate.ok) logDebug("main", `Model init failed: ${prof!.model} — ${piGate.reason}`);
+      else if (validation && !validation.ok) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
       if (!compat.ok) logWarn("main", `${prof!.model}: incompatible with ${prof!.providerName} — trying fallbacks`);
-      else logWarn("main", `${prof!.model}: ${validation!.reason} — trying fallbacks`);
+      else if (piGate && !piGate.ok) logWarn("main", `${prof!.model}: ${piGate.reason} — trying fallbacks`);
+      else if (validation && !validation.ok) logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      else logWarn("main", `${prof!.model}: selection failed — trying fallbacks`);
       // Walk fallback chain
       for (const fb of prof!.fallbacks) {
         const fbCompat = validateModelProviderPair(fb.model, fb.provider);
@@ -178,6 +189,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         if (!fbResolved) continue;
         const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
         if (fbVal.ok) {
+          const fbGate = await checkPiManagedSelection(fbResolved.providerName, fbResolved.provider);
+          if (!fbGate.ok) {
+            logDebug("main", `Fallback init failed: ${fbResolved.model} — ${fbGate.reason}`);
+            logWarn("main", `${fbResolved.model}: ${fbGate.reason} — trying next`);
+            continue;
+          }
           logDebug("main", `Fallback init OK: ${fbResolved.model} via ${fbResolved.providerName}`);
           resolved = fbResolved;
           break;
@@ -192,7 +209,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const tried = [prof!.model, ...prof!.fallbacks.map(f => f.model)].join(", ");
       if (ctx.transport) {
         logError("main", `All models failed init (${tried}) — keeping existing transport up`);
-        return "ran";
+        return "skipped";
       }
       logError("main", `All configured models failed init (${tried}). Fix transport.json or use /emergency`);
       logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
@@ -201,16 +218,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
-  // #367 — if existing transport is up and new config rebuild needed, keep old on error
-  // (This path is only hit via /reset rebuild, not boot)
-
-  // Destroy old (if any) — now that we know the new config is valid
-  if (ctx.transport) {
-    try { await ctx.transport.destroy(); } catch (err) {
-      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    ctx.transport = null;
-  }
+  // #1573: transactional replacement. The candidate is constructed and
+  // initialized before the working transport is destroyed: a rejected
+  // candidate is cleaned up on its own and the old instance (with all
+  // downstream references) stays active and wired. Only at initial boot (no
+  // old transport) does the typed rejection escape for degraded-boot reporting.
+  const previousTransport = ctx.transport;
 
   if (resolved.provider.transport === "tmux") {
     const defaults = tc?.transportDefaults?.tmux;
@@ -222,66 +235,52 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     );
   } else if (resolved.provider.transport === "api") {
     const { PiCoreTransport } = await import("../components/transport/pi-core-transport.js");
-    const { ModelHealthRegistry } = await import("../components/transport/model-health-registry.js");
+    // #1746: buildTransport() also owns the /reset replacement path, which
+    // bypasses phaseTransport()'s boot warm. Populate Pi's clamp at the actual
+    // construction boundary so the synchronous constructor status is truthful.
+    const { ensurePiThinkingClamp } = await import("../components/transport/pi-ai-adapter.js");
+    await ensurePiThinkingClamp();
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
+    // #1757: Pi-managed providers resolve no key here; the mode rides the
+    // candidate so dispatch authenticates from Pi's runtime at request time.
+    const mainAuth = resolveCandidateAuth(resolved.provider, (name) => getEnv().getApiKey(name), apiKey);
 
-    const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
-      const tcWithFb = tc && tcRa ? { ...tc, routes: { ...tc.routes, [tcActiveRoute!]: { agents: { ...tcRa.agents, _fallback: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
-      const fbResolved = tc ? resolveAgent("_fallback", tcWithFb) : null;
-      return {
-        model: fb.model,
-        provider: fbResolved?.providerName ?? fb.provider,
-        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
-        maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
-        apiFormat: fbResolved?.provider.apiFormat,
-        thinking: fbResolved?.provider.thinking,
-        source: "agent_fallback",
-      };
-    });
-    const candidates = buildCandidates({
-      role: "main",
-      configured: {
-        model: resolved.model,
-        provider: resolved.providerName,
-        endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey,
-        maxContext: resolved.contextWindow,
-        apiFormat: resolved.provider.apiFormat,
-        thinking: resolved.provider.thinking,
-        source: "primary",
-      },
-      fallbacks: fallbackCandidates,
-    });
-
-    if (!ctx.modelHealthRegistry) {
-      ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
-    }
-    if (!ctx.modelHealthRegistry.onDemote) {
-      ctx.modelHealthRegistry.onDemote = (model, _endpoint, reason) => {
-        import("../components/transport-config.js").then(({ demoteModel }) => demoteModel(model, reason));
-        import("../components/notification.js").then(({ sendNotification }) =>
-          sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(err => logAndSwallow(TAG, "sendNotification model-demote", err));
-      };
-    }
+    // #1932: exactly one candidate per transport — the boot-selected primary.
+    // Configured route fallbacks are inert for Pi dispatch (tolerant parsing
+    // keeps old configs loading); Pi retries the provider itself.
+    const candidate: ModelCandidate = {
+      model: resolved.model,
+      provider: resolved.providerName,
+      endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+      apiKey: mainAuth.apiKey,
+      authSource: mainAuth.authSource,
+      maxContext: resolved.contextWindow,
+      // #1770: thread the resolved ceiling (pi catalog wins, models.json
+      // floor) so the request carries the model's real limit, not a pin.
+      maxOutput: resolved.maxOutput,
+      apiFormat: resolved.provider.apiFormat,
+      thinking: resolved.provider.thinking,
+      // #1748: every candidate carries its provider-resolved retention.
+      cacheRetention: resolved.provider.cacheRetention ?? "short",
+      source: "primary",
+    };
 
     transport = new PiCoreTransport({
       role: "main",
       // The SOUL bundle is installed by phase-pipeline-deps once memory state
       // is known. The endpoint is transport configuration, never a prompt.
       systemPrompt: "",
-      candidates,
-      healthRegistry: ctx.modelHealthRegistry,
+      candidate,
+      // #1940: Pi owns compaction; the role system prompt survives it, so no
+      // post-compaction bundle refresh is wired.
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
-      maxCandidateRounds: tc?.maxFallbackToolRounds,
-      // #1527: late-bound holder — memory negotiates in parallel; the
-      // composition point (phase-pipeline-deps) populates it afterwards.
-      contextProvider: ctx.durableContextProvider,
+      // #1932: candidate rotation is retired — the single configured
+      // candidate serves every turn, so maxFallbackToolRounds is inert.
       // #1552: late-bound memory-tool deps holder — same composition point.
       memoryToolDeps: ctx.memoryToolDependencies,
     });
-    logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
+    logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model})`);
     // #1572: the api route loads Pi into the abtars process — warn once when it
     // is above the pinned line so drift is visible in the boot log.
     const piRes = resolvePiInstallation();
@@ -290,31 +289,38 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       if (pinWarning) logWarn("main", pinWarning.split("\n").join("; "));
     }
   } else {
-    // Kill stale ACP processes from previous run (#921, #1012)
-    const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
-    const stalePids = readAndClearAcpPids();
-    for (const pid of stalePids) {
-      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
-    }
-    if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
-    // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
-    // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
-    try {
-      const { abtarsHome } = await import("../paths.js");
-      const home = abtarsHome();
-      const { readlinkSync } = await import("node:fs");
-      const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
-      let killed = 0;
-      for (const p of candidates) {
-        const pid = parseInt(p, 10);
-        if (!pid || pid === process.pid) continue;
-        try {
-          const cwd = readlinkSync(`/proc/${pid}/cwd`);
-          if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
-        } catch {} // dead, no /proc (macOS), or no permission
+    // Kill stale ACP processes from previous run (#921, #1012). During a
+    // replacement the previous transport is deliberately still live until
+    // the candidate initializes; sweeping ACPs by PID/CWD here would kill the
+    // working transport before the transactional decision is known. Its
+    // destroy() handles the old process after candidate success, and a failed
+    // candidate is cleaned up without touching it.
+    if (!previousTransport) {
+      const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
+      const stalePids = readAndClearAcpPids();
+      for (const pid of stalePids) {
+        try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
       }
-      if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
-    } catch { /* best effort */ }
+      if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
+      // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
+      // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
+      try {
+        const { abtarsHome } = await import("../paths.js");
+        const home = abtarsHome();
+        const { readlinkSync } = await import("node:fs");
+        const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
+        let killed = 0;
+        for (const p of candidates) {
+          const pid = parseInt(p, 10);
+          if (!pid || pid === process.pid) continue;
+          try {
+            const cwd = readlinkSync(`/proc/${pid}/cwd`);
+            if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
+          } catch { /* dead, no /proc (macOS), or no permission — all expected and safe */ }
+        }
+        if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
+      } catch { /* best effort */ }
+    }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("main", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
@@ -324,7 +330,31 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     });
   }
 
-  await transport.initialize();
+  try {
+    await transport.initialize();
+  } catch (err) {
+    // Clean up only the candidate — never the retained working transport.
+    try {
+      await transport.destroy();
+    } catch (cleanupErr) {
+      logWarn("main", `Rejected transport cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+    }
+    if (previousTransport) {
+      logError("main", `Transport replacement rejected: ${err instanceof Error ? err.message : String(err)} — keeping existing transport up`);
+      return "skipped";
+    }
+    throw err;
+  }
+
+  // Candidate passed its readiness gate — destroy the old instance and publish.
+  if (previousTransport) {
+    try {
+      await previousTransport.destroy();
+    } catch (err) {
+      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  ctx.transport = transport;
 
   // SOUL bundle set in phase-pipelineDeps (after memory state resolved) #998
 
@@ -332,7 +362,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);
   }
 
-  ctx.transport = transport;
   // Flush message queues on reinit — model lost context
   if ("onReinit" in transport) {
     (transport as any).onReinit = () => {
@@ -349,40 +378,79 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.modelProvider = resolved.providerName;
   ctx.fallbackChain = resolved.fallbacks.map((f: { model: string }) => f.model);
 
-  if (ctx.modelHealthRegistry) {
-    ctx.runtime.setRegistry(ctx.modelHealthRegistry);
-  }
-  ctx.runtime.setMainTransport(transport);
   ctx.runtime.setSessionManager(ctx.sessionManager);
   if (ctx.sandboxEnabled) ctx.runtime.setSandboxEnabled(true);
+
+  // #1555: transport-facing session boundary. Orc tools need Worker spawning
+  // regardless of the async-delegation flag; delegation stays under its gate.
+  const { setOrcToolsDeps } = await import("../components/transport/orc-tools.js");
+  setOrcToolsDeps(ctx.sessionManager);
 
   // Wire async delegation tools (#570)
   if (getEnv().enableAsyncDelegation) {
     const { setDelegationDeps } = await import("../components/transport/delegation-tools.js");
-    setDelegationDeps(ctx.runtime);
+    setDelegationDeps(ctx.runtime, ctx.sessionManager);
   }
 
   logInfo("main", "✓ Transport ready");
 
-  // Wire ActionGate for auth-required commands
+  // Wire ActionGate for auth-required commands (owned by HostToolService below)
   const { join } = await import("node:path");
   const { abtarsHome } = await import("../paths.js");
   const { ActionGate } = await import("../components/action-gate.js");
-  const { setActionGate } = await import("../components/transport/tool-registry.js");
   const authDir = join(abtarsHome(), "auth");
   ctx.actionGate = new ActionGate(authDir);
-  setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
+  // REQUIREMENT: the 3 allowed directories stay prompt-free by default —
+  // re-seed the trusted-root bash-auth allows on every boot (hence every
+  // update/restart). Idempotent: existing rules are never duplicated and a
+  // user's own deny always keeps precedence (see ensureSeededDefaults).
+  const seeded = ctx.actionGate.ensureSeededDefaults();
+  if (seeded.length > 0) logInfo("main", `🔓 Seeded ${seeded.length} trusted-root bash-auth allows`);
 
-  // #906: Wire seatbelt into tool-registry
-  if (ctx.seatbeltActive) {
-    const { setSeatbelt } = await import("../components/transport/tool-registry.js");
-    const { getPolicy } = await import("../components/seatbelt/index.js");
-    const home = abtarsHome();
-    const policy = getPolicy("A", join(home, "workspace"), home); // Main session policy
-    setSeatbelt(true, policy);
-    logDebug("main", "🛡️ Seatbelt wired to tool-registry");
+  // #1660: the shared host bash service + sealed handle store used by PiCore
+  // and ACP. Resolution is late-bound to the memory runtime holder, so the
+  // service can be wired before transports exist.
+  const { HostToolService } = await import("../components/host-tool-service.js");
+  const { getSealedSecretHandles, setHostToolService } = await import("../components/transport/tool-registry.js");
+  const sealedHandles = getSealedSecretHandles();
+  const hostToolService = new HostToolService({
+    handles: sealedHandles,
+    actionGate: ctx.actionGate,
+    resolveHandle: async (binding) => {
+      const runtime = ctx.memoryToolDependencies?.current?.runtime;
+      if (!runtime || !runtime.supports("sealedSecrets")) return null;
+      const resolved = await runtime.resolveSealedSecret({
+        userId: binding.userId,
+        memoryId: binding.memoryId,
+        expectedRevision: binding.semanticRevision,
+      });
+      if (!resolved.ok) return null;
+      return { memoryId: binding.memoryId, semanticRevision: resolved.semanticRevision, value: resolved.value };
+    },
+  });
+  setHostToolService(hostToolService);
+  logDebug("main", "🔐 Host tool service wired (sealed handles + shared bash)");
+
+  // #1660: the authenticated local tool socket the ACP stdio proxy forwards
+  // to. Started once; Main ACP sessions get the MCP server definition.
+  const { ensureSealedAcpBridge } = await import("../components/transport/sealed-acp-bridge.js");
+  try {
+    await ensureSealedAcpBridge({
+      hostService: hostToolService,
+      runtimeHolder: {
+        get current() { return ctx.memoryToolDependencies.current?.runtime ?? null; },
+      },
+      handles: sealedHandles,
+    });
+    logDebug("main", "🔌 Sealed tool socket ready for ACP");
+  } catch (bridgeErr) {
+    logWarn("main", `Sealed tool socket failed to start: ${bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr)}`);
   }
+
+  // #1797: the registry Seatbelt setter is deleted with the legacy Bash path.
+  // #1851: seatbelt/docker run as guardrails until #1758 wires the sandbox at
+  // the service boundary; ctx.seatbeltActive/sandboxEnabled stay false.
 
   // #1380: Direct API memory hydration is supplied by the daemon-backed
   // runtime during prompt construction. No abtars-side database or context
@@ -414,15 +482,31 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 /**
  * Rebuild professor transport in place (picks up transport.json changes).
  * Patches downstream references that captured the old transport (pipelineDeps, idleSave).
+ * A `skipped` result means the working transport was retained — downstream
+ * references must not be rewired and no "rebuilt" claim is printed (#1573).
  */
 export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   logInfo("main", "🔄 Rebuilding transport...");
-  await buildTransport(ctx);
+  const result = await buildTransport(ctx);
+  if (result === "skipped") {
+    logWarn("main", "Transport replacement rejected — existing transport retained");
+    return "skipped";
+  }
   if (ctx.pipelineDeps && ctx.transport) {
     (ctx.pipelineDeps as { transport: IKiroTransport }).transport = ctx.transport;
   }
   if (ctx.idleSave && ctx.transport) {
     (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
+  }
+  // #1699: bridge-owned sessions are the last holder of the old instance.
+  // Rebind them to the rebuilt transport so /models, /status, and the next
+  // persistent turn resolve the new provider.
+  if (ctx.sessionManager && ctx.transport) {
+    try {
+      ctx.sessionManager.rebindBridgeTransports(ctx.transport);
+    } catch (err) {
+      logWarn("main", `Bridge transport rebind failed (sessions keep old attachment): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   logInfo("main", "✓ Transport rebuilt");
   return "ran";

@@ -158,7 +158,7 @@ describe("MemoryStoreQuota #1552", () => {
     const r = quota.reserve("u1");
     expect(r.kind).toBe("reserved");
     quota.close();
-    const raw = new (resolveNativeDep("better-sqlite3") as typeof import("better-sqlite3").default)(dbPath);
+    const raw = new Database(dbPath);
     try {
       const cols = raw.prepare("PRAGMA table_info(memory_store_quota_reservations)").all<{ name: string }>();
       expect(cols.map(c => c.name).sort()).toEqual(["id", "reserved_at_ms", "state", "user_id"]);

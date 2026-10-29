@@ -1,28 +1,47 @@
 /**
  * scheduled-orc-round-limit.ts — #1548 Task 7: Pi production-composition
- * scheduled-project cells.
+ * scheduled-project cells (journey replaced under #1902).
  *
- * Drives the BUILT bridge (bundle/abtars.js) with a real scheduled project task:
- * the task is admitted through the real CronQueue/scheduled runner, the Orc
- * contract-authoring turn runs through the real Pi transport and the loopback
- * scripted provider, and `maxToolRounds=2` reproduces the terminal
- * round-limit failure class. The first cell observes the correlated scheduled
- * run after the failure; the second restarts the built bridge and verifies
- * the same durable run identity is recovered before recording custody
- * evidence. No live provider is required.
+ * Drives the BUILT bridge (bundle/abtars.js) with a real scheduled project
+ * task: the task is admitted through the real CronQueue/scheduled runner, and
+ * its initial planning drains through the real workflow driver into
+ * SpinPlannerBackend, whose S-profile model call reaches the real Pi transport
+ * and the loopback scripted provider. No live provider is required.
+ *
+ * #1902: the planned model stimulus is a deterministic planning failure. The
+ * scripted main candidate answers the scheduled goal with non-proposal text,
+ * so every planning round exhausts its corrections and the runner records an
+ * explicit bounded PlanRejected (plan_revision consumed, round requeued)
+ * under the existing finite policy; the third rejection exhausts the budget
+ * and fails the run with plan_rejected diagnostics. The cells observe that
+ * failure fact, then terminal custody across a bridge restart, through current
+ * workflow obligations and failure facts. The retired supervised-brain Orc
+ * ledger and candidate-B tool-round scripts are gone: production routes
+ * planning to the main candidate, and nothing in current production writes
+ * orc_project_runs rows. Scenario names stay unchanged for matrix/JUnit
+ * continuity.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { TIMEOUTS, type ProviderSummary } from "./contracts.js";
-import { FIXTURE_MODEL_B } from "./bridge-config.js";
+import { FIXTURE_MODEL_A, FIXTURE_MODEL_B } from "./bridge-config.js";
 import { waitFor } from "./child-process.js";
 import type { PiAcceptanceContext } from "./scenarios.js";
 import { resolveNativeDep } from "../../../utils/lazy-require.js";
+import { getRunFromDatabase } from "../../../components/tasks/task-history-store.js";
+import { wrapTaskDatabase } from "../../../components/tasks/kanban-board.js";
 
 export const SCHEDULED_TASK_ID = "scheduled-limit";
-const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
-const SCHEDULED_PROJECT_MARKER = "[SCHEDULED TASK PROJECT —";
+export const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
+/**
+ * #1902: deterministic planning-failure stimulus. Proven non-proposal text
+ * (the planner's parse rejects it, exactly as in the ports unit tests), so
+ * each planning round consumes one plan_revision and requeues instead of
+ * admitting a revision. Never valid JSON: a valid proposal would admit a
+ * revision and dispatch real worker execution in the fixture.
+ */
+export const SCHEDULED_INVALID_PLAN = "not json at all";
 
 /** #1548 R9: bounded scheduled fixture + per-scenario maxToolRounds override. */
 export function installScheduledRoundLimitFixture(ctx: PiAcceptanceContext): void {
@@ -66,13 +85,6 @@ export function installScheduledRoundLimitFixture(ctx: PiAcceptanceContext): voi
   } finally {
     (db as unknown as { close(): void }).close();
   }
-
-  // Per-scenario tool-round override: the round-limit failure class needs
-  // maxToolRounds=2 in the transport config the restarted bridge loads.
-  const transportPath = join(home, "config", "transport.json");
-  const transport = JSON.parse(readFileSync(transportPath, "utf-8")) as { maxToolRounds?: number };
-  transport.maxToolRounds = 2;
-  writeFileSync(transportPath, JSON.stringify(transport, null, 2));
 }
 
 interface BridgeHomeEvidence {
@@ -82,155 +94,448 @@ interface BridgeHomeEvidence {
   terminalOutcome?: string;
   supervisionState?: string;
   workerCardCount: number;
-  providerRoundLimit: boolean;
+  /** #1902: scheduled reservations for the task (cron may reserve more than
+   *  one across an observation; predicates pin the first). */
+  reservationCount: number;
+  /** #1902: workflow runs bound to the observed scheduled run. Exactly one:
+   *  duplicate admission for the same occurrence would surface here. */
+  workflowRunCount: number;
+  /** #1902: workflow state of the observed run. */
+  workflowState?: string;
+  /** #1902: plan_revision budget allowed/consumed — the explicit failure fact. */
+  planRevisionAllowed?: number;
+  planRevisionConsumed?: number;
+  /** #1902: admitted plan revisions (this journey must never admit one). */
+  planRevisionAdmitted: number;
+  /** #1902: last durable read error — never treated as proof of absence. */
+  dbReadError?: string;
 }
 
-function isScheduledSummary(summary: ProviderSummary): boolean {
-  // The task goal is appended after the provider fixture's bounded marker-text
-  // window, but the production Orc header is present near the beginning of
-  // the request. The caller scopes summaries to the current restart before
-  // using this predicate.
-  return summary.markerTexts.some((t) => t.includes(SCHEDULED_PROJECT_MARKER) || t.includes(SCHEDULED_GOAL));
+export type { BridgeHomeEvidence };
+
+export function isScheduledSummary(summary: ProviderSummary): boolean {
+  // #1900: full-request recognition via bounded registered identities.
+  // The synthetic goal is matched in complete message text before preview
+  // truncation, so its offset beyond 300 chars or inside decorated context
+  // no longer matters. Preview substring matching is retired.
+  return summary.matchedMarkers.includes(SCHEDULED_GOAL);
 }
 
 /** Read-only evidence over the bridge home's durable files. */
-function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: ProviderSummary[]): BridgeHomeEvidence {
+export function readBridgeHomeEvidence(ctx: PiAcceptanceContext): BridgeHomeEvidence {
   const home = ctx.abtarsHome;
-  const evidence: BridgeHomeEvidence = { workerCardCount: 0, providerRoundLimit: false };
+  const evidence: BridgeHomeEvidence = { workerCardCount: 0, reservationCount: 0, workflowRunCount: 0, planRevisionAdmitted: 0 };
 
   // #1601: durable run state now lives in the shared task database
   // (task_runs rows); the legacy task-state.json is migrated once at boot.
+  // #1568: the terminal event lives in the bounded task_run_history table.
   const dbPath = join(home, "kanban", "kanban.db");
-  if (existsSync(dbPath)) {
+  if (!existsSync(dbPath)) {
+    evidence.dbReadError = `kanban db missing at ${dbPath}`;
+    return evidence;
+  }
+  try {
+    // Reuse the production native-dependency resolver. The bridge HOME is
+    // isolated, but the dependency itself is the existing host install.
+    const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => {
+      prepare(sql: string): { run(...args: unknown[]): { changes: number; lastInsertRowid: number | bigint }; get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] };
+      exec(sql: string): void;
+      transaction<T>(fn: () => T): () => T;
+    };
+    const db = new Database(dbPath, { readonly: true });
     try {
-      // Reuse the production native-dependency resolver. The bridge HOME is
-      // isolated, but the dependency itself is the existing host install.
-      const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] } };
-      const db = new Database(dbPath, { readonly: true });
-      try {
-        const run = db.prepare("SELECT run_id, card_id, phase FROM task_runs WHERE task_id = ? ORDER BY reserved_at DESC LIMIT 1").get(SCHEDULED_TASK_ID) as { run_id?: string; card_id?: number | null; phase?: string } | undefined;
-        evidence.runId = run?.run_id;
-        evidence.cardId = run?.card_id ?? undefined;
-        evidence.phase = run?.phase;
+      // Pin the FIRST reservation: cron may reserve further occurrences
+      // during an observation, and latest-row selection would flap between
+      // runs. New reservations never disturb the pinned original.
+      const runs = db.prepare("SELECT run_id, card_id, phase FROM task_runs WHERE task_id = ? ORDER BY reserved_at ASC").all(SCHEDULED_TASK_ID) as Array<{ run_id?: string; card_id?: number | null; phase?: string }>;
+      evidence.reservationCount = runs.length;
+      const run = runs[0];
+      evidence.runId = run?.run_id;
+      evidence.cardId = run?.card_id ?? undefined;
+      evidence.phase = run?.phase;
 
-        if (evidence.cardId !== undefined) {
-          const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(evidence.cardId) as { state?: string } | undefined;
-          evidence.supervisionState = sup?.state;
-          const children = db.prepare("SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ?").get(evidence.cardId) as { n: number };
-          evidence.workerCardCount = Number(children?.n ?? 0);
-        }
-      } finally {
-        (db as unknown as { close(): void }).close();
+      // Use the public history codec/API and correlate to the exact
+      // reservation, rather than treating the table as an acceptance API.
+      if (evidence.runId) {
+        const event = getRunFromDatabase(wrapTaskDatabase(db), evidence.runId);
+        evidence.terminalOutcome = event?.outcome;
       }
-    } catch {
-      // db unavailable in the test process — provider evidence still stands
+
+      if (evidence.cardId !== undefined) {
+        const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(evidence.cardId) as { state?: string } | undefined;
+        evidence.supervisionState = sup?.state;
+        const children = db.prepare("SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ?").get(evidence.cardId) as { n: number };
+        evidence.workerCardCount = Number(children?.n ?? 0);
+      }
+
+      // #1902: current-architecture planning facts, read with plain SELECTs
+      // (never a production store, which would migrate the database). A
+      // missing/unreadable fact fails the cell below; it is never treated
+      // as proof of an absent failure or a satisfied plan.
+      if (evidence.runId) {
+        try {
+          const wfRuns = db.prepare(
+            "SELECT run_id, state FROM workflow_runs WHERE scheduled_run_id = ?",
+          ).all(evidence.runId) as Array<{ run_id: string; state: string }>;
+          evidence.workflowRunCount = wfRuns.length;
+          const wf = wfRuns[0];
+          if (wf) {
+            evidence.workflowState = wf.state;
+            const budget = db.prepare(
+              "SELECT allowed, consumed FROM workflow_budgets WHERE run_id = ? AND scope = 'plan_revision'",
+            ).get(wf.run_id) as { allowed?: number; consumed?: number } | undefined;
+            evidence.planRevisionAllowed = budget?.allowed;
+            evidence.planRevisionConsumed = budget?.consumed;
+            const revs = db.prepare(
+              "SELECT COUNT(*) AS n FROM workflow_plan_revisions WHERE run_id = ?",
+            ).get(wf.run_id) as { n: number };
+            evidence.planRevisionAdmitted = Number(revs?.n ?? 0);
+          }
+        } catch (err) {
+          evidence.dbReadError = `workflow facts unreadable: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+    } finally {
+      (db as unknown as { close(): void }).close();
     }
+  } catch (err) {
+    // #1900: database read errors cannot be treated as proof of an absent
+    // terminal event. Record and fail the cell; provider evidence alone is
+    // insufficient.
+    evidence.dbReadError = `kanban db unreadable: ${err instanceof Error ? err.message : String(err)}`;
   }
-
-  const historyPath = join(home, "tasks", "task-history.jsonl");
-  if (existsSync(historyPath)) {
-    const rows = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean).map((l) => {
-      try { return JSON.parse(l) as { taskId?: string; outcome?: string }; } catch { return null; }
-    }).filter((r): r is { taskId?: string; outcome?: string } => r !== null);
-    const terminal = rows.find((r) => r.taskId === SCHEDULED_TASK_ID);
-    evidence.terminalOutcome = terminal?.outcome;
-  }
-
-  // Round-limit class: the scheduled request stream saw two toolCall rounds.
-  const scheduled = providerSummaries.filter(isScheduledSummary);
-  evidence.providerRoundLimit = scheduled.some((s) => s.action === "toolCall") && scheduled.length >= 2;
 
   return evidence;
 }
 
-function enqueueToolRounds(ctx: PiAcceptanceContext, count: number): void {
-  for (let i = 0; i < count; i++) {
+/** Minimal custody facts shared by the terminal-custody predicate and its tests. */
+export interface PlanningCustodyFacts {
+  runId?: string;
+  cardId?: number;
+  workflowRunCount: number;
+  workflowState?: string;
+  planRevisionAllowed?: number;
+  planRevisionConsumed?: number;
+  planRevisionAdmitted: number;
+  supervisionState?: string;
+}
+
+/**
+ * #1902: terminal-custody contract for the planning-failure journey. The
+ * post-restart run must be the same logical job (identities unchanged,
+ * exactly one workflow run for the occurrence), explicitly failed by budget
+ * exhaustion (consumed == allowed, no revision ever admitted), with terminal
+ * settlement projected (supervision blocked). Returns violation strings;
+ * empty means custody holds. Pure so the contract is unit-tested without a
+ * bridge; the cells enforce it against live evidence.
+ */
+export function verifyTerminalCustody(first: PlanningCustodyFacts, second: PlanningCustodyFacts): string[] {
+  const violations: string[] = [];
+  if (!first.runId || !second.runId || first.runId !== second.runId) {
+    violations.push(`run identity changed across restart (${first.runId ?? "none"} -> ${second.runId ?? "none"})`);
+  }
+  if (first.cardId === undefined || second.cardId !== first.cardId) {
+    violations.push(`root card changed across restart (${first.cardId ?? "none"} -> ${second.cardId ?? "none"})`);
+  }
+  if (second.workflowRunCount !== 1) {
+    violations.push(`expected exactly one workflow run for the occurrence, found ${second.workflowRunCount}`);
+  }
+  if (second.workflowState !== "failed") {
+    violations.push(`workflow state ${second.workflowState ?? "none"} — expected failed (plan_rejected exhaustion)`);
+  }
+  if (second.planRevisionAllowed === undefined || second.planRevisionConsumed === undefined ||
+      second.planRevisionConsumed !== second.planRevisionAllowed) {
+    violations.push(`plan_revision not exhausted (consumed=${second.planRevisionConsumed ?? "none"} allowed=${second.planRevisionAllowed ?? "none"})`);
+  }
+  if ((second.planRevisionConsumed ?? -1) < (first.planRevisionConsumed ?? 0)) {
+    violations.push(`plan_revision consumption went backwards (${first.planRevisionConsumed ?? "none"} -> ${second.planRevisionConsumed ?? "none"})`);
+  }
+  if (second.planRevisionAdmitted !== 0) {
+    violations.push(`plan revision admitted (${second.planRevisionAdmitted}) — this journey must never admit one`);
+  }
+  if (second.supervisionState !== "blocked") {
+    violations.push(`supervision ${second.supervisionState ?? "none"} — expected blocked (terminal projection of the failed run)`);
+  }
+  return violations;
+}
+
+/** #1902/#1935: deterministic planning-failure scripts on the route production
+ *  planning actually takes. S-profile planning is routed to the configured main
+ *  candidate; the full profile can leave the previous scenario on either
+ *  fixture model, so both are scripted. The goal marker still restricts matches
+ *  to planner traffic (no worker exists before a plan is admitted), and
+ *  production routing is never changed to feed the fixture. Each script is
+ *  consumed once by one goal-bearing request; exhaustion falls back to
+ *  unscripted 503s, which fail the round in the same direction. */
+function enqueueInvalidPlans(ctx: PiAcceptanceContext, count: number): void {
+  ctx.provider.registerMarker(SCHEDULED_GOAL);
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
+    for (let i = 0; i < count; i++) {
+      ctx.provider.enqueue({
+        candidate,
+        expectation: {
+          candidate,
+          orderedContains: [SCHEDULED_GOAL],
+        },
+        action: { kind: "text", chunks: [SCHEDULED_INVALID_PLAN] },
+      });
+    }
+  }
+}
+
+/** #1900: explicit boot-greeting scripts so a fresh bridge's autonomous
+ *  [SESSION START] turn never consumes a scheduled response and never takes
+ *  a 503 that would mark the candidate unhealthy. Constrained to the boot
+ *  marker so scheduled traffic cannot consume them. */
+function enqueueBootGreeting(ctx: PiAcceptanceContext): void {
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
     ctx.provider.enqueue({
-      // Scheduled project authoring uses the production O session profile,
-      // whose agent is browsie. In this fixture that role resolves to the
-      // fallback candidate B; queue the responses on the route the real Orc
-      // request actually takes rather than changing production routing.
-      candidate: FIXTURE_MODEL_B,
-      expectation: undefined,
-      action: { kind: "toolCall", name: "execute_bash", arguments: { command: "echo round" } },
+      candidate,
+      expectation: {
+        candidate,
+        orderedContains: ["[SESSION START]"],
+      },
+      action: { kind: "text", chunks: ["boot ok"] },
     });
   }
 }
 
-async function waitForScheduledRequest(ctx: PiAcceptanceContext, afterSeq: number): Promise<ProviderSummary[]> {
-  return waitFor(async () => {
-    const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_B).filter((s) => s.seq > afterSeq);
-    return summaries.filter(isScheduledSummary).length >= 2
-      ? summaries
-      : null;
-  }, TIMEOUTS.runMs, `scheduled Orc tool rounds for ${SCHEDULED_TASK_ID}`);
+/** #1900: explicit health-probe scripts for the model's `hi` check. The probe
+ *  is a single `hi` user message; without a script it takes a 503 that marks
+ *  the candidate unhealthy and suppresses the scheduled authoring that follows.
+ *  Constrained to `hi` with excludes so scheduled/PI traffic cannot consume
+ *  them and they cannot conceal unaccepted traffic. */
+function enqueueHealthProbe(ctx: PiAcceptanceContext): void {
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
+    for (let i = 0; i < 2; i++) {
+      ctx.provider.enqueue({
+        candidate,
+        expectation: {
+          candidate,
+          orderedContains: ["hi"],
+          excludes: [SCHEDULED_GOAL, "[SESSION START]", "PI-E2E-", "PI-SMOKE-"],
+        },
+        action: { kind: "text", chunks: ["ok"] },
+      });
+    }
+  }
 }
 
-/** #1548 Task 7 cell A: Orc round-limit failure during a scheduled project. */
+/** Goal-bearing requests on the production planning route after a boundary.
+ *  Planning uses whichever fixture candidate is the configured main; both are
+ *  accepted here because the goal marker exists only on planner traffic before
+ *  any plan is admitted. */
+function scheduledPlanningRequests(summaries: ProviderSummary[], afterSeq: number): ProviderSummary[] {
+  return summaries.filter((s) =>
+    s.seq > afterSeq
+    && (s.candidate === FIXTURE_MODEL_A || s.candidate === FIXTURE_MODEL_B)
+    && isScheduledSummary(s));
+}
+
+/** #1902/#1935: one bounded observation budget after each restart becomes
+ *  ready, covering planning attempts plus explicit failure settlement. The
+ *  deterministic provider may drive the finite policy to terminal failure
+ *  before the first poll; both the mid-redrive fact and the completed
+ *  plan_rejected exhaustion are explicit durable outcomes. A transient
+ *  awaiting_contract state is never required. */
+async function waitForPlanningFailure(
+  ctx: PiAcceptanceContext,
+  afterSeq: number,
+): Promise<{ goalRequests: ProviderSummary[]; evidence: BridgeHomeEvidence }> {
+  return waitFor(async () => {
+    const goal = scheduledPlanningRequests(ctx.provider.summaries, afterSeq);
+    if (goal.length < 2) return null;
+    const evidence = readBridgeHomeEvidence(ctx);
+    if (evidence.dbReadError) return null;
+    if (!evidence.runId || evidence.cardId === undefined) return null;
+    if (evidence.workflowRunCount !== 1) return null;
+    if (evidence.planRevisionAdmitted !== 0) return null;
+    if (evidence.workflowState === "failed") {
+      // Terminal plan_rejected exhaustion: consumed == allowed, projected.
+      if (evidence.planRevisionConsumed === undefined || evidence.planRevisionAllowed === undefined) return null;
+      if (evidence.planRevisionConsumed !== evidence.planRevisionAllowed) return null;
+      if (evidence.supervisionState !== "blocked") return null;
+      return { goalRequests: goal, evidence };
+    }
+    // Mid-redrive: the first rejection is durable and no revision was admitted.
+    if (evidence.supervisionState !== "awaiting_contract") return null;
+    if (evidence.terminalOutcome !== undefined) return null;
+    if ((evidence.planRevisionConsumed ?? 0) < 1) return null;
+    return { goalRequests: goal, evidence };
+  }, TIMEOUTS.scheduledObservationMs, `scheduled planning failure for ${SCHEDULED_TASK_ID} (180s budget)`, () => {
+    // Bounded diagnostics for the timeout — counts and identities only.
+    const goal = scheduledPlanningRequests(ctx.provider.summaries, afterSeq);
+    const evidence = readBridgeHomeEvidence(ctx);
+    return [
+      `afterSeq=${afterSeq} aTotal=${ctx.provider.summariesFor(FIXTURE_MODEL_A).filter((s) => s.seq > afterSeq).length} matched=${goal.length}`,
+      `consumed=${evidence.planRevisionConsumed ?? "none"}/${evidence.planRevisionAllowed ?? "none"} admitted=${evidence.planRevisionAdmitted}`,
+      `runId=${evidence.runId ?? "none"} cardId=${evidence.cardId ?? "none"} wfRuns=${evidence.workflowRunCount} wfState=${evidence.workflowState ?? "none"}`,
+      `supervision=${evidence.supervisionState ?? "none"} terminal=${evidence.terminalOutcome ?? "none"}`,
+      `dbError=${evidence.dbReadError ?? "none"}`,
+    ].join(" ");
+  });
+}
+
+/** #1902: terminal wait before the custody restart. Polls until the observed
+ *  run fails by budget exhaustion. No restart is involved, so no claim-lease
+ *  race can delay settlement past the bound: rounds settle every few seconds
+ *  on the live bridge. */
+async function waitForTerminalFailure(ctx: PiAcceptanceContext): Promise<BridgeHomeEvidence> {
+  return waitFor(async () => {
+    const evidence = readBridgeHomeEvidence(ctx);
+    if (evidence.dbReadError) return null;
+    if (!evidence.runId || evidence.cardId === undefined) return null;
+    if (evidence.workflowRunCount !== 1) return null;
+    if (evidence.workflowState !== "failed") return null;
+    if (evidence.planRevisionConsumed === undefined || evidence.planRevisionAllowed === undefined ||
+        evidence.planRevisionConsumed !== evidence.planRevisionAllowed) return null;
+    if (evidence.planRevisionAdmitted !== 0) return null;
+    if (evidence.supervisionState !== "blocked") return null;
+    return evidence;
+  }, TIMEOUTS.scheduledObservationMs, `scheduled terminal planning failure for ${SCHEDULED_TASK_ID} (180s budget)`, () => {
+    const evidence = readBridgeHomeEvidence(ctx);
+    return [
+      `consumed=${evidence.planRevisionConsumed ?? "none"}/${evidence.planRevisionAllowed ?? "none"} admitted=${evidence.planRevisionAdmitted}`,
+      `runId=${evidence.runId ?? "none"} wfRuns=${evidence.workflowRunCount} wfState=${evidence.workflowState ?? "none"}`,
+      `supervision=${evidence.supervisionState ?? "none"} terminal=${evidence.terminalOutcome ?? "none"}`,
+      `dbError=${evidence.dbReadError ?? "none"}`,
+    ].join(" ");
+  });
+}
+
+/** #1548 Task 7 cell A (#1902 journey): explicit planning failure during a
+ *  scheduled project. The deterministic invalid stimulus makes the first
+ *  planning round exhaust its corrections; the cell observes real planner
+ *  work on the production route plus the explicit bounded failure fact. */
 export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<void> {
-  installScheduledRoundLimitFixture(ctx);
-  enqueueToolRounds(ctx, 8); // covers the authoring retries inside the window
+  enqueueInvalidPlans(ctx, 32); // several rounds of corrections plus restart redrive
+  enqueueBootGreeting(ctx);
+  enqueueHealthProbe(ctx);
   const afterSeq = ctx.provider.requestCount;
-  ctx.bridge = await ctx.restartBridge();
+  // #1935: install the due occurrence only after the predecessor is confirmed
+  // stopped and before the replacement starts. Writing it while the old bridge
+  // is alive lets that generation claim `__plan__` and turns the restart into a
+  // fixture-induced interruption.
+  ctx.bridge = await ctx.restartBridge(() => installScheduledRoundLimitFixture(ctx));
 
-  const summaries = await waitForScheduledRequest(ctx, afterSeq);
-  const evidence = readBridgeHomeEvidence(ctx, summaries);
-  ctx.writeArtifact("scheduled-orc-round-limit.json", JSON.stringify({ evidence, providerSummaries: summaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls, markerTexts: s.markerTexts.slice(0, 2) })) }, null, 2));
+  const observed = await waitForPlanningFailure(ctx, afterSeq);
+  const goalRequests = observed.goalRequests;
+  const evidence = observed.evidence;
+  // Bounded match evidence only — sequence/action/candidate identities, never
+  // complete request text or expanded previews.
+  ctx.writeArtifact("scheduled-orc-round-limit.json", JSON.stringify({
+    evidence: {
+      runId: evidence.runId,
+      cardId: evidence.cardId,
+      supervisionState: evidence.supervisionState,
+      terminalOutcome: evidence.terminalOutcome,
+      workflowRunCount: evidence.workflowRunCount,
+      workflowState: evidence.workflowState,
+      planRevisionAllowed: evidence.planRevisionAllowed,
+      planRevisionConsumed: evidence.planRevisionConsumed,
+      planRevisionAdmitted: evidence.planRevisionAdmitted,
+      reservationCount: evidence.reservationCount,
+    },
+    planningRequests: goalRequests.map((s) => ({ seq: s.seq, action: s.action, candidate: s.candidate })),
+  }, null, 2));
 
-  if (!evidence.providerRoundLimit) {
-    throw new Error(`scheduled-orc-round-limit: round-limit class not observed (summaries: ${JSON.stringify(summaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls })))})`);
+  if (evidence.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit: durable evidence unreadable (${evidence.dbReadError})`);
+  }
+  if (goalRequests.length < 2) {
+    throw new Error(`scheduled-orc-round-limit: no real planner work reached the model boundary (goal requests: ${goalRequests.length})`);
   }
   if (!evidence.runId) {
     throw new Error("scheduled-orc-round-limit: no durable scheduled run reservation");
   }
-  if (evidence.terminalOutcome !== undefined) {
-    throw new Error(`scheduled-orc-round-limit: run settled ${evidence.terminalOutcome} — expected the custody/round-limit observation, not a terminal row`);
+  if (evidence.workflowRunCount !== 1) {
+    throw new Error(`scheduled-orc-round-limit: expected exactly one workflow run for the occurrence, found ${evidence.workflowRunCount}`);
   }
   if (evidence.cardId === undefined) {
     throw new Error("scheduled-orc-round-limit: scheduled run has no root project card");
   }
-  if (evidence.supervisionState !== "awaiting_contract") {
-    throw new Error(`scheduled-orc-round-limit: supervision ${evidence.supervisionState ?? "none"} — expected awaiting_contract (Orc died before authoring)`);
+  if (evidence.planRevisionAdmitted !== 0) {
+    throw new Error(`scheduled-orc-round-limit: plan revision admitted (${evidence.planRevisionAdmitted}) — this journey must fail before custody`);
+  }
+  if (evidence.workflowState === "failed") {
+    // The deterministic stimulus may exhaust the finite policy before the
+    // first poll. That is the completed journey, not a missing observation.
+    if (evidence.planRevisionConsumed === undefined || evidence.planRevisionAllowed === undefined
+      || evidence.planRevisionConsumed !== evidence.planRevisionAllowed) {
+      throw new Error(`scheduled-orc-round-limit: terminal run without exhausted plan_revision (consumed=${evidence.planRevisionConsumed ?? "none"} allowed=${evidence.planRevisionAllowed ?? "none"})`);
+    }
+    if (evidence.supervisionState !== "blocked") {
+      throw new Error(`scheduled-orc-round-limit: terminal run without blocked supervision (${evidence.supervisionState ?? "none"})`);
+    }
+    if (evidence.terminalOutcome !== "failed") {
+      throw new Error(`scheduled-orc-round-limit: workflow failed but task run settled ${evidence.terminalOutcome ?? "none"}`);
+    }
+  } else {
+    if (evidence.terminalOutcome !== undefined) {
+      throw new Error(`scheduled-orc-round-limit: run settled ${evidence.terminalOutcome} — expected the mid-redrive failure fact, not a terminal row`);
+    }
+    if (evidence.supervisionState !== "awaiting_contract") {
+      throw new Error(`scheduled-orc-round-limit: supervision ${evidence.supervisionState ?? "none"} — expected awaiting_contract (no plan admitted yet)`);
+    }
+    if ((evidence.planRevisionConsumed ?? 0) < 1) {
+      throw new Error("scheduled-orc-round-limit: no explicit planning failure recorded (plan_revision unconsumed)");
+    }
   }
 }
 
-/** #1548 Task 7 cell B: the same failure followed by a built-bridge restart. */
+/** #1548 Task 7 cell B (#1902 journey): terminal custody across a restart.
+ *  The run is driven to explicit terminal failure first; only then does the
+ *  bridge restart. A restart can strand an in-flight planning round behind
+ *  its 5-minute claim lease, so custody of a live redrive is not observable
+ *  within a bounded window — terminal custody is: the same logical job,
+ *  explicitly failed, never resurrected or duplicated. */
 export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): Promise<void> {
-  // Cell A intentionally leaves the round-limited project unfinished. Reuse
-  // that durable run here; creating a second scheduled entry while the first
-  // project is still awaiting its contract races the scheduler's Orc capacity
-  // guard and produces an unrelated intent_not_actionable retry.
-  enqueueToolRounds(ctx, 8);
-  const firstAfterSeq = ctx.provider.requestCount;
-  ctx.bridge = await ctx.restartBridge();
+  // #1935: this cell inherits the live generation from the previous cell. The
+  // run is mid-redrive; let the finite planning policy reach terminal failure
+  // in the SAME generation before the custody restart. A restart here would
+  // (correctly) interrupt the run instead, and plan_rejected exhaustion would
+  // no longer be observable.
+  enqueueInvalidPlans(ctx, 32);
 
-  const summaries = await waitForScheduledRequest(ctx, firstAfterSeq);
-  const first = readBridgeHomeEvidence(ctx, summaries);
-  if (!first.runId) {
-    throw new Error("scheduled-orc-round-limit-restart: no durable run before restart");
+  // Settle to terminal BEFORE the custody restart (no lease race: rounds
+  // settle every few seconds on the live bridge).
+  const terminal = await waitForTerminalFailure(ctx);
+  if (terminal.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit-restart: durable evidence unreadable before restart (${terminal.dbReadError})`);
   }
   const beforeRestart = Date.now();
 
-  // Second restart after the failure fact: the same durable run must recover.
-  enqueueToolRounds(ctx, 8);
-  const secondAfterSeq = ctx.provider.requestCount;
+  enqueueInvalidPlans(ctx, 32);
+  enqueueBootGreeting(ctx);
+  enqueueHealthProbe(ctx);
   ctx.bridge = await ctx.restartBridge();
-  const postSummaries = await waitForScheduledRequest(ctx, secondAfterSeq);
-  const second = readBridgeHomeEvidence(ctx, postSummaries);
+  // Immediate state read: terminal facts are monotonic (nothing post-restart
+  // can un-fail the run or un-consume the budget), so no wait is needed and
+  // no claim-lease race applies.
+  const second = readBridgeHomeEvidence(ctx);
   ctx.writeArtifact("scheduled-orc-round-limit-restart.json", JSON.stringify({
     beforeRestart,
-    first: { runId: first.runId, cardId: first.cardId, supervisionState: first.supervisionState },
-    second: { runId: second.runId, cardId: second.cardId, supervisionState: second.supervisionState, terminalOutcome: second.terminalOutcome },
-    providerSummaries: postSummaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls })),
+    first: {
+      runId: terminal.runId, cardId: terminal.cardId, supervisionState: terminal.supervisionState,
+      terminalOutcome: terminal.terminalOutcome, workflowState: terminal.workflowState,
+      planRevisionAllowed: terminal.planRevisionAllowed, planRevisionConsumed: terminal.planRevisionConsumed,
+      planRevisionAdmitted: terminal.planRevisionAdmitted, workflowRunCount: terminal.workflowRunCount,
+      reservationCount: terminal.reservationCount,
+    },
+    second: {
+      runId: second.runId, cardId: second.cardId, supervisionState: second.supervisionState,
+      terminalOutcome: second.terminalOutcome, workflowState: second.workflowState,
+      planRevisionAllowed: second.planRevisionAllowed, planRevisionConsumed: second.planRevisionConsumed,
+      planRevisionAdmitted: second.planRevisionAdmitted, workflowRunCount: second.workflowRunCount,
+      reservationCount: second.reservationCount,
+    },
   }, null, 2));
 
-  if (second.runId !== first.runId) {
-    throw new Error(`scheduled-orc-round-limit-restart: run identity changed across restart (${first.runId} -> ${second.runId ?? "none"})`);
+  if (second.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit-restart: durable evidence unreadable after restart (${second.dbReadError})`);
   }
-  if (second.terminalOutcome !== undefined) {
-    throw new Error(`scheduled-orc-round-limit-restart: run settled ${second.terminalOutcome} after restart — expected the recovered run without a terminal row`);
-  }
-  if (second.supervisionState !== "awaiting_contract") {
-    throw new Error(`scheduled-orc-round-limit-restart: supervision ${second.supervisionState ?? "none"} after restart`);
+  const violations = verifyTerminalCustody(terminal, second);
+  if (violations.length > 0) {
+    throw new Error(`scheduled-orc-round-limit-restart: terminal custody broken across restart: ${violations.join("; ")}`);
   }
 }

@@ -7,10 +7,10 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "./logger.js";
+import { profileCarriesSoulBundle } from "./spin-profiles.js";
 import { randomBytes } from "node:crypto";
-
-import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
-import type { CandidateSpec } from "./transport/model-candidates.js";
+import { realpathSync } from "node:fs";
+import type { ToolExecutionScope } from "./tasks/task-package.js";
 
 const TAG = "runtime";
 
@@ -29,6 +29,8 @@ export interface AgentOpts {
   maxToolRounds?: number;
   /** #1338: call-local observer for live TUI output mirroring. Forwarded to the transport. */
   outputObserver?: import("./session-output-feed.js").OutputObserver;
+  /** #1935: generation-owned cancellation; aborts acquisition and execution. */
+  signal?: AbortSignal;
 }
 
 /** #1361: Per-execution handle for one-shot or continuation-capable LLM calls. */
@@ -70,6 +72,21 @@ interface CachedAgent {
   sessionKey: string;
   /** #1611: immutable candidate policy captured at transport creation. */
   candidatePolicy?: import("./spin-types.js").CandidatePolicy;
+  /** #1807: immutable canonical cwd attested at transport creation. Absent
+   *  means created without a scope — unverified, never a match. */
+  cwdBinding?: string;
+}
+
+/**
+ * #1807: canonicalize an execution cwd. Throws when the directory is
+ * unavailable — callers fail the invocation instead of inheriting daemon cwd.
+ */
+export function canonicalizeCwd(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    throw new Error(`sleep execution cwd unavailable: ${cwd}`);
+  }
 }
 
 const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
@@ -80,12 +97,11 @@ const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
   task: "fresh",
 };
 
-const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
+const DEFAULT_SPAWN_TIMEOUT_MS = 15 * 60_000; // 15 min
 
 export class SubagentRuntime {
   private readonly cache = new Map<string, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
-  private _registry: ModelHealthRegistry | null = null;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Token usage from last complete() call. */
@@ -93,43 +109,11 @@ export class SubagentRuntime {
   private _sessionManager: import("./spin.js").Spin | null = null;
   private _sandboxEnabled = false;
 
-  /** Set shared model health registry (from boot ctx). */
-  setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
-
-  /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
-  setMainTransport(transport: IKiroTransport): void {
-    // #1418: Wire last-successful-Main tracker from the transport. The tracker
-    // stores the complete secret-free candidate tuple (provider/model/endpoint/
-    // maxContext) so specialists can reuse the exact Main candidate that worked.
-    const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
-    if (apiTransport && "lastSuccessfulCandidate" in apiTransport) {
-      this._lastSuccessfulMain = apiTransport.lastSuccessfulCandidate ?? null;
-      if ("onLastSuccessfulChanged" in apiTransport) {
-        apiTransport.onLastSuccessfulChanged = (c: CandidateSpec) => { this._lastSuccessfulMain = c; };
-      }
-    }
-  }
-
-  /** #1418: Last successful Main candidate (complete secret-free tuple) for
-   *  specialist fallback ordering. Null until Main produces a non-empty response. */
-  private _lastSuccessfulMain: CandidateSpec | null = null;
-  get lastSuccessfulMain(): CandidateSpec | null { return this._lastSuccessfulMain; }
-
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
 
   /** Get session manager (may be null before boot completes). */
   get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
-
-  /**
-   * #1527: late-bound durable context provider holder. Set by the boot
-   * composition point once memory is ready; lazy transports created after
-   * that point receive the shared holder.
-   */
-  private _contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
-  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void {
-    this._contextProvider = holder;
-  }
 
   /** #1552: late-bound memory-tool dependencies holder; lazy transports
    *  created after boot composition receive the shared holder. */
@@ -161,117 +145,158 @@ export class SubagentRuntime {
   /** #1361: Open a uniquely-keyed execution handle. Key must be unique per concurrent
    *  execution (use ManagedSession ID for one-shot sessions, not the agent name alone). */
   async openExecution(agent: AgentName, key: string, opts?: AgentOpts): Promise<RuntimeExecution> {
-    const { checkBudget, sendBudgetNotification } = await import("./budget.js");
-    const budgetCheck = checkBudget(agent);
-    if (!budgetCheck.allowed) {
-      const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
-      void sendBudgetNotification(agent, reason);
-      throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
-    }
-
-    const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
-
-    const cached = this.cache.get(key);
-    if (cached && sessionStrategy === "fresh") {
-      await cached.transport.resetSession?.(cached.sessionKey);
-    }
-
-    const cacheKey = key;
-    const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
-    const { transport, model } = entry;
-    const sessionKey = entry.sessionKey;
-
-    // Per-call timeout override
-    if (opts?.timeoutMs && transport.setTimeoutOverride) {
-      transport.setTimeoutOverride(opts.timeoutMs);
-    }
-    // Per-call tool-round circuit breaker override
-    if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-      transport.setMaxToolRoundsOverride(opts.maxToolRounds);
-    }
-
-    let closed = false;
-    let cancelled = false;
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // #1935: the per-call deadline starts at call entry, covering the budget
+    // check, transport acquisition and execution. A call aborted during
+    // acquisition disposes the acquired transport before any send.
     const start = Date.now();
-
-    const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
-
-    const exec: RuntimeExecution = {
-      transport,
-      sessionKey,
-      executionId: execId,
-      ephemeral: sessionStrategy === "fresh",
-      lastUsage: () => transport.lastUsage?.() ?? null,
-
-      send: async (prompt, image, context) => {
-        if (cancelled) throw new Error("Execution cancelled");
-        const response = await transport.sendPrompt(sessionKey, prompt, image, {
-          ...context,
-          executionId: context?.executionId ?? execId,
-        });
-        if (cancelled) throw new Error("Execution cancelled");
-        logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
-        return response ?? "";
-      },
-
-      cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
-        if (closed || cancelled) return;
-        cancelled = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        logDebug(TAG, `${key} exec.cancel (${reason})`);
-        // Each open execution has a unique cache key, so interrupting this
-        // transport cannot cancel a sibling execution. This is required for
-        // ACP and tmux, which do not implement setTimeoutOverride().
-        try {
-          await transport.sendInterrupt(reason);
-        } catch (err) {
-          logAndSwallow(TAG, "exec.cancel", err);
-        }
-      },
-
-      close: async () => {
-        if (closed) return;
-        closed = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-
-        if (sessionStrategy === "fresh") {
-          // Interrupt if still active, destroy transport, remove cache entry
-          if (!cancelled) {
-            try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
-          }
-          try { transport.destroy(); } catch { /* best effort */ }
-          this.cache.delete(cacheKey);
-          logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
-        } else {
-          // Reset overrides — persistent transport stays in cache
-          if (opts?.timeoutMs && transport.setTimeoutOverride) {
-            transport.setTimeoutOverride(null);
-          }
-          if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-            transport.setMaxToolRoundsOverride(null);
-          }
-          logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
-        }
-      },
-    };
-
-    // PiCoreTransport has its own host timer, but ACP and tmux do not expose
-    // a timeout override. Keep this execution-level deadline as the universal
-    // fallback; duplicate cancellation on PiCore is harmless and idempotent.
+    let deadlineExpired = false;
+    let exec: RuntimeExecution | null = null;
+    let acquiredEntry: CachedAgent | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     if (opts?.timeoutMs && opts.timeoutMs > 0) {
       timeoutHandle = setTimeout(() => {
-        void exec.cancel("deadline");
-      }, opts.timeoutMs);
+        deadlineExpired = true;
+        void exec?.cancel("deadline");
+      }, Math.max(1, opts.timeoutMs));
+      timeoutHandle.unref?.();
     }
+    const failIfStopped = (): void => {
+      if (!deadlineExpired && !opts?.signal?.aborted) return;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      throw new Error(deadlineExpired ? "Execution deadline exceeded" : "Execution cancelled");
+    };
+    try {
+      failIfStopped();
+      const { checkBudget, sendBudgetNotification } = await import("./budget.js");
+      const budgetCheck = checkBudget(agent);
+      if (!budgetCheck.allowed) {
+        const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
+        void sendBudgetNotification(agent, reason);
+        throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
+      }
 
-    return exec;
+      const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
+
+      const cached = this.cache.get(key);
+      if (cached && sessionStrategy === "fresh") {
+        await cached.transport.resetSession?.(cached.sessionKey);
+      }
+
+      const cacheKey = key;
+      const existingEntry = this.cache.get(cacheKey);
+      const entry = existingEntry ?? await this.createAgent(agent, opts?.sessionType, key);
+      const acquiredHere = existingEntry === undefined;
+      acquiredEntry = acquiredHere ? entry : undefined;
+      failIfStopped();
+      const { transport, model } = entry;
+      const sessionKey = entry.sessionKey;
+
+      // Per-call timeout override
+      if (opts?.timeoutMs && transport.setTimeoutOverride) {
+        transport.setTimeoutOverride(opts.timeoutMs);
+      }
+      // Per-call tool-round circuit breaker override
+      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+        transport.setMaxToolRoundsOverride(opts.maxToolRounds);
+      }
+
+      let closed = false;
+      let cancelled = false;
+      const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
+
+      exec = {
+        transport,
+        sessionKey,
+        executionId: execId,
+        ephemeral: sessionStrategy === "fresh",
+        lastUsage: () => transport.lastUsage?.() ?? null,
+
+        send: async (prompt, image, context) => {
+          if (cancelled || deadlineExpired) throw new Error("Execution cancelled");
+          const response = await transport.sendPrompt(sessionKey, prompt, image, {
+            ...context,
+            executionId: context?.executionId ?? execId,
+          });
+          if (cancelled || deadlineExpired) throw new Error("Execution cancelled");
+          logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
+          return response ?? "";
+        },
+
+        cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
+          if (closed || cancelled) return;
+          cancelled = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          logDebug(TAG, `${key} exec.cancel (${reason})`);
+          // Each open execution has a unique cache key, so interrupting this
+          // transport cannot cancel a sibling execution. This is required for
+          // ACP and tmux, which do not implement setTimeoutOverride().
+          try {
+            await transport.sendInterrupt(reason);
+          } catch (err) {
+            logAndSwallow(TAG, "exec.cancel", err);
+          }
+        },
+
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+
+          if (sessionStrategy === "fresh") {
+            // Interrupt if still active, destroy transport, remove cache entry
+            if (!cancelled) {
+              try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
+            }
+            try { transport.destroy(); } catch { /* best effort */ }
+            this.cache.delete(cacheKey);
+            logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
+          } else {
+            // Reset overrides — persistent transport stays in cache
+            if (opts?.timeoutMs && transport.setTimeoutOverride) {
+              transport.setTimeoutOverride(null);
+            }
+            if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+              transport.setMaxToolRoundsOverride(null);
+            }
+            logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
+          }
+        },
+      };
+      failIfStopped();
+      return exec;
+    } catch (err) {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      // Acquisition may have completed while the call was already aborted:
+      // dispose a transport created for this call before the caller can use it.
+      if (acquiredEntry && (deadlineExpired || opts?.signal?.aborted)) {
+        try { acquiredEntry.transport.destroy(); } catch { /* best effort */ }
+        this.cache.delete(key);
+      }
+      throw err;
+    }
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy }): Promise<AgentSession> {
+  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy; executionScope?: ToolExecutionScope; sessionType?: import("./spin-types.js").SessionType }): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
-    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy);
+    // #1807: a requested scope must match the transport's recorded creation
+    // binding. Mismatch or unverified binding fails before any provider/tool
+    // work — never falls back, never re-roots in place.
+    const requestedCwd = opts?.executionScope ? canonicalizeCwd(opts.executionScope.cwd) : undefined;
+    const existing = this.cache.get(cacheKey);
+    if (existing) {
+      if (requestedCwd !== undefined) {
+        if (existing.cwdBinding === undefined) {
+          throw new Error(`sleep transport ${cacheKey} has no recorded cwd binding — refusing unverified reuse`);
+        }
+        if (existing.cwdBinding !== requestedCwd) {
+          throw new Error(`sleep transport ${cacheKey} bound to ${existing.cwdBinding}, requested ${requestedCwd} — refusing reuse`);
+        }
+      }
+    } else {
+      await this.createAgent(agent, opts?.sessionType, cacheKey, opts?.candidatePolicy, requestedCwd);
+    }
+    const cached = this.cache.get(cacheKey)!;
     // #1611: the candidate policy is immutable per attached transport. A
     // conflicting request fails closed — it must never silently broaden a
     // configured-only session into a fallback chain.
@@ -283,12 +308,25 @@ export class SubagentRuntime {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(cacheKey);
+        // #1807: identity-fenced release — a stale callback must not evict a
+        // newer entry under the same key or affect another session.
+        if (this.cache.get(cacheKey) === cached) this.cache.delete(cacheKey);
         logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
       get transport() { return cached.transport; },
     };
+  }
+
+  /**
+   * #1807: read the recorded canonical cwd binding for a cached transport.
+   * Returns undefined when absent (no entry, or entry created without scope).
+   * Spin uses this on the already-attached reuse path; absent is unverified,
+   * never a match.
+   */
+  verifyTransportBinding(agent: AgentName, key?: string): string | undefined {
+    const cacheKey = key ? `${agent}:${key}` : agent;
+    return this.cache.get(cacheKey)?.cwdBinding;
   }
 
   /** Fire-and-forget: run complete() in background, deliver result via callback. */
@@ -350,7 +388,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy, workingDir?: string): Promise<CachedAgent> {
     const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
@@ -370,7 +408,7 @@ export class SubagentRuntime {
     // candidate that last produced a non-empty response.
     // #1611: configured-only restricts transport construction to the configured
     // candidate — applied before the first Dreamy prompt, never after the fact.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy);
+    const { transport, model } = await createSubagentTransport(role, this._memoryToolDeps, candidatePolicy, workingDir);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -381,18 +419,24 @@ export class SubagentRuntime {
 
     // #1012: Track PID so boot-time cleanup finds orphans
     if ((transport as any).agent?.pid) {
-      import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(() => {});
+      import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(err => logAndSwallow(TAG, "track ACP pid in bridge lock", err));
     }
 
-    // Inject session-type-appropriate SOUL bundle (#744)
+    // #744/#1940: inject the session-type SOUL bundle into the Pi session
+    // system prompt. Only types whose profile owns a bundle (registry
+    // `soulBundle`) receive one; A/K/S/D keep their existing prompts. The
+    // type must be the real Spin type — inferring from the agent name gives
+    // professor types no bundle and gives browsie's W/O the B identity.
     if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle(resolvedType);
-      if (bundle) (transport as any).setSystemPrompt(bundle);
+      if (profileCarriesSoulBundle(resolvedType)) {
+        const { buildSoulBundle } = await import("./soul-bundle.js");
+        const bundle = buildSoulBundle(resolvedType);
+        if (bundle) (transport as any).setSystemPrompt(bundle);
+      }
     }
 
     const sessionKey = `system:${cacheKey ?? agent}`;
-    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy };
+    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy, cwdBinding: workingDir };
     this.cache.set(cacheKey ?? agent, entry);
     return entry;
   }

@@ -94,6 +94,24 @@ describe("runDevUpdate — build failure", () => {
     expect(calls.filter(c => c.cmd === "bash")).toHaveLength(0);
     expect(calls.filter(c => c.cmd === "node")).toHaveLength(0);
   });
+
+  it("aborts before deployment when the emitted bundle fails its boundary guard", async () => {
+    const ctx = makeCtx();
+    const { stub, calls } = makeSpawnStub();
+
+    await runDevUpdate(ctx, stub, makePresetExec({
+      "fetch origin dev": { ok: true },
+      "rev-parse": { ok: true, stdout: "abc1234\n" },
+      "log --oneline": { ok: true, stdout: "abc1234 some commit\n" },
+      "checkout": { ok: true },
+      "esbuild.config.js": { ok: true },
+      "scripts/check-bundle-boundary.mjs": { ok: false, stderr: "check-bundle-boundary: FAIL — leaked Pi source" },
+    }));
+
+    expect(ctx.replies.some(r => r.includes("Update aborted"))).toBe(true);
+    expect(ctx.replies.some(r => r.includes("leaked Pi source"))).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
 });
 
 // ── test: checkout failure ─────────────────────────────────────────────────

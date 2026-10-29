@@ -60,7 +60,7 @@ export class TmuxClient implements IKiroTransport {
     _sessionKey: string,
     message: string,
     _image?: { mime: string; base64: string },
-    _context?: { userId?: string; durableContextIntent?: import("../spin-types.js").DurableContextIntent },
+    _context?: { userId?: string },
   ): Promise<string> {
     if (!this.isReady) {
       throw new Error("tmux session not available");

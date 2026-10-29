@@ -32,7 +32,10 @@ describe("startSleepCard (event-driven, #1381)", () => {
     const card = startSleepCard();
     card.onEvent({ type: "step_started", stepId: "gc-noise" });
     expect(mockEnqueue).toHaveBeenCalledTimes(1);
-    const [title, source, , opts] = mockEnqueue.mock.calls[0];
+    const call = mockEnqueue.mock.calls[0];
+    expect(call).toBeDefined();
+    if (!call) throw new Error("expected enqueue call");
+    const [title, source, , opts] = call;
     expect(title).toMatch(/^Sleep \d{4}-\d{2}-\d{2}$/);
     expect(source).toBe("scheduled");
     expect((opts as { type: string }).type).toBe("D");

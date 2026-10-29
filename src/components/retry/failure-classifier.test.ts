@@ -122,4 +122,22 @@ describe("failure-classifier", () => {
     const factorSet = new Set(result.classification.factors);
     expect(factorSet.size).toBe(result.classification.factors.length);
   });
+
+  it("#1638: input_requested classifies unconditionally as review_required at highest precedence", () => {
+    const env = {
+      attempt: { id: "a_test_1" },
+      outcome: "failed",
+      error: { code: "INPUT_REQUESTED", message: "which schema?" },
+      criteria: [{ criterion_id: "c1", status: "failed", evidence_ids: [] }],
+      checks: [{ check_id: "check1", exit_code: 1, timed_out: false }],
+      artifacts: [{ artifact_id: "a1", exists: false, kind: "file", ref: "out.txt" }],
+      worker_report: { summary: "question", claims: [], unresolved_risks: [] },
+    };
+    // even with cancel reasons, lease stalls, and failed checks present, the
+    // live question dominates every other signal
+    const result = classify({ ...baseInput, envelope: env, cancelReason: "shutdown", leaseSnapshot: { evaluation: { phase: "cancel_requested" }, semanticState: "stalled" } } as any);
+    expect(result.classification.primary).toBe("input_requested");
+    expect(result.classification.retryability).toBe("review_required");
+    expect(result.classification.stable_codes).toContain("input_requested");
+  });
 });

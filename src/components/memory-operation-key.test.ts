@@ -4,7 +4,6 @@ import {
   inboundExecutionKey,
   inboundMessageKey,
   assistantMessageKey,
-  feedbackKey,
 } from "./memory-operation-key.js";
 
 describe("memoryOperationKey", () => {
@@ -16,8 +15,8 @@ describe("memoryOperationKey", () => {
 
   it("produces different keys for different families with the same identity", () => {
     const inbound = memoryOperationKey("inbound", ["discord", "ch1", "", "user1", "12345"]);
-    const feedback = memoryOperationKey("feedback", ["discord", "ch1", "", "user1", "12345"]);
-    expect(inbound).not.toBe(feedback);
+    const assistant = memoryOperationKey("assistant", ["discord", "ch1", "", "user1", "12345"]);
+    expect(inbound).not.toBe(assistant);
   });
 
   it("produces different keys for different identity components", () => {
@@ -145,30 +144,3 @@ describe("assistantMessageKey", () => {
   });
 });
 
-describe("feedbackKey", () => {
-  it("differentiates cite vs reject on same message", () => {
-    const cite = feedbackKey("discord", "ch1", "user1", "msg1", 42, "cite");
-    const reject = feedbackKey("discord", "ch1", "user1", "msg1", 42, "reject");
-    expect(cite).not.toBe(reject);
-  });
-
-  it("differentiates across memory IDs", () => {
-    const a = feedbackKey("discord", "ch1", "user1", "msg1", 1, "cite");
-    const b = feedbackKey("discord", "ch1", "user1", "msg1", 2, "cite");
-    expect(a).not.toBe(b);
-  });
-
-  it("replays the same reaction deterministically", () => {
-    const a = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite");
-    const b = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite");
-    expect(a).toBe(b);
-  });
-
-  it("throws for empty messageId", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "", 1, "cite")).toThrow("non-empty");
-  });
-
-  it("throws for empty feedbackType", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "msg1", 1, "")).toThrow("non-empty");
-  });
-});

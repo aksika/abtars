@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PiInstallationState } from "../../components/pi-installation.js";
+import { formatPiPinnedInstallCommand, PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 
 const mockResolve = vi.fn<(...args: unknown[]) => PiInstallationState>();
 const mockInspectSurfaces = vi.fn();
@@ -34,7 +35,7 @@ const compatibleState: PiInstallationState = {
   installation: {
     executable: "/usr/local/bin/pi",
     packageRoot: "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent",
-    version: "0.83.0",
+    version: PI_COMPATIBILITY.pinnedVersion,
     source: "path",
     moduleRoots: {
       ai: "/usr/local/lib/node_modules/@earendil-works/pi-ai",
@@ -68,7 +69,7 @@ describe("pi-preflight (#1438)", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("✓ Pi");
-    expect(stdout).toContain("0.83.0");
+    expect(stdout).toContain(PI_COMPATIBILITY.pinnedVersion);
   });
 
   it("keeps the downgrade command visible when an above-pin Pi is unloadable", async () => {
@@ -76,7 +77,7 @@ describe("pi-preflight (#1438)", () => {
       state: "compatible",
       installation: {
         ...compatibleState.installation,
-        version: "0.84.0",
+        version: "9.9.0",
         pinStatus: "above-pin",
       },
     });
@@ -91,7 +92,8 @@ describe("pi-preflight (#1438)", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("unloadable");
-    expect(stdout).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+    // Pin-agnostic: the exact downgrade command tracks the compatibility pin.
+    expect(stdout).toContain(formatPiPinnedInstallCommand());
   });
 
   it("passes when Pi is absent", async () => {

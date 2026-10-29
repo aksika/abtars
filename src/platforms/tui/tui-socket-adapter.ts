@@ -53,6 +53,7 @@ import type { PlatformAdapter, InboundMessage, PlatformCapabilities, SendOpts, D
 import type { Spin } from "../../components/spin.js";
 import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
+import { cleanResponse } from "../../components/clean-response.js";
 import { getMasterUserId } from "../../components/master-user.js";
 import { queueInstruction, subscribeSteerEvents } from "../../components/session-instruction-queue.js";
 import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
@@ -70,10 +71,21 @@ import {
   MAX_TUI_FRAME_BYTES,
 } from "./tui-protocol.js";
 import { TuiFrameWriter, type TuiFrameWriterResult } from "./tui-frame-writer.js";
+import { getCodingRouteService } from "../../components/pipeline/coding-route.js";
 
 const TAG = "tui";
 
 // ── #1397: Stream-suppression ledger types ────────────────────────────────
+
+/**
+ * #1319: Orc activity execution binding.
+ * `following` — persistent Orc session observed while idle; accepts only the
+ * next `execution.started`. `bound` — attached to one execution; accepts only
+ * that execution's events until its terminal event returns to `following`.
+ */
+type ActivityBinding =
+  | { state: "following"; sessionId: string }
+  | { state: "bound"; sessionId: string; executionId: string };
 
 interface StreamObservation {
   streamId: string;
@@ -125,6 +137,10 @@ export interface TuiAdapterDeps {
   sessionOutputFeed?: SessionOutputFeed;
   onMessage: (msg: InboundMessage) => void;
   socketPath?: string;
+  /** #1635 Phase 2 — interactive Pi coding sessions (native TUI handoff).
+   *  #1690: production always passes null (boot-pi runs after this adapter);
+   *  the adapter falls back to the coding-route registry at handoff time. */
+  codingService?: import("../../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService | null;
 }
 
 export class TuiSocketAdapter implements PlatformAdapter {
@@ -172,6 +188,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   /** #1362: Attachment-scoped steering instruction ownership. Keyed by canonical server instruction ID. */
   private ownedSteer = new Map<string, { sessionId: string; executionId: string; connGen: number; attGen: number }>();
+
+  /** #1319: attachment-local Orc execution binding — idle-follow vs bound. */
+  private _activityBinding: ActivityBinding | null = null;
 
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
@@ -451,6 +470,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._streamLedger.clear();
     this._activitySequence = 0;
     this._activityDirty = false;
+    this._activityBinding = null;
     this._statusRevision = 0;
   }
 
@@ -533,8 +553,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
     conn.on("error", (err) => logAndSwallow(TAG, "conn error", err));
 
-    // Close handler: detach only if this generation is still current.
+    // Close handler: abort any native handoff owned by this connection, then
+    // detach only if this generation is still current.
     conn.on("close", () => {
+      const coding = this._codingService();
+      if (coding) {
+        try { coding.abortNativeHandoff(`tui:${connGen}`); } catch { /* best effort */ }
+      }
       if (this._connGen === connGen) {
         this.detachConnection();
       }
@@ -553,6 +578,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
         return;
       case "steer":
         await this._handleSteer(frame);
+        return;
+      case "coding-handoff":
+        await this._handleCodingHandoff(frame.text);
+        return;
+      case "coding-handoff-started":
+        await this._handleCodingHandoffStarted(frame.sessionId, frame.pid);
+        return;
+      case "coding-handoff-exit":
+        await this._handleCodingHandoffExit(frame.sessionId, frame.code);
         return;
     }
   }
@@ -614,12 +648,37 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (!feed || !orcEntry) return;
 
     this._activitySequence = 0;
+    // #1319 R1: attach to an active Orc binds immediately; attach to an idle
+    // persistent Orc follows the session's next execution. One mutable
+    // predicate is the single filtering source — never duplicated in the UI.
+    this._activityBinding = orcEntry.activeExecutionId
+      ? { state: "bound", sessionId, executionId: orcEntry.activeExecutionId }
+      : { state: "following", sessionId };
+
     const filter = {
       sessionId,
-      executionId: orcEntry.activeExecutionId,
+      matches: (event: import("../../components/orc-activity-feed.js").OrcActivityEvent): boolean => {
+        const binding = this._activityBinding;
+        if (!binding || binding.sessionId !== event.sessionId) return false;
+        if (binding.state === "following") return event.kind === "execution.started";
+        return event.executionId === binding.executionId;
+      },
     };
     this._unsubActivity = feed.subscribe(filter, (event) => {
       if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+      const binding = this._activityBinding;
+      if (!binding || binding.sessionId !== event.sessionId) return;
+      // #1319 R1: bind on execution.started before subsequent events are
+      // accepted; return to idle-follow only after the terminal event. A
+      // transition never resets the process sequence watermark.
+      if (binding.state === "following" && event.kind === "execution.started") {
+        this._activityBinding = { state: "bound", sessionId, executionId: event.executionId };
+      } else if (
+        binding.state === "bound" && binding.executionId === event.executionId
+        && (event.kind === "execution.completed" || event.kind === "execution.failed")
+      ) {
+        this._activityBinding = { state: "following", sessionId };
+      }
       if (event.sequence <= this._activitySequence) return;
       if (this._activityDirty) return;
       this._activitySequence = event.sequence;
@@ -636,7 +695,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // Send the initial snapshot.
     const orcSession = spin.getSessionById(sessionId);
     if (orcSession) {
-      const snapshot = buildOrcActivitySnapshot(orcSession, new Map(), this._activitySequence);
+      const snapshot = buildOrcActivitySnapshot(orcSession, this._activitySequence);
       this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
     }
   }
@@ -721,7 +780,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._writer.dropActivity();
 
     const seq = feed.currentSequence;
-    const snapshot = buildOrcActivitySnapshot(orcEntry, new Map(), seq);
+    const snapshot = buildOrcActivitySnapshot(orcEntry, seq);
     const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
     if (res === "dropped") {
       return false;
@@ -1026,6 +1085,100 @@ export class TuiSocketAdapter implements PlatformAdapter {
     }
   }
 
+  /** #1690: resolve the coding service lazily. The constructor snapshot is
+   *  always null on a live bridge (boot-pi runs after the platforms phase);
+   *  the module registry is the authoritative source once boot-pi finishes. */
+  private _codingService() {
+    return this.deps.codingService ?? getCodingRouteService();
+  }
+
+  // ── #1635 Phase 2 — native TUI handoff ──────────────────────────────────
+
+  /**
+   * Resolve + reserve a native Pi handoff through the coding session service.
+   * The reply is written DIRECTLY on the socket (never through the bounded
+   * writer — a dropped accept/release frame would strand the client). The
+   * frame carries only session facts; the client builds its own args.
+   */
+  private async _handleCodingHandoff(text: string): Promise<void> {
+    const capturedConnGen = this._connGen;
+    const coding = this._codingService();
+    if (!coding) {
+      this._pushHandoffDirect({ t: "coding-handoff-rejected", message: "Interactive Pi coding is not available on this bridge" }, capturedConnGen);
+      return;
+    }
+    const leaseOwner = `tui:${this._connGen}`;
+    let result: import("../../components/pi-executor/pi-coding-session-service.js").NativeHandoffResult;
+    try {
+      result = coding.beginNativeHandoff({
+        ownerPrincipal: getMasterUserId(),
+        leaseOwner,
+        command: text,
+      });
+    } catch (err) {
+      result = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    if (!this._isConnCurrent(capturedConnGen)) return;
+    if (!result.ok) {
+      this._pushHandoffDirect({ t: "coding-handoff-rejected", message: result.reason }, capturedConnGen);
+      return;
+    }
+    this._pushHandoffDirect({ t: "coding-handoff-accepted", handoff: result.handoff }, capturedConnGen);
+  }
+
+  /** Record the client's spawned Pi pid as the exclusive-writer fence. */
+  private async _handleCodingHandoffStarted(sessionId: string, pid: number): Promise<void> {
+    const capturedConnGen = this._connGen;
+    const coding = this._codingService();
+    if (!coding) return;
+    let accepted = false;
+    try {
+      accepted = coding.recordNativeHandoffPid({ sessionId, leaseOwner: `tui:${this._connGen}`, pid }) !== false;
+    } catch { /* rejected below; the client must not leave an unfenced writer */ }
+    if (accepted) {
+      this._pushHandoffDirect({ t: "coding-handoff-started-accepted", sessionId, pid }, capturedConnGen);
+    }
+  }
+
+  /** Pi exited — reconcile and release the generation-owned resources. */
+  private async _handleCodingHandoffExit(sessionId: string, code: number | null): Promise<void> {
+    const capturedConnGen = this._connGen;
+    const coding = this._codingService();
+    if (!coding) return;
+    let message: string;
+    let ok = false;
+    try {
+      const result = coding.endNativeHandoff({ sessionId, leaseOwner: `tui:${this._connGen}`, code });
+      ok = result.ok;
+      message = result.message;
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    const attached = this.attachedSessionId
+      ? this.deps.spin.getSessionById(this.attachedSessionId)
+      : null;
+    const reattached = Boolean(ok && attached && attached.status !== "ended");
+    this._pushHandoffDirect({ t: "coding-handoff-released", message, reattached }, capturedConnGen);
+    if (reattached) {
+      // Let the client consume the release frame and clear its handoff gate
+      // before the ready/status/snapshot frames are emitted.  The adapter has
+      // deliberately kept the previous attachment alive, so this restores
+      // the exact prior pipeline/Orc view instead of blindly selecting Main.
+      setImmediate(() => {
+        if (!this._isConnCurrent(capturedConnGen) || !this.attachedSessionId) return;
+        try { this.commitAttachment(this.attachedSessionId, this.mode, this.deps.spin); } catch { /* best effort */ }
+      });
+    }
+  }
+
+  /** Direct write for critical handoff frames — bypasses the overflow-dropping writer. */
+  private _pushHandoffDirect(frame: TuiServerFrame, capturedConnGen: number): void {
+    if (!this._isConnCurrent(capturedConnGen)) return;
+    try {
+      this.conn!.write(encodeFrame(frame));
+    } catch { /* best effort */ }
+  }
+
   private async _routeToOrc(text: string): Promise<void> {
     const spin = this.deps.spin;
     const capturedGen = this._connGen;
@@ -1044,7 +1197,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
       });
     }
     try {
-      const { result } = await spin.spin({
+      const { result, outcome } = await spin.spin({
         type: "O",
         sessionId: orcEntry.id,
         prompt: `[USER] ${text}`,
@@ -1053,7 +1206,14 @@ export class TuiSocketAdapter implements PlatformAdapter {
       });
       // #1398: Guard against replacement during the async spin call.
       if (!this._isConnCurrent(capturedGen)) return;
-      this._push({ t: "message", role: "assistant", markdown: result ?? "(no reply)" });
+      // #1651 v2: the placeholder lives here, at the display boundary — Spin
+      // reports what happened and never invents a result string. A reaction
+      // outcome renders the parsed emoji, never the raw [REACT:…] marker.
+      const markdown = outcome === "text" ? result
+        : outcome === "reaction" ? cleanResponse(result).reactionEmoji ?? result
+        : outcome === "no_reply" ? "(no reply)"
+        : "(model returned no output)";
+      this._push({ t: "message", role: "assistant", markdown });
     } catch (err) {
       if (!this._isConnCurrent(capturedGen)) return;
       const message = err instanceof Error ? err.message : String(err);

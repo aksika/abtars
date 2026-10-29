@@ -1,0 +1,1026 @@
+/**
+ * reconciler-lifecycle.test.ts — #1554 Task 8 lifecycle regression portfolio.
+ *
+ * Real SQLite stores in a tmpdir; only external boundaries are scripted.
+ * Covers: two-generation recovery/listener/source accounting, drain semantics,
+ * lease-source registration identity, recovery truth, startup rollback, and
+ * heartbeat decoupling (outbox independent, Reconciler task post-success).
+ *
+ * #1792 cutover: supervised (O-type) roots are runner-owned. Reconciler
+ * `deriveAction` returns early for O-roots and `requestReconcile` on an O-root
+ * is a reconciler no-op (the workflow driver advances supervised roots via
+ * nerve + bounded audit). Deleted exports: `scanActiveProjects`,
+ * `retryPendingReviewRequests`, `abortProjectById`. Review-turn liveness
+ * removed here is covered by `src/tests/e2e/orc-workflow.e2e.test.ts`
+ * journey 3 (bounded failure policy: "retry succeeds; required failure
+ * settles; optional failure proceeds"), journey 9 (alive retention under
+ * repeated inspection) and journey 10 (unobservable worker → explicit
+ * unknown) — see the combined journeys 8–10 test ("lost completion recovers
+ * exactly once; alive work survives; unknown stays explicit"). Do NOT write
+ * new runner tests here.
+ * Heartbeat (separately approved task change, implemented in
+ * `src/boot/phase-reconciler.ts` `registerReconcilerHeartbeatTasks`): only
+ * `reconciler-resync` (the driver's bounded audit) is registered;
+ * `review-request-retry` is gone.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import type { ProjectAcceptanceContractV1 } from "./project-acceptance/project-contract.js";
+
+const dispatchMock = vi.fn();
+vi.mock("../spin.js", () => ({
+  spin: { dispatch: dispatchMock, spawnChild: vi.fn() },
+}));
+
+let TEST_HOME: string;
+let kanban: typeof import("./tasks/kanban-board.js");
+let reconciler: typeof import("./reconciler.js");
+let workerStoreMod: typeof import("./worker-supervision-store.js");
+let reviewStoreMod: typeof import("./project-acceptance/project-review-store.js");
+let schedulerMod: typeof import("./lifecycle-wake-scheduler.js");
+let quarantineMod: typeof import("./reconcile-quarantine-store.js");
+let adapterMod: typeof import("./spin-worker-adapter.js");
+let nerveBus: typeof import("./nerve.js")["nerve"];
+let testCount = 0;
+
+let activeHandle: import("./reconciler.js").ReconcilerHandle | null = null;
+let scheduler: import("./lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  vi.resetModules();
+  TEST_HOME = mkdtempSync(join(tmpdir(), "reconciler-lifecycle-"));
+  mkdirSync(join(TEST_HOME, "tasks"), { recursive: true });
+  mkdirSync(join(TEST_HOME, "workspace"), { recursive: true });
+  vi.doMock("../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test") }));
+  kanban = await import("./tasks/kanban-board.js");
+  reconciler = await import("./reconciler.js");
+  workerStoreMod = await import("./worker-supervision-store.js");
+  reviewStoreMod = await import("./project-acceptance/project-review-store.js");
+  schedulerMod = await import("./lifecycle-wake-scheduler.js");
+  quarantineMod = await import("./reconcile-quarantine-store.js");
+  adapterMod = await import("./spin-worker-adapter.js");
+  nerveBus = (await import("./nerve.js")).nerve;
+});
+
+afterEach(async () => {
+  await activeHandle?.stop();
+  activeHandle = null;
+  scheduler?.stop();
+  scheduler = null;
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
+
+async function flush(): Promise<void> {
+  await new Promise(r => setTimeout(r, 10));
+}
+
+interface GenerationOverrides {
+  coordinator?: unknown;
+  piService?: unknown;
+  createPiAdapter?: unknown;
+  workerAdapter?: unknown;
+  getQuarantineStore?: unknown;
+  projectRunProgress?: unknown;
+}
+
+/** Start a fresh generation; stops any previous one. */
+async function startGeneration(overrides: GenerationOverrides = {}): Promise<import("./reconciler.js").ReconcilerHandle> {
+  await activeHandle?.stop();
+  activeHandle = null;
+  scheduler?.stop();
+  scheduler = new schedulerMod.LifecycleWakeScheduler();
+  const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+  activeHandle = await reconciler.startReconciler({
+    generationId: `lifecycle-${++testCount}`,
+    coordinator: (overrides.coordinator ?? {
+      getStore: () => new OrcProjectRunStore(),
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      // #1792: the coordinator schedule path is retired — the reconciler
+      // never calls schedule* (only bootRecovery).
+    }) as never,
+    wakeScheduler: scheduler,
+    workerAdapter: (overrides.workerAdapter ?? new adapterMod.SpinWorkerAdapter()) as never,
+    piService: (overrides.piService ?? null) as never,
+    createPiAdapter: (overrides.createPiAdapter ?? (() => ({
+      kind: "pi",
+      schedulingPolicy: { recovery: "inspectable" },
+      capacity: async () => ({ available: 0, max: 0 }),
+      start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }),
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async () => ({ kind: "running", lifecycle: "running" }),
+    }))) as never,
+    getQuarantineStore: (overrides.getQuarantineStore ?? (() => new quarantineMod.ReconcileQuarantineStore())) as never,
+    projectRunProgress: (overrides.projectRunProgress ?? (() => {})) as never,
+    subscribeCapacityReleased: () => () => {},
+  } as never);
+  await scheduler.start();
+  return activeHandle;
+}
+
+/** Live supervised root at card 1, generation 1 (the attempt's project lineage). */
+function seedRootProject(): void {
+  const rootId = kanban.kanbanEnqueue("recovery root", "agent", undefined, { type: "O", goal: "root" });
+  kanban.kanbanRunning(rootId);
+  const store = new reviewStoreMod.ProjectReviewStore();
+  store.ensureAwaitingContract(rootId);
+  store.insertContract({
+    schema_version: 1,
+    id: `ct_root_${rootId}`,
+    digest: `d_${rootId}`,
+    project_card_id: rootId,
+    goal: "root",
+    criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+    required_outputs: [],
+    constraints: [],
+    limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+    provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+  } as never);
+  store.stateTransition(rootId, ["awaiting_contract"], "executing");
+}
+
+/** Insert a supervised attempt row for a W child under a running project root. */
+function seedActivePiAttempt(cardId: number): { cardId: number; attemptId: string } {
+  const store = new workerStoreMod.WorkerSupervisionStore();
+  const contractId = `ct_pi_${cardId}`;
+  store.insertContract({
+    schema_version: 1,
+    id: contractId,
+    digest: `d_${contractId}`,
+    goal: "pi lane",
+    criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+    expected_artifacts: [],
+    verification_commands: [],
+    required_capabilities: [],
+    supports_root_criteria: ["c1"],
+    limits: {},
+    provenance: { root_card_id: 1, card_id: cardId, authored_by: "orc", created_at: new Date().toISOString() },
+  } as never, cardId);
+  store.insertAttempt({
+    id: `a_pi_${cardId}`,
+    card_id: cardId,
+    contract_id: contractId,
+    ordinal: 1,
+    executor_kind: "pi",
+    executor_id: "pi-coding",
+    status: "running",
+    started_at: new Date().toISOString(),
+    root_project_card_id: 1,
+    root_project_generation: 1,
+    scheduled_run_id: null,
+  } as never);
+  return { cardId, attemptId: `a_pi_${cardId}` };
+}
+
+function attemptRowJson(attemptId: string): string {
+  const store = new workerStoreMod.WorkerSupervisionStore();
+  const row = store.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(attemptId) as Record<string, unknown>;
+  return JSON.stringify(row);
+}
+
+function nerveListenerCount(event: string): number {
+  return nerveBus.listenerCount(event as never);
+}
+
+// ── Two generations ─────────────────────────────────────────────────────────
+
+describe("two-generation lifecycle", () => {
+  it("recovery runs once per generation, listener counts return to baseline, generation two accepts work", async () => {
+    const baselineQueued = nerveListenerCount("card:queued");
+    const baselineDone = nerveListenerCount("card:done");
+    const baselineFailed = nerveListenerCount("card:failed");
+
+    const h1 = await startGeneration();
+    expect(h1.recovery.generationId).toBe("lifecycle-1");
+    expect(h1.recovery.attempts).toEqual([]);
+    expect(nerveListenerCount("card:queued")).toBe(baselineQueued + 1);
+    expect(nerveListenerCount("card:done")).toBe(baselineDone + 1);
+    expect(nerveListenerCount("card:failed")).toBe(baselineFailed + 1);
+    expect(nerveBus.listenerCount("card:queued" as never) > baselineQueued).toBe(true);
+
+    // generation two after stop: listeners removed, new listeners installed once
+    const h2 = await startGeneration();
+    expect(h2.recovery.generationId).toBe("lifecycle-2");
+    expect(nerveListenerCount("card:queued")).toBe(baselineQueued + 1);
+    expect(nerveListenerCount("card:done")).toBe(baselineDone + 1);
+    expect(nerveListenerCount("card:failed")).toBe(baselineFailed + 1);
+
+    // generation two accepts reconciliation work. #1792 cutover contract: a
+    // reconciler wake of a runner-owned O-root is a no-op — it must not throw
+    // and must not author supervision (the workflow driver owns O-roots via
+    // nerve + bounded audit).
+    const rootId = kanban.kanbanEnqueue("gen2 project", "agent", undefined, { type: "O", goal: "g" });
+    kanban.kanbanRunning(rootId);
+    expect(() => reconciler.requestReconcile(rootId)).not.toThrow();
+    await flush();
+    await flush();
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)).toBeUndefined();
+  });
+
+  it("a generation-one callback cannot mutate generation two, and out-of-order stop leaves the new hook intact", async () => {
+    const h1 = await startGeneration();
+    // a wake scheduled while generation one is live
+    const rootId = kanban.kanbanEnqueue("old project", "agent", undefined, { type: "O", goal: "g" });
+    kanban.kanbanRunning(rootId);
+    dispatchMock.mockClear();
+    reconciler.requestReconcile(rootId);
+    // stop BEFORE the queued pass can run
+    await h1.stop();
+    activeHandle = null;
+    scheduler?.stop();
+    scheduler = null;
+
+    const h2 = await startGeneration();
+    await flush();
+    // the generation-one wake must not have executed against generation two
+    expect(dispatchMock).not.toHaveBeenCalled();
+
+    // out-of-order stop of gen1 must not clear gen2's static lease hook
+    const { ExecutorLeaseStore } = await import("./executor-lease-store.js");
+    const hookAfterGen2 = ExecutorLeaseStore.onLeaseChanged;
+    expect(hookAfterGen2).toBeDefined();
+    await h1.stop(); // gen1 already stopped — idempotent
+    expect(ExecutorLeaseStore.onLeaseChanged).toBe(hookAfterGen2);
+
+    // generation two still accepts work. #1792 cutover contract: the wake of
+    // a runner-owned O-root is a reconciler no-op — no supervision row is
+    // authored and no throw occurs.
+    expect(() => reconciler.requestReconcile(rootId)).not.toThrow();
+    await flush();
+    await flush();
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)).toBeUndefined();
+  });
+});
+
+// ── Drain ───────────────────────────────────────────────────────────────────
+
+describe("symmetric stop and drain", () => {
+  function makeHoldAdapter(): { adapter: import("./swarm-executor-types.js").SwarmExecutorAdapter; release: (obs: unknown) => void; starts: number[] } {
+    let release!: (obs: unknown) => void;
+    const gate = new Promise<unknown>(resolve => { release = resolve; });
+    const starts: number[] = [];
+    return {
+      starts,
+      release: (obs: unknown) => release(obs),
+      adapter: {
+        kind: "agent",
+        schedulingPolicy: { recovery: "process_bound" },
+        capacity: async () => ({ available: 2, max: 2 }),
+        start: async (claim) => {
+          starts.push(claim.cardId);
+          const observation = await gate;
+          return observation as never;
+        },
+        cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+        inspect: async () => ({ kind: "running", lifecycle: "running" }),
+      },
+    };
+  }
+
+  it("stop waits for an active dispatch pass, then no queued continuation runs", async () => {
+    const hold = makeHoldAdapter();
+    const h = await startGeneration({ workerAdapter: hold.adapter as never });
+
+    // dispatch-pass hold: a queued W child with a pending attempt under a
+    // running O-root parent (the claim path authorizes against the running
+    // parent; no supervised review progression is involved — the O-root here
+    // is only the dispatch parent).
+    const projectId = kanban.kanbanEnqueue("drain project", "agent", undefined, { type: "O", goal: "g" });
+    kanban.kanbanRunning(projectId);
+    const rootStore = new reviewStoreMod.ProjectReviewStore();
+    rootStore.ensureAwaitingContract(projectId);
+    rootStore.insertContract({
+      schema_version: 1,
+      id: `ct_drain_root`,
+      digest: "d",
+      project_card_id: projectId,
+      goal: "g",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    rootStore.stateTransition(projectId, ["awaiting_contract"], "executing");
+    const childId = kanban.kanbanEnqueue("drain child", "agent", undefined, {
+      type: "W", parent_id: projectId, priority: "MEDIUM",
+    });
+    const supStore = new workerStoreMod.WorkerSupervisionStore();
+    supStore.insertContract({
+      schema_version: 1,
+      id: "ct_drain",
+      digest: "d",
+      goal: "g",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      expected_artifacts: [],
+      verification_commands: [],
+      required_capabilities: [],
+      supports_root_criteria: ["c1"],
+      limits: {},
+      provenance: { root_card_id: projectId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
+    } as never, childId);
+    supStore.insertAttempt({
+      id: "a_drain",
+      card_id: childId,
+      contract_id: "ct_drain",
+      ordinal: 1,
+      executor_kind: "agent",
+      executor_id: "spin-local",
+      status: "pending",
+      started_at: new Date().toISOString(),
+      root_project_card_id: projectId,
+      root_project_generation: 1,
+      scheduled_run_id: null,
+    } as never);
+
+    reconciler.requestWorkerDispatch();
+    await flush();
+    expect(hold.starts.length).toBe(1); // the dispatch pass is inside adapter.start
+
+    // #1792 cutover: the old second hold — a supervised O-root card pass
+    // blocked inside createReviewCase assembly — is gone with the supervised
+    // brain (`deriveAction` returns early for O-roots, so no card pass can be
+    // held that way). No unsupervised card path blocks either: Pi cards fire
+    // and forget `startWithClaim`, and W-card lease/retry evaluation is
+    // synchronous. The dispatch pump is therefore the only holdable pass, and
+    // stop must wait for it.
+    const stopPromise = h.stop();
+    let stopped = false;
+    void stopPromise.then(() => { stopped = true; });
+    await flush();
+    await flush();
+    // stop is waiting on the in-flight dispatch pass
+    expect(stopped).toBe(false);
+
+    // release the dispatch pass; stop now completes
+    hold.release({ kind: "started", attemptId: "a_drain", generation: 1, executorId: "spin-local" });
+    await stopPromise;
+    expect(stopped).toBe(true);
+
+    // no queued continuation executes after stop: an explicit post-stop wake
+    // must not start new work
+    const startsAfter = hold.starts.length;
+    reconciler.requestWorkerDispatch();
+    await flush();
+    await flush();
+    expect(hold.starts.length).toBe(startsAfter);
+  });
+
+  it("new wakes during closing/stopped are discarded", async () => {
+    const h = await startGeneration();
+    const rootId = kanban.kanbanEnqueue("discard project", "agent", undefined, { type: "O", goal: "g" });
+    kanban.kanbanRunning(rootId);
+    dispatchMock.mockClear();
+
+    await h.stop();
+    reconciler.requestReconcile(rootId);
+    await flush();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Lease source ────────────────────────────────────────────────────────────
+
+describe("executor-lease source ownership", () => {
+  it("registers exactly once per generation and unregisters on stop", async () => {
+    const { ExecutorLeaseStore } = await import("./executor-lease-store.js");
+    const registerSpy = vi.spyOn(schedulerMod.LifecycleWakeScheduler.prototype, "register");
+    const h1 = await startGeneration();
+    expect(registerSpy).toHaveBeenCalledTimes(1);
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeDefined();
+
+    await h1.stop();
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeUndefined();
+
+    const h2 = await startGeneration();
+    expect(registerSpy).toHaveBeenCalledTimes(2);
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeDefined();
+    await h2.stop();
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeUndefined();
+    registerSpy.mockRestore();
+  });
+
+  it("generation-one static hook cannot be cleared over generation two", async () => {
+    const { ExecutorLeaseStore } = await import("./executor-lease-store.js");
+    const h1 = await startGeneration();
+    const hook1 = ExecutorLeaseStore.onLeaseChanged;
+    const h2 = await startGeneration();
+    const hook2 = ExecutorLeaseStore.onLeaseChanged;
+    expect(hook1).not.toBe(hook2);
+    // stopping generation one (already superseded) must not clear generation two's hook
+    await h1.stop();
+    expect(ExecutorLeaseStore.onLeaseChanged).toBe(hook2);
+    await h2.stop();
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeUndefined();
+  });
+});
+
+// ── Recovery truth ──────────────────────────────────────────────────────────
+
+describe("exhaustive recovery accounting", () => {
+  it("an unavailable Pi adapter leaves the attempt unresolved and durably unchanged", async () => {
+    seedRootProject();
+    const cardId = kanban.kanbanEnqueue("pi child", "agent", undefined, { type: "W", parent_id: 1 });
+    const { attemptId } = seedActivePiAttempt(cardId);
+    const before = attemptRowJson(attemptId);
+
+    const h = await startGeneration({ piService: null });
+    const entry = h.recovery.attempts.find(a => a.attemptId === attemptId);
+    expect(entry).toBeDefined();
+    expect(entry!.kind).toBe("unresolved");
+    expect((entry! as { reason: string }).reason).toBe("executor_unavailable");
+    expect(attemptRowJson(attemptId)).toBe(before); // byte-for-byte unchanged
+  });
+
+  it("Pi inspection is awaited: terminal observation settles, running stays active, throwing inspection is isolated", async () => {
+    seedRootProject();
+    const terminalCard = kanban.kanbanEnqueue("pi terminal", "agent", undefined, { type: "W", parent_id: 1 });
+    const runningCard = kanban.kanbanEnqueue("pi running", "agent", undefined, { type: "W", parent_id: 1 });
+    const throwCard = kanban.kanbanEnqueue("pi throw", "agent", undefined, { type: "W", parent_id: 1 });
+    const t = seedActivePiAttempt(terminalCard);
+    const r = seedActivePiAttempt(runningCard);
+    const th = seedActivePiAttempt(throwCard);
+
+    const store = new workerStoreMod.WorkerSupervisionStore();
+    const fakeAdapter = {
+      kind: "pi",
+      schedulingPolicy: { recovery: "inspectable" },
+      capacity: async () => ({ available: 1, max: 1 }),
+      start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }),
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async (claim: { attemptId: string }) => {
+        if (claim.attemptId === t.attemptId) return { kind: "terminal", lifecycle: "completed" };
+        if (claim.attemptId === r.attemptId) return { kind: "running", lifecycle: "running" };
+        throw new Error("inspection boom");
+      },
+    };
+    const h = await startGeneration({
+      piService: { executor: { maxConcurrent: 1 }, store: null, config: null } as never,
+      createPiAdapter: (() => fakeAdapter) as never,
+    });
+
+    const byId = new Map(h.recovery.attempts.map(a => [a.attemptId, a]));
+    expect(byId.get(t.attemptId)!.kind).toBe("inspectable");
+    expect((byId.get(t.attemptId)! as { observation: { kind: string } }).observation.kind).toBe("terminal");
+    expect(byId.get(r.attemptId)!.kind).toBe("inspectable");
+    expect((byId.get(r.attemptId)! as { observation: { kind: string } }).observation.kind).toBe("running");
+    expect(byId.get(th.attemptId)!.kind).toBe("unresolved");
+    expect((byId.get(th.attemptId)! as { reason: string }).reason).toBe("inspection_failed");
+
+    // terminal observation settled the attempt through the generation-fenced store
+    const terminalRow = store.db.prepare(`SELECT lifecycle FROM worker_attempts WHERE id = ?`).get(t.attemptId) as { lifecycle: string };
+    expect(terminalRow.lifecycle).toBe("completed");
+    // running observation left the attempt active
+    const runningRow = store.db.prepare(`SELECT lifecycle FROM worker_attempts WHERE id = ?`).get(r.attemptId) as { lifecycle: string };
+    expect(runningRow.lifecycle).toBe("running");
+    // throwing inspection left the attempt active
+    const throwRow = store.db.prepare(`SELECT lifecycle FROM worker_attempts WHERE id = ?`).get(th.attemptId) as { lifecycle: string };
+    expect(throwRow.lifecycle).toBe("running");
+  });
+
+  it("process-bound attempts record their actual settlement outcome", async () => {
+    seedRootProject();
+    const cardId = kanban.kanbanEnqueue("agent child", "agent", undefined, { type: "W", parent_id: 1 });
+    const store = new workerStoreMod.WorkerSupervisionStore();
+    const contractId = "ct_agent";
+    store.insertContract({
+      schema_version: 1, id: contractId, digest: "d", goal: "g",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      expected_artifacts: [], verification_commands: [], required_capabilities: [], supports_root_criteria: ["c1"], limits: {},
+      provenance: { root_card_id: 1, card_id: cardId, authored_by: "orc", created_at: new Date().toISOString() },
+    } as never, cardId);
+    store.insertAttempt({
+      id: "a_agent_1", card_id: cardId, contract_id: contractId, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "running",
+      started_at: new Date().toISOString(),
+      root_project_card_id: 1, root_project_generation: 1, scheduled_run_id: null,
+    } as never);
+
+    const h = await startGeneration();
+    const entry = h.recovery.attempts.find(a => a.attemptId === "a_agent_1");
+    expect(entry!.kind).toBe("process_bound");
+    expect((entry! as { outcome: string }).outcome).toBe("settled");
+    const row = store.db.prepare(`SELECT lifecycle FROM worker_attempts WHERE id = ?`).get("a_agent_1") as { lifecycle: string };
+    expect(row.lifecycle).toBe("timed_out");
+  });
+});
+
+// ── Startup rollback ────────────────────────────────────────────────────────
+
+describe("startup rollback", () => {
+  it("a throwing coordinator boot recovery leaves no active slot, listener, source, or static hook", async () => {
+    const baselineQueued = nerveListenerCount("card:queued");
+    const { ExecutorLeaseStore } = await import("./executor-lease-store.js");
+    const registerSpy = vi.spyOn(schedulerMod.LifecycleWakeScheduler.prototype, "register");
+
+    await expect(startGeneration({
+      coordinator: {
+        bootRecovery: () => { throw new Error("coordinator boot recovery failed"); },
+        onOwnershipReleased: () => () => {},
+      } as never,
+    })).rejects.toThrow("coordinator boot recovery failed");
+
+    // no active generation remains
+    expect(reconciler.getActiveOrcCoordinator()).toBeNull();
+    // listeners were rolled back
+    expect(nerveListenerCount("card:queued")).toBe(baselineQueued);
+    // the static hook was cleared
+    expect(ExecutorLeaseStore.onLeaseChanged).toBeUndefined();
+    // no lease source remains registered on the (already stopped) scheduler
+    expect(registerSpy).toHaveBeenCalledTimes(1);
+
+    // a fresh start still works after the failed one
+    const h = await startGeneration();
+    expect(h.recovery.generationId).toBeDefined();
+    await h.stop();
+    registerSpy.mockRestore();
+  });
+});
+
+// ── #1778 peer-callback boot drain ──────────────────────────────────────────
+
+describe("#1778 boot recovery drains the peer-callback outbox", () => {
+  it("a commit/send crash window converges at startup without a new terminal", async () => {
+    // A card terminal committed its peer intent, but the process died before
+    // the send: exactly one pending row, no delivery yet.
+    const cardId = kanban.kanbanEnqueue("crash-window card", "peer", undefined, { type: "W", goal: "lane" });
+    kanban.kanbanRunning(cardId);
+    kanban.kanbanFail(cardId, "settled before crash", true, { peer: "kp", status: "failed", error: "settled before crash" });
+    const db = kanban.requireTaskDatabase();
+    const before = db.prepare(`SELECT attempts, sent_at FROM peer_callback_outbox WHERE card_id = ?`).get(cardId) as {
+      attempts: number; sent_at: string | null;
+    };
+    expect(before.sent_at).toBeNull();
+    expect(before.attempts).toBe(0);
+
+    // Boot runs the one-shot recovery drain (the send fails in this env —
+    // no peer transport — so the row stays pending, but attempted).
+    const h = await startGeneration();
+    expect(h.recovery.generationId).toBeDefined();
+    const after = db.prepare(`SELECT attempts, sent_at FROM peer_callback_outbox WHERE card_id = ?`).get(cardId) as {
+      attempts: number; sent_at: string | null;
+    };
+    // Either the row delivered (transport up) or the boot drain attempted it
+    // and kept it pending for the event-driven redrive — never silently lost.
+    expect(after.sent_at !== null || after.attempts > 0).toBe(true);
+    await h.stop();
+  });
+});
+
+// ── #1678 review-turn liveness (#1792 cutover) ───────────────────────────────
+// The coordinator scheduleReview/abandon path is gone: O-roots are
+// runner-owned and review liveness lives in the runner/outbox + wake
+// scheduler. The four retry/abandon-budget tests below were deleted; their
+// replacement evidence is orc-workflow.e2e journeys 3 (bounded failure
+// policy), 9 (alive retention under repeated inspection) and 10
+// (unobservable worker → explicit unknown). The two tests that remain pin
+// store-level settlement/inertness facts without touching the deleted
+// coordinator path, so `seedReviewRequest` stays.
+
+describe("#1678 single owner of Orc review-turn liveness", () => {
+  /** Seed a supervised root at generation 1 with an open review case + request. */
+  function seedReviewRequest(attempts: number): { projectId: number; caseId: string; requestId: string } {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const projectId = kanban.kanbanEnqueue("review liveness", "agent", undefined, { type: "O", goal: "root" });
+    kanban.kanbanRunning(projectId);
+    store.ensureAwaitingContract(projectId);
+    store.insertContract({
+      schema_version: 1,
+      id: `ct_live_${projectId}`,
+      digest: `d_${projectId}`,
+      project_card_id: projectId,
+      goal: "root",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    store.stateTransition(projectId, ["awaiting_contract"], "executing");
+    store.stateTransition(projectId, ["executing"], "review_ready");
+    store.stateTransition(projectId, ["review_ready"], "review_requested");
+    const { id: caseId } = store.insertReviewCase(projectId, 1, 1, { v: 1 }, "digest");
+    const { id: requestId } = store.insertReviewRequest(projectId, caseId, 1);
+    store.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(attempts, requestId);
+    return { projectId, caseId, requestId };
+  }
+
+  it("a live turn's own settlement still terminates the request exactly once", async () => {
+    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { projectId, caseId, requestId } = seedReviewRequest(0);
+
+    const runStore = new OrcProjectRunStore();
+    // #1792: `operator_turn` is the only surviving intent-policy row; the
+    // settlement-once assertions below are intent-agnostic.
+    const claim = runStore.claimIntent(
+      { projectCardId: projectId, intentKind: "operator_turn", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      "kp", "inst-live",
+    );
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    runStore.promoteRun(claim.context.runId);
+    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
+    expect(bound.ok).toBe(true);
+
+    // The bound review turn submits its decision — the case settles and the
+    // request reaches its terminal status exactly once.
+    store.settleAcceptance(projectId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text");
+    const req = store.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+    expect(req.status).toBe("settled");
+    const caseRow = store.getReviewCase(caseId);
+    expect(caseRow!.status).toBe("accepted");
+    expect(store.getSupervision(projectId)!.state).toBe("accepted");
+  });
+
+  it("a stale abandoned request at an older generation is inert", async () => {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const projectId = kanban.kanbanEnqueue("stale abandoned", "agent", undefined, { type: "O", goal: "root" });
+    kanban.kanbanRunning(projectId);
+    store.ensureAwaitingContract(projectId);
+    store.insertContract({
+      schema_version: 1,
+      id: `ct_stale_${projectId}`,
+      digest: `d_${projectId}`,
+      project_card_id: projectId,
+      goal: "root",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    store.stateTransition(projectId, ["awaiting_contract"], "executing");
+    store.stateTransition(projectId, ["executing"], "review_ready");
+    store.stateTransition(projectId, ["review_ready"], "review_requested");
+    // supervision has moved on to generation 2…
+    store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = ?").run(projectId);
+    // …while a stale open case and its abandoned request still sit at gen 1
+    const { id: caseId } = store.insertReviewCase(projectId, 1, 1, { v: 1 }, "digest");
+    const { id: requestId } = store.insertReviewRequest(projectId, caseId, 1);
+    store.db.prepare("UPDATE project_review_requests SET status = 'abandoned', attempts = 5, last_error = 'exceeded max attempts (last: none)' WHERE id = ?").run(requestId);
+
+    const h = await startGeneration();
+    reconciler.requestReconcile(projectId);
+    await flush();
+    await flush();
+
+    // inert: no settleBlocked, no deep store assertion throw, and the current
+    // generation's supervision is untouched
+    const supervision = store.getSupervision(projectId);
+    expect(supervision!.state).toBe("review_requested");
+    expect(supervision!.generation).toBe(2);
+    const caseRow = store.getReviewCase(caseId);
+    expect(caseRow!.status).toBe("open");
+    const req = store.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+    expect(req.status).toBe("abandoned");
+    await h.stop();
+  });
+});
+
+// ── Heartbeat decoupling ────────────────────────────────────────────────────
+
+describe("heartbeat decoupling (#1554 approved move)", () => {
+  function mockHeartbeat() {
+    const tasks: Array<{ name: string }> = [];
+    return {
+      tasks,
+      heartbeat: {
+        registerTask: (task: { name: string }) => { tasks.push(task); },
+      } as unknown as import("../components/heartbeat-system.js").HeartbeatSystem,
+    };
+  }
+
+  it("project-acceptance-outbox registers in Tier-3 independent of Reconciler startup; Reconciler tasks only after success", async () => {
+    const { heartbeat, tasks } = mockHeartbeat();
+    mkdirSync(join(TEST_HOME, "config"), { recursive: true });
+    writeFileSync(join(TEST_HOME, "config", "peers.json"), JSON.stringify({
+      self: { name: "kp", signingKey: "k".repeat(64), tribeToken: "t".repeat(32) },
+      peers: {},
+    }));
+    const scheduler = new schedulerMod.LifecycleWakeScheduler();
+    const ctx = {
+      heartbeat,
+      lifecycleWakeScheduler: scheduler,
+      reconcilerInputs: { projectRunProgress: () => {} },
+      piExecutorService: undefined,
+      phaseHealth: new Map(),
+      transport: { healthCheck: null } as never,
+      cronQueue: { pending: 0 } as never,
+      pipelineDeps: { selfHealerTask: null } as never,
+      config: { telegram: { allowedUserIds: [1] } } as never,
+      memoryRuntime: {} as never,
+      capabilities: { commands: [], heartbeatTasks: [] } as never,
+      telegramAdapter: null,
+    } as never;
+
+    // Tier-3 registration alone: outbox present, Reconciler tasks absent
+    const { registerTier3Tasks } = await import("../boot/heartbeat-tier3.js");
+    await registerTier3Tasks(ctx as never);
+    const names = tasks.map(t => t.name);
+    expect(names).toContain("project-acceptance-outbox");
+    expect(names).not.toContain("reconciler-resync");
+    expect(names).not.toContain("review-request-retry");
+
+    // phaseReconciler with a healthy environment registers the single
+    // reconciler task (#1792 approved heartbeat change: reconciler-resync is
+    // the driver's bounded audit; review-request-retry is gone).
+    const phaseReconciler = await import("../boot/phase-reconciler.js");
+    await phaseReconciler.phaseReconciler(ctx as never);
+    const after = tasks.map(t => t.name);
+    expect(after).toContain("reconciler-resync");
+    expect(after).not.toContain("review-request-retry");
+    // outbox still registered exactly once
+    expect(after.filter(n => n === "project-acceptance-outbox")).toHaveLength(1);
+
+    await (ctx as { reconcilerHandle: { stop(): Promise<void> } }).reconcilerHandle?.stop();
+    scheduler.stop();
+  });
+
+  it("a Reconciler startup failure throws from phaseReconciler and registers no Reconciler task", async () => {
+    const { heartbeat, tasks } = mockHeartbeat();
+    const ctx = {
+      heartbeat,
+      lifecycleWakeScheduler: null,
+      reconcilerInputs: null,
+      phaseHealth: new Map(),
+    } as never;
+
+    const phaseReconciler = await import("../boot/phase-reconciler.js");
+    await expect(phaseReconciler.phaseReconciler(ctx as never)).rejects.toThrow();
+    expect(tasks.some(t => t.name === "reconciler-resync" || t.name === "review-request-retry")).toBe(false);
+  });
+});
+
+describe("#1794 dispatch pump redrive on worker terminal", () => {
+  it("a card terminal event re-arms the pump for a queued pending attempt", async () => {
+    await startGeneration();
+    seedRootProject();
+    // Queued W child with Pi contract + pending Pi attempt. No live Pi
+    // service in this harness, so a pump pass settles it failed through the
+    // eligibility path — a deterministic signal that a pass ran.
+    const child = kanban.kanbanEnqueue("pi lane", "agent", undefined, { type: "W", parent_id: 1, goal: "lane" });
+    seedActivePiAttempt(child);
+    const attemptId = `a_pi_${child}`;
+    // The seed defaults to a running lifecycle; the starvation shape is a
+    // never-started pending attempt (pump queue, Sept 10–12 lane 4). Both
+    // columns: the store migration backfills lifecycle from status.
+    const wdb = new workerStoreMod.WorkerSupervisionStore().db;
+    wdb.prepare(`UPDATE worker_attempts SET lifecycle = 'pending', status = 'pending' WHERE id = ?`).run(attemptId);
+    expect(JSON.parse(attemptRowJson(attemptId)).lifecycle).toBe("pending");
+    // An unrelated terminal event (a lane completing elsewhere). Before the
+    // redrive, only the woken card's own reconcile ran — a skipped sibling
+    // like this one waited forever (Sept 10–12 lane-4 shape).
+    nerveBus.fire("card:done", 1);
+    for (let i = 0; i < 15; i++) await flush();
+    expect(JSON.parse(attemptRowJson(attemptId)).lifecycle).toBe("failed");
+  });
+});
+
+// ── #1799 runner-root boot recovery ─────────────────────────────────────────
+// Crash window: supervision reached executing/repairing but the root card
+// never left queued (or predates the first-dispatch projection). The
+// dispatch pump skips children of non-running roots forever, and the legacy
+// active-project scan cannot see runner-owned roots — startup repair from
+// durable workflow-run state plus one pump kick is the only recovery.
+
+describe("#1799 runner-root boot recovery", () => {
+  let wfStoreMod: typeof import("./orc-project/orc-workflow-store.js");
+  let wfRunnerMod: typeof import("./orc-project/orc-workflow-runner.js");
+  let wfCopSeq = 0;
+
+  async function workflowMods(): Promise<void> {
+    // No caching: beforeEach resets the module registry for a fresh TEST_HOME,
+    // so these must resolve against the current test's registry every time
+    // (a cached instance would write to the previous test's database file).
+    wfStoreMod = await import("./orc-project/orc-workflow-store.js");
+    wfRunnerMod = await import("./orc-project/orc-workflow-runner.js");
+  }
+
+  function makeSpinAdapter(starts: string[]) {
+    return {
+      kind: "agent",
+      schedulingPolicy: { recovery: "process_bound" },
+      capacity: async () => ({ available: 1, max: 1 }),
+      start: async (claim: { attemptId: string; generation: number }) => {
+        starts.push(claim.attemptId);
+        return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: "spin-local" };
+      },
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async () => ({ kind: "running", lifecycle: "running" }),
+    };
+  }
+
+  async function waitFor(cond: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  }
+
+  function rootStatus(rootId: number): string {
+    return (kanban.requireTaskDatabase().prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(rootId) as { status: string }).status;
+  }
+
+  function attemptLifecycle(attemptId: string): string {
+    return (JSON.parse(attemptRowJson(attemptId)) as { lifecycle: string }).lifecycle;
+  }
+
+  /** Queued O root + live workflow run + supervision at the given state. */
+  async function seedRunnerRoot(opts: {
+    title: string;
+    rootKind?: "interactive" | "peer" | "scheduled";
+    source?: string;
+    sourceId?: string | null;
+    scheduledRunId?: string | null;
+    supState?: "awaiting_contract" | "executing" | "repairing";
+    running?: boolean;
+  }): Promise<{ rootId: number; runId: string }> {
+    await workflowMods();
+    const rootId = kanban.kanbanEnqueue(opts.title, opts.source ?? "agent", opts.sourceId ?? undefined, { type: "O", goal: "g" });
+    if (opts.scheduledRunId) {
+      kanban.requireTaskDatabase().prepare(
+        `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at, reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+         VALUES (?, ?, ?, 1, 'schedule', 0, 0, 9999999999999, 'executing', 0, 1)`,
+      ).run(opts.scheduledRunId, `task-${opts.scheduledRunId}`, `g-${opts.scheduledRunId}`);
+    }
+    const wfStore = new wfStoreMod.WorkflowStore();
+    const wfRunner = new wfRunnerMod.WorkflowRunner(wfStore, ["general"]);
+    wfCopSeq++;
+    const { run } = wfRunner.admit({
+      rootKind: opts.rootKind ?? "interactive", rootCardId: rootId,
+      scheduledRunId: opts.scheduledRunId ?? null,
+      clientOperationId: `1799-${wfCopSeq}`,
+    });
+    const review = new reviewStoreMod.ProjectReviewStore();
+    review.ensureAwaitingContract(rootId);
+    if ((opts.supState ?? "executing") !== "awaiting_contract") {
+      const ok = review.stateTransition(rootId, ["awaiting_contract"], opts.supState ?? "executing");
+      if (!ok) throw new Error(`test setup: supervision transition failed for ${rootId}`);
+    }
+    if (opts.running) kanban.kanbanRunning(rootId);
+    return { rootId, runId: run.runId };
+  }
+
+  /** W child with worker contract + never-started pending agent attempt. */
+  function seedAgentChild(rootId: number, tag: string): { childId: number; attemptId: string } {
+    const childId = kanban.kanbanEnqueue(`${tag} child`, "agent", undefined, { type: "W", parent_id: rootId });
+    const supStore = new workerStoreMod.WorkerSupervisionStore();
+    const contractId = `ct_1799_${tag}_${childId}`;
+    supStore.insertContract({
+      schema_version: 1, id: contractId, digest: `d_${contractId}`, goal: "g",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      expected_artifacts: [], verification_commands: [], required_capabilities: [], supports_root_criteria: ["c1"], limits: {},
+      provenance: { root_card_id: rootId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
+    } as never, childId);
+    const attemptId = `a_1799_${tag}_${childId}`;
+    supStore.insertAttempt({
+      id: attemptId, card_id: childId, contract_id: contractId, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "pending",
+      started_at: new Date().toISOString(),
+      root_project_card_id: rootId, root_project_generation: 1, scheduled_run_id: null,
+    } as never);
+    return { childId, attemptId };
+  }
+
+  function dropLegacyTable(): void {
+    kanban.requireTaskDatabase().exec(`DROP TABLE IF EXISTS orc_project_runs`);
+  }
+
+  function hasLegacyTable(): boolean {
+    return kanban.requireTaskDatabase().prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'`,
+    ).get() !== undefined;
+  }
+
+  /** Boot without the legacy Orc run store anywhere in the path. */
+  function minimalCoordinator() {
+    return { bootRecovery: () => [] as number[], onOwnershipReleased: () => () => {} };
+  }
+
+  it("a queued runner root with a pending child is promoted and started without the legacy table", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 main root" });
+    const { attemptId } = seedAgentChild(rootId, "main");
+    dropLegacyTable();
+    expect(hasLegacyTable()).toBe(false);
+
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    // Recovery read its candidates from runner-owned storage: nothing
+    // recreated the legacy table.
+    expect(hasLegacyTable()).toBe(false);
+    await waitFor(() => rootStatus(rootId) === "running", "root promotion");
+    await waitFor(() => starts.includes(attemptId), "attempt start through the adapter");
+    await waitFor(() => attemptLifecycle(attemptId) === "running", "attempt running");
+  });
+
+  it("a candidate with no child yet is still promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 childless root" });
+    dropLegacyTable();
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    // Discovery is independent of child publication.
+    await waitFor(() => rootStatus(rootId) === "running", "childless promotion");
+  });
+
+  it("an already-running root with a pending child is started by the pump kick", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 running root", running: true });
+    const { attemptId } = seedAgentChild(rootId, "kick");
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    await waitFor(() => starts.includes(attemptId), "pump-kick start");
+    expect(rootStatus(rootId)).toBe("running");
+  });
+
+  it("awaiting-contract supervision is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 awaiting root", supState: "awaiting_contract" });
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a terminal workflow is not promoted", async () => {
+    const { rootId, runId } = await seedRunnerRoot({ title: "1799 cancelled root" });
+    await workflowMods();
+    new wfStoreMod.WorkflowStore().db.prepare(`UPDATE workflow_runs SET state = 'cancelled' WHERE run_id = ?`).run(runId);
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a terminal card is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 done root" });
+    kanban.kanbanRunning(rootId);
+    kanban.kanbanComplete(rootId, null, "done in setup");
+    expect(rootStatus(rootId)).toBe("done");
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("done");
+  });
+
+  it("rejected authority is not promoted", async () => {
+    const schedId = "1799-neg-run";
+    const { rootId } = await seedRunnerRoot({
+      title: "1799 sched root", rootKind: "scheduled",
+      source: "task", sourceId: schedId, scheduledRunId: schedId,
+    });
+    // The owning scheduled run finished after admission: authority rejects.
+    kanban.requireTaskDatabase().prepare(`UPDATE task_runs SET finished_at = ?, outcome = 'success' WHERE run_id = ?`)
+      .run(Date.now(), schedId);
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a queued quarantined root is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 quarantined root" });
+    const qs = new quarantineMod.ReconcileQuarantineStore();
+    for (let i = 0; i < 5; i++) qs.recordFailure(rootId, "boom", new Date().toISOString());
+    expect(qs.isQuarantined(rootId)).toBe(true);
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      getQuarantineStore: (() => qs) as never,
+    });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("one candidate throwing records its failure without blocking the next repair or the pump kick", async () => {
+    // Bad first (lower card id): a card-scoped write-failure trigger aborts
+    // its promotion CAS inside the real kanbanTransition — a genuine durable
+    // write error, not a mocked projection. Good second: an ordinary queued
+    // root with a pending child.
+    const bad = await seedRunnerRoot({ title: "1799 bad root" });
+    const good = await seedRunnerRoot({ title: "1799 good root" });
+    const { attemptId } = seedAgentChild(good.rootId, "good");
+    kanban.requireTaskDatabase().exec(
+      `CREATE TRIGGER trg_1799_boom BEFORE UPDATE ON kanban_board
+       WHEN NEW.id = ${bad.rootId} AND NEW.status = 'running'
+       BEGIN SELECT RAISE(ABORT, '1799 boom'); END`,
+    );
+
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    // The loop continued past the throw and the final pump kick ran.
+    await waitFor(() => rootStatus(good.rootId) === "running", "good root promotion");
+    await waitFor(() => starts.includes(attemptId), "good attempt start");
+    // The thrower recorded its failure and stayed queued.
+    expect(rootStatus(bad.rootId)).toBe("queued");
+    const q = kanban.requireTaskDatabase().prepare(
+      `SELECT failure_count FROM reconcile_quarantine WHERE card_id = ?`,
+    ).get(bad.rootId) as { failure_count: number } | undefined;
+    expect(q?.failure_count).toBe(1);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { ContributionStore, type ContributionState } from "./contribution-store.js";
+import { ContributionStore, hasLiveContributionForProject, type ContributionState } from "./contribution-store.js";
 import type { PeerContributionEventV1 } from "./contract.js";
 
 let _Database: any = null;
@@ -292,6 +292,80 @@ describe("ContributionStore", () => {
       store.reserve("p1", "r3", "h", 200, null, null);
       const rows = store.getProjectContributions(100);
       expect(rows.length).toBe(2);
+    });
+  });
+
+  describe("hasLiveContributionForProject (#1680 contribution_wait predicate)", () => {
+    let db: import("better-sqlite3").Database;
+
+    beforeEach(async () => {
+      db = harness.raw;
+      // Real production board schema so the join over proxy.status is valid.
+      const { ensureKanbanBoardSchema } = await import("../tasks/kanban-board.js");
+      ensureKanbanBoardSchema(db);
+      // The predicate only touches peer_contributions + kanban_board; the
+      // proxy rows reference synthetic root ids, so FK enforcement is off here.
+      db.pragma("foreign_keys = OFF");
+      // Ensure the peer_help_requests table is not required; the predicate only
+      // touches peer_contributions + kanban_board.
+    });
+
+    it("returns true for an accepted contribution with a running proxy", () => {
+      store.reserveProxy({
+        peer: "p1", requestId: "r1", requestHash: "h1",
+        projectCardId: 500, title: "help", goal: "g", priority: "HIGH",
+        sourcePeer: "p1", proxyCardId: undefined, notes: {},
+      });
+      store.transitionToAccepted("p1", "r1");
+      const row = store.getContribution("p1", "r1")!;
+      expect(row.state).toBe("accepted");
+      expect(hasLiveContributionForProject(db as never, 500)).toBe(true);
+    });
+
+    it("returns true for a running contribution", () => {
+      store.reserveProxy({
+        peer: "p1", requestId: "r2", requestHash: "h2",
+        projectCardId: 501, title: "help", goal: "g", priority: "HIGH",
+        sourcePeer: "p1", proxyCardId: undefined, notes: {},
+      });
+      store.transitionToAccepted("p1", "r2");
+      store.transitionToRunning("p1", "r2");
+      expect(hasLiveContributionForProject(db as never, 501)).toBe(true);
+    });
+
+    it("returns false for a pending contribution", () => {
+      store.reserveProxy({
+        peer: "p1", requestId: "r3", requestHash: "h3",
+        projectCardId: 502, title: "help", goal: "g", priority: "HIGH",
+        sourcePeer: "p1", proxyCardId: undefined, notes: {},
+      });
+      expect(hasLiveContributionForProject(db as never, 502)).toBe(false);
+    });
+
+    it("returns false when the proxy is terminal (done)", () => {
+      store.reserveProxy({
+        peer: "p1", requestId: "r4", requestHash: "h4",
+        projectCardId: 503, title: "help", goal: "g", priority: "HIGH",
+        sourcePeer: "p1", proxyCardId: undefined, notes: {},
+      });
+      store.transitionToAccepted("p1", "r4");
+      db.prepare("UPDATE kanban_board SET status = 'done' WHERE id = (SELECT proxy_card_id FROM peer_contributions WHERE request_id = 'r4')").run();
+      expect(hasLiveContributionForProject(db as never, 503)).toBe(false);
+    });
+
+    it("returns false for a terminal contribution even with a running proxy", () => {
+      store.reserveProxy({
+        peer: "p1", requestId: "r5", requestHash: "h5",
+        projectCardId: 504, title: "help", goal: "g", priority: "HIGH",
+        sourcePeer: "p1", proxyCardId: undefined, notes: {},
+      });
+      store.transitionToAccepted("p1", "r5");
+      store.applyEvent("p1", makeEvent({ request_id: "r5", contribution_ref: store.getContribution("p1", "r5")!.contribution_ref, sequence: 0, kind: "completed", projection: { schema_version: 1, outcome: "completed", summary: "done", evidence: [], artifacts: [], provenance: { receiver_peer: "p1", receiver_project_ref: "p", acceptance_id: "a", accepted_at: new Date().toISOString() } } }), "d", '{"outcome":"completed"}');
+      expect(hasLiveContributionForProject(db as never, 504)).toBe(false);
+    });
+
+    it("fails closed to false when the read is unavailable", () => {
+      expect(hasLiveContributionForProject({ prepare: () => { throw new Error("no db"); } } as never, 505)).toBe(false);
     });
   });
 });

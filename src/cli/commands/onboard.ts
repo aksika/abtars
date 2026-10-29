@@ -45,9 +45,9 @@ export interface OnboardOptions {
   readonly localDir?: string;
 }
 
-type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
+type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini' | 'opencode';
 
-const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini'];
+const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini', 'opencode'];
 
 /** Map onboard choice → transport.json provider name */
 const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
@@ -57,15 +57,9 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   ollama: 'ollama',
   kiro: 'kiro',
   gemini: 'gemini',
+  opencode: 'opencode',
 };
-const DEFAULT_MODELS: Record<ProviderChoice, string> = {
-  openrouter: 'deepseek/deepseek-v4-flash',
-  anthropic: 'claude-sonnet-4-5-20250929',
-  openai: 'gpt-4o',
-  ollama: 'kimi-k2.5:cloud',
-  kiro: 'claude-sonnet-4.6',
-  gemini: 'gemini-2.5-flash',
-};
+
 
 /** Providers that use an API key + HTTP endpoint (can validate via /v1/models). */
 const API_PROVIDERS: ReadonlySet<ProviderChoice> = new Set(['openrouter', 'anthropic', 'openai', 'ollama']);
@@ -77,13 +71,14 @@ const PROVIDER_ENDPOINT: Record<string, string> = {
   ollama: 'http://localhost:11434/v1',
 };
 
-const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
+const PROVIDER_API_KEY_ENV: Partial<Record<ProviderChoice, string>> = {
   openrouter: 'OPENROUTER_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   ollama: 'OLLAMA_API_KEY',
   kiro: 'KIRO_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  // #1827: opencode (Zen free) needs no key — keyless-first, ollama-style.
 };
 
 /** Minimal provider definitions needed to make a fresh onboarding config valid. */
@@ -94,7 +89,19 @@ const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> =
   ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
   kiro: { transport: "acp", cli: "kiro-cli" },
   gemini: { transport: "acp", cli: "gemini" },
+  opencode: { transport: "api", endpoint: "https://opencode.ai/inference/v1" },
 };
+
+/**
+ * Shipped pi-stack default (#1827). The wizard no longer asks for provider,
+ * model, or API key — the operator installs pi via deps and adjusts the model
+ * via /model afterwards. Realtime (non-batch) variant: batch queueing latency
+ * would hit every user-visible turn, and batch lacks max_completion_tokens.
+ * Tracks the rank-1 openrouter luna entry in templates/config/models.json;
+ * the catalog sync dropped openai/gpt-6-luna, which no longer validates.
+ */
+const SHIPPED_DEFAULT_PROVIDER: ProviderChoice = 'openrouter';
+const SHIPPED_DEFAULT_MODEL = 'openai/gpt-5.6-luna';
 
 interface WizardAnswers {
   readonly installMode: "simple" | "daemon";
@@ -112,7 +119,6 @@ interface WizardAnswers {
   readonly hailMaryModel: string;
   readonly groqApiKey: string;
   readonly securityMode: string;
-  readonly trustMode: boolean;
 }
 
 
@@ -166,12 +172,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const securityMode = await select({
     message: 'Security mode',
     options: [
-      { value: 'off', label: 'off — no restrictions (ActionGate still active)' },
-      { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
-      { value: 'seatbelt', label: 'seatbelt — guardrails + OS per-command sandbox (bwrap/sandbox-exec)' },
-      { value: 'docker', label: 'docker — full isolation: per-session Docker containers (requires Docker)' },
+      { value: 'off', label: 'off — no restrictions and no approval prompts (bridge self-protection stays)' },
+      { value: 'guardrails', label: 'guardrails — path guard, command blocklist, Telegram approval prompts (recommended)' },
+      { value: 'seatbelt', label: 'seatbelt — reserved; runs guardrails until OS sandbox wiring lands' },
+      { value: 'docker', label: 'docker — reserved; runs guardrails until container wiring lands' },
     ],
-    initialValue: existing?.securityMode ?? 'guardrails',
+    initialValue: existing?.securityMode ?? 'off',
   });
   if (isCancel(securityMode)) { cancel('Cancelled.'); return null; }
 
@@ -218,66 +224,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(discordA2aChannel)) { cancel('Cancelled.'); return null; }
 
-  // 9. Provider
-  const defaultProvider = await select<ProviderChoice>({
-    message: "Model's provider (use /model to change later)",
-    options: [
-      { value: 'openrouter', label: 'openrouter — many models via API key' },
-      { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
-      { value: 'openai', label: 'openai — GPT API (direct)' },
-      { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
-      { value: 'kiro', label: 'kiro — Kiro CLI' },
-      { value: 'gemini', label: 'gemini — Gemini CLI' },
-    ],
-    initialValue: existing?.defaultProvider ?? 'openrouter',
-  });
-  if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
-
-  // 10. Main model (prefilled per provider)
-  const defaultModel = await text({
-    message: 'Main model',
-    placeholder: DEFAULT_MODELS[defaultProvider],
-    initialValue: existing?.defaultModel ?? DEFAULT_MODELS[defaultProvider],
-  });
-  if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
-  const modelStr = String(defaultModel ?? '').trim() || DEFAULT_MODELS[defaultProvider];
-
-  // 11. API key — required + validated for OpenRouter, optional for others
-  const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
-  let providerApiKey = existing?.providerApiKey ?? '';
-  if (defaultProvider === 'openrouter') {
-    const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-    let validated = false;
-    while (!validated) {
-      const v = await text({
-        message: `${apiKeyEnv} (required)`,
-        placeholder: 'sk-or-v1-...',
-        initialValue: providerApiKey || existing?.providerApiKey,
-        validate: (val) => val?.trim() ? undefined : 'API key required for OpenRouter',
-      });
-      if (isCancel(v)) { cancel('Cancelled.'); return null; }
-      providerApiKey = String(v ?? '').trim();
-      process.stdout.write('  Validating key...');
-      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
-      if (result.ok) {
-        process.stdout.write(` ✓ valid\n`);
-        validated = true;
-      } else {
-        process.stdout.write(` ✗ ${result.message}\n`);
-        const retry = await confirm({ message: 'Try a different key?', initialValue: true });
-        if (isCancel(retry)) { cancel('Cancelled.'); return null; }
-        if (!retry) { validated = true; }
-      }
-    }
-  } else {
-    const v = await text({
-      message: `${apiKeyEnv} (${noteEmpty})`,
-      placeholder: 'leave blank for local providers',
-      initialValue: existing?.providerApiKey,
-    });
-    if (isCancel(v)) { cancel('Cancelled.'); return null; }
-    providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
-  }
+  // 9-11. Provider / model / API key (#1827): no longer asked. The install
+  // ships the pi-stack default below; the operator installs pi via
+  // `abtars deps install pi` and adjusts the model via /model afterwards.
+  const defaultProvider: ProviderChoice = SHIPPED_DEFAULT_PROVIDER;
+  const modelStr = SHIPPED_DEFAULT_MODEL;
+  const providerApiKey = '';
 
   // Summary — #1354: credentials are presence-only, never values or fragments.
   const presence = (s: string): string => (s ? "(set)" : "(not set)");
@@ -290,9 +242,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
     `  Telegram token:      ${presence(String(telegramToken ?? ''))}`,
     `  Discord bot token:   ${presence(String(discordBotToken ?? ''))}`,
-    `  Provider:            ${defaultProvider}`,
-    `  Main model:          ${modelStr}`,
-    `  ${apiKeyEnv}:        ${presence(providerApiKey)}`,
+    `  Provider:            ${defaultProvider} (shipped pi-stack default)`,
+    `  Main model:          ${modelStr} (change later via /model)`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -317,8 +268,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     providerApiKey,
     hailMaryModel: modelStr,
     groqApiKey: existing?.groqApiKey ?? '',
-    securityMode: String(securityMode ?? 'guardrails'),
-    trustMode: true,
+    securityMode: String(securityMode ?? 'off'),
   };
 }
 
@@ -380,7 +330,17 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
   if (!opts.userName) return '--user-name is required in non-interactive mode';
   if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
-  const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
+  // #1827: provider/model ship as the pi-stack default; explicit flags still
+  // override when present (blank explicit values are rejected).
+  if (opts.defaultProvider !== undefined && !opts.defaultProvider.trim()) {
+    return '--default-provider must not be blank';
+  }
+  if (opts.defaultModel !== undefined && !opts.defaultModel.trim()) {
+    return '--default-model must not be blank';
+  }
+  const defaultProvider = (opts.defaultProvider?.trim() || SHIPPED_DEFAULT_PROVIDER) as ProviderChoice;
+  const defaultModel = opts.defaultModel?.trim() || SHIPPED_DEFAULT_MODEL;
+  const provider = defaultProvider as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
@@ -395,12 +355,11 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     discordAppId: '',
     discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
-    defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
+    defaultModel,
     providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     groqApiKey: '',
-    securityMode: 'guardrails',
-    trustMode: true,
+    securityMode: 'off',
   };
 }
 
@@ -412,8 +371,11 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
       if (m && m[1] !== undefined && m[2] !== undefined) kv.set(m[1], m[2]);
     }
-    const provider = (kv.get('DEFAULT_PROVIDER') ?? 'openrouter') as ProviderChoice;
-    if (!VALID_PROVIDERS.includes(provider)) return null;
+    const providerRaw = kv.get('DEFAULT_PROVIDER')?.trim();
+    const provider = providerRaw ? (providerRaw as ProviderChoice) : null;
+    if (!provider || !VALID_PROVIDERS.includes(provider)) return null;
+    const modelRaw = kv.get('DEFAULT_MODEL')?.trim();
+    if (!modelRaw) return null;
     return {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
@@ -427,12 +389,11 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       discordAppId: kv.get('DISCORD_APP_ID') ?? '',
       discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? '',
       defaultProvider: provider,
-      defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
+      defaultModel: modelRaw,
       providerApiKey: '',
       hailMaryModel: '',
       groqApiKey: '',
-      securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
-      trustMode: kv.get('TRUST_MODE') === 'true',
+      securityMode: kv.get('SECURITY_MODE') ?? 'off',
     };
   } catch {
     return null;
@@ -444,9 +405,9 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
+    'HEARTBEAT_INTERVAL_SEC',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED',
-    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
+    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_MODE',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -468,13 +429,12 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   newBlock.push(`HEARTBEAT_INTERVAL_SEC=60`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
-  newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
   newBlock.push(`LOG_LEVEL=debug`);
   newBlock.push(`ACTIVE_MEMORY=true`);
   newBlock.push(`ENABLE_AGENT_API=false`);
-  newBlock.push(`SELFHEAL_ENABLED=true`);
+  newBlock.push(`SELFHEAL_MODE=off`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }

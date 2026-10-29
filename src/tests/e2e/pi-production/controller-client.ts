@@ -91,7 +91,18 @@ export class OwnerControllerClient {
       input: true,
     });
     const client = new OwnerControllerClient(child);
-    await client.waitForDescriptor();
+    try {
+      await client.waitForDescriptor();
+    } catch (err) {
+      // #1900: own the child before readiness — a descriptor timeout must not
+      // leak the controller process.
+      try {
+        await child.terminate();
+      } catch {
+        // best effort — caller still sees the original descriptor failure
+      }
+      throw err;
+    }
     return client;
   }
 
@@ -170,6 +181,26 @@ export class OwnerControllerClient {
     const response = await this.command({ command: "conversationRows", userId, since, limit });
     this.expectOk(response, "conversationRows");
     return ((response as { ok: true; result?: unknown }).result as { rows: ConversationRow[] }).rows;
+  }
+
+  /** #1776: atomically seed hydration pairs + daily/weekly + foreign marker. */
+  async seedHydrationFixture(input: {
+    userId: string;
+    pairs: Array<{ user: string; assistant: string }>;
+    daily: string;
+    weekly: string;
+    foreignUserId: string;
+    foreignContent: string;
+  }): Promise<void> {
+    const response = await this.command({ command: "seedHydrationFixture", ...input });
+    this.expectOk(response, "seedHydrationFixture");
+  }
+
+  /** #1776: bounded tail of the fixture daemon's captured logs. */
+  async daemonLogTail(maxBytes = 32768): Promise<string> {
+    const response = await this.command({ command: "daemonLogTail", maxBytes });
+    this.expectOk(response, "daemonLogTail");
+    return ((response as { ok: true; result?: unknown }).result as { tail: string }).tail;
   }
 
   async shutdown(): Promise<void> {

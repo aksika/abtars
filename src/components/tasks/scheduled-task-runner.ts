@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
-import { logInfo, logWarn } from "../logger.js";
-import { advanceRun, requestRunTerminal, readState } from "./task-state-store.js";
+import { logDebug, logInfo, logWarn } from "../logger.js";
+import { advanceRun, requestRunTerminal, readState, persistReportContract, readReportContract } from "./task-state-store.js";
 import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
@@ -32,9 +32,10 @@ export interface ScheduledTaskRunOutcome {
   cardId?: number;
 }
 
-export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
+export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string; outcome: import("../clean-response.js").ContentOutcome }>;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string, notice: import("./task-run-settler.js").PauseNotice) => void;
-export type TaskFailureCallback = (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+/** #1688: the failure cascade carries one typed `ScheduledFailureEvent`. */
+export type TaskFailureCallback = (event: import("../sha/sha-types.js").ScheduledFailureEvent) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
 /** #1540: the production supervisor is the facade's own instance — never a second registry. */
@@ -152,6 +153,25 @@ export class ScheduledTaskRunner {
         logTaskTrace("task_preflight_passed", { task: entry.id, run: reservation.runId });
         resolvedContract = preflight.report;
         artifactBaseline = preflight.artifactBaseline;
+        // #1729 v2: persist the resolved report contract + baseline once against
+        // this occurrence for the synthesis admission check. Best-effort: a lost
+        // write fails safe to today's routing downstream (missing snapshot).
+        if (preflight.report && !persistReportContract(taskId, runId, {
+          artifactPath: preflight.report.artifactPath,
+          minBytes: preflight.report.minBytes,
+          requiredSections: preflight.report.requiredSections,
+          baseline: preflight.artifactBaseline ?? { existed: false },
+        })) {
+          // #1789: the CAS write loses in three cases — already persisted
+          // (benign reattach), run already finished, or a genuinely lost write.
+          // Re-read the cell so the benign case does not warn: only a still-absent
+          // snapshot means synthesis admission actually falls back to review routing.
+          if (readReportContract(runId) !== undefined) {
+            logDebug(TAG, `Report-contract snapshot already persisted for "${entry.id}" run ${runId} (reattach)`);
+          } else {
+            logWarn(TAG, `Report-contract snapshot not persisted for "${entry.id}" run ${runId} — synthesis admission falls back to review routing`);
+          }
+        }
       }
 
       const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
@@ -163,13 +183,15 @@ export class ScheduledTaskRunner {
         }
       }
 
-      // #1610: a scheduled one-shot announce run's final response IS the
-      // delivered payload. The contract is appended after task-file and
-      // context composition, before dispatch, only for announce one-shots —
-      // report and interactive-skill prompts stay unchanged.
+      // #1610: a scheduled one-shot announce run's final response is the
+      // user-facing payload — handed to Main, which announces it in its own
+      // words through the normal conversation pipeline (#1724). The contract
+      // is appended after task-file and context composition, before dispatch,
+      // only for announce one-shots — report and interactive-skill prompts
+      // stay unchanged.
       const deliveryContract = entry.interaction.mode === "oneshot" && entry.delivery === "announce";
       if (deliveryContract) {
-        prompt = `${prompt}\n\n[DELIVERY CONTRACT]\nYour final response is automatically delivered to the target user when this run ends.\n- Return the requested user-facing content in your final response.\n- Do not return only a completion status, a saved-file path, or a summary of what was produced.\n- Do not call platform delivery tools to deliver the result yourself.\n- Saving a workspace copy is allowed but does not replace returning the content in your final response.`;
+        prompt = `${prompt}\n\n[DELIVERY CONTRACT]\nYour final response is handed to Main (the personal agent), which announces it to the target user through the normal conversation.\n- Return the requested user-facing content in your final response; Main delivers it for you.\n- Do not return only a completion status, a saved-file path, or a summary of what was produced.\n- Do not call platform delivery tools — you cannot deliver the result yourself, and you must not claim that you announced or sent it.\n- Saving a workspace copy is allowed but does not replace returning the content in your final response.`;
       }
 
       // #1432: scheduled interactive skill launch. The skill manager launches
@@ -345,7 +367,7 @@ export class ScheduledTaskRunner {
         });
         return { status: "failed", safeDetail: detail, ...(cardId !== undefined ? { cardId } : {}) };
       }
-      const { cardId: boardId, result: response } = raceResult.value;
+      const { cardId: boardId, result: response, outcome } = raceResult.value;
       const childFactAt = raceResult.value.factAt ?? factNow();
 
       // #1539: only a durable OPERATOR cancellation settles as cancelled here.
@@ -412,7 +434,36 @@ export class ScheduledTaskRunner {
         // #1610: the one-shot announce final response is the user-facing
         // payload. deliveryText feeds the card's result_summary and delivery;
         // the short response prefix remains the operational detail.
-        const settlementDetail = response?.slice(0, 200);
+        // #1651 v2: a single-agent announce succeeds only for real text
+        // content. A reaction is a chat control signal, not a deliverable
+        // payload; no-reply and empty are silent turns. Caller-owned
+        // settlement fails closed with a structured empty_model_response
+        // diagnostic — never `"completed"`, never a delivery release. A
+        // report task never reaches this branch: its validated artifact owns
+        // settlement above the text outcome. Multi-agent project lanes carry
+        // no synthetic Spin outcome (accepted evidence owns them), so the
+        // gate applies only to the single-agent contract. The direct runner
+        // is required to return an outcome; an omitted outcome is therefore
+        // a contract violation and must fail closed just like `empty`.
+        // Multi-agent project results intentionally omit the Spin outcome and
+        // are accepted here only after their evidence/artifact gates above.
+        if (maxAgents === 1 && outcome !== "text") {
+          const detail = outcome === "no_reply"
+            ? "model signalled no reply"
+            : outcome === "reaction"
+              ? "model returned only a reaction"
+              : outcome === "empty"
+                ? "model returned no output"
+                : "model result omitted its content outcome";
+          logWarn(TAG, `Task ${entry.id}: announce turn produced no text (${outcome ?? "missing"}) — settling failed without delivery`);
+          settleRunOnce({
+            entry, run: reservation, outcome: "failed",
+            diagnostic: makeTaskFailure("execution", "empty_model_response", "validating", detail, "none"),
+            detail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
+          });
+          return { status: "failed", safeDetail: detail, cardId: boardId };
+        }
+        const settlementDetail = response.slice(0, 200);
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
           entry, run: reservation, outcome: "success", detail: settlementDetail,
@@ -468,12 +519,12 @@ function isTransientProviderError(error: unknown): boolean {
 }
 
 type ExecutionRaceResult =
-  | { kind: "completed"; value: { cardId: number; result: string; factAt?: number } }
+  | { kind: "completed"; value: { cardId: number; result: string; outcome?: import("../clean-response.js").ContentOutcome; factAt?: number } }
   | { kind: "failed"; error: Error & { cardId?: number } }
   | { kind: "timed_out"; reason: string };
 
 async function runWithDeadline(
-  promise: Promise<{ cardId: number; result: string; factAt?: number }>,
+  promise: Promise<{ cardId: number; result: string; outcome?: import("../clean-response.js").ContentOutcome; factAt?: number }>,
   timeoutMs: number,
   execControl: ExecutionControl,
   taskId: string,

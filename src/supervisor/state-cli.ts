@@ -12,9 +12,13 @@ import {
   resetRestartCount,
   migrateSupervisorState,
   getBackoffDelayMs,
+  setOwnershipEpisode,
+  clearOwnershipEpisode,
 } from "./state.js";
 import { validateBridgeLock, signalValidatedBridge, processStartIdentity } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
+import { runReconciliationTick, containCandidate, evaluateSpawnProof, readValidatedOwner } from "./reconcile-executor.js";
+import type { TransitionState } from "./reconcile.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
 
@@ -24,7 +28,7 @@ enum Exit {
   Error = 2,
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const cmd = process.argv[2];
 
   switch (cmd) {
@@ -160,6 +164,109 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "set-ownership-episode": {
+      // #1711 R5/P7: durable ownership-inconclusive marker. No candidate PID
+      // or signal authorization is ever persisted — reason text only.
+      const reason = process.argv[3] ?? "unspecified";
+      setOwnershipEpisode(home, { kind: "ownership-inconclusive", reason, since: Date.now() });
+      process.stdout.write("ok\n");
+      process.exit(Exit.Ok);
+    }
+
+    case "clear-ownership-episode": {
+      clearOwnershipEpisode(home);
+      process.stdout.write("ok\n");
+      process.exit(Exit.Ok);
+    }
+
+    case "prove-empty": {
+      // Zero-process proof before any spawn (#1711 R3). Shell-friendly output:
+      // "empty" | "occupied <n>" | "inconclusive". Only "empty" authorizes the
+      // existing spawn path; anything else must hold.
+      //
+      // Planned-replacement exception (#1711 R3): restart/update/rollback may
+      // pass exactly one recorded terminated-owner identity
+      // (`prove-empty <pid> <startIdentity>`); that identity alone is
+      // disregarded. Any other process or an incomplete snapshot still vetoes.
+      //
+      // R2.1 (v5): when relative-spelled processes cannot be attributed to any
+      // home, one `blocked-unattributable <pid> <startIdentity> <reason>
+      // <argv...>` line is appended per process so the watchdog logs them
+      // loudly — a silent freeze is a spec violation (B13).
+      const excludePid = Number(process.argv[3]);
+      const excludeIdentity = process.argv[4];
+      const hasExclude =
+        Number.isInteger(excludePid) && excludePid > 0 &&
+        excludeIdentity !== undefined && excludeIdentity !== "-" && excludeIdentity !== "";
+      const exclude = hasExclude ? { pid: excludePid, startIdentity: excludeIdentity! } : null;
+      const proof = evaluateSpawnProof(home, exclude);
+      if (proof.result === "inconclusive") {
+        process.stdout.write("inconclusive\n");
+      } else if (proof.result === "empty") {
+        process.stdout.write("empty\n");
+      } else {
+        process.stdout.write(`occupied ${proof.count}\n`);
+      }
+      for (const u of proof.unattributable) {
+        process.stdout.write(`blocked-unattributable ${u.pid} ${u.startIdentity} ${u.reason} ${u.argv.join(" ")}\n`);
+      }
+      process.exit(Exit.Ok);
+    }
+
+    case "owner-identity": {
+      // Freshly validated owner identity for the planned-command authorization
+      // point (#1711 R3). Output: "<status> <pid> <startIdentity|->".
+      const owner = readValidatedOwner(home);
+      if (owner) {
+        process.stdout.write(`valid ${owner.pid} ${owner.startIdentity}\n`);
+      } else {
+        process.stdout.write("invalid 0 -\n");
+      }
+      process.exit(Exit.Ok);
+    }
+
+    case "reconcile": {
+      // One typed boundary invocation per watchdog tick (#1711 R6). Output is
+      // a fixed-vocabulary line; the shell never classifies processes.
+      const transition = (process.argv[3] ?? "stable") as TransitionState;
+      const validTransitions: readonly TransitionState[] = ["stable", "planned-restart", "update", "rollback", "stop", "handoff"];
+      if (!validTransitions.includes(transition)) {
+        process.stderr.write(`Usage: supervisor-state reconcile <${validTransitions.join("|")}> [prevHeartbeat] [advancedFlag]\n`);
+        process.exit(Exit.Usage);
+      }
+      const prevHb = process.argv[4] !== undefined && process.argv[4] !== "-" ? Number(process.argv[4]) : null;
+      const advanced = process.argv[5] === "1";
+      if (prevHb !== null && !Number.isFinite(prevHb)) {
+        process.stderr.write("prevHeartbeat must be numeric or '-'\n");
+        process.exit(Exit.Usage);
+      }
+      const { line } = runReconciliationTick(home, transition, prevHb, advanced);
+      process.stdout.write(line + "\n");
+      process.exit(Exit.Ok);
+    }
+
+    case "contain": {
+      // Final authorization + bounded escalation (#1711 R6/R7). The executor
+      // revalidates everything fresh immediately before each signal.
+      const pid = Number(process.argv[3]);
+      const startIdentity = process.argv[4];
+      const authority = process.argv[5];
+      const transition = (process.argv[6] ?? "stable") as TransitionState;
+      const heartbeatAdvanced = process.argv[7] === "1";
+      if (
+        !Number.isInteger(pid) || pid <= 0 || !startIdentity ||
+        (authority !== "owner" && authority !== "liveness") ||
+        (process.argv[7] !== undefined && process.argv[7] !== "0" && process.argv[7] !== "1")
+      ) {
+        process.stderr.write("Usage: supervisor-state contain <pid> <startIdentity> <owner|liveness> [transition] [heartbeatAdvanced]\n");
+        process.exit(Exit.Usage);
+      }
+      const result = await containCandidate(home, pid, startIdentity, authority, transition, heartbeatAdvanced);
+      const detail = result.outcome === "contained" ? result.via : result.why;
+      process.stdout.write(`${result.outcome} ${detail}\n`);
+      process.exit(Exit.Ok);
+    }
+
     case "set-watchdog-pid": {
       // Atomic read-merge-write of the watchdog-owned watchdogPid field in
       // bridge.lock (R1.3). Replaces the watchdog's former inline python3
@@ -197,7 +304,7 @@ function main(): void {
 
     default:
       process.stderr.write(`Unknown command: ${cmd}\n`);
-      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, set-watchdog-pid, signal-bridge\n");
+      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, prove-empty, set-ownership-episode, clear-ownership-episode, set-watchdog-pid, signal-bridge\n");
       process.exit(Exit.Usage);
   }
 }
@@ -211,4 +318,4 @@ function setBridgeWatchdogPid(home: string, pid: number): void {
   atomicWriteSync(p, JSON.stringify(lock));
 }
 
-main();
+void main();

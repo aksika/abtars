@@ -33,6 +33,44 @@ export interface BootstrapFn {
   (domain: string, plistPath: string): BootstrapResult;
 }
 
+export type WatchdogStartResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+function commandErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "stderr" in err) {
+    const stderr = (err as { stderr?: unknown }).stderr;
+    if (Buffer.isBuffer(stderr) && stderr.length > 0) return stderr.toString().trim();
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+  }
+  return (err instanceof Error ? err.message : String(err)).trim();
+}
+
+export function isExpectedWatchdogAbsence(err: unknown): boolean {
+  const message = commandErrorMessage(err).toLowerCase();
+  // A platform-mocked unit test can run the Darwin branch on Linux, where the
+  // shell reports a missing launchctl. The subsequent bootstrap/start step is
+  // still authoritative and will fail if the service manager is unavailable.
+  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled|not found$|no such process/.test(message);
+}
+
+/** Start the Linux watchdog and surface every service-manager failure. */
+export function startSystemdWatchdog(execSyncFn: typeof execSync = execSync): WatchdogStartResult {
+  const commands: Array<[string, string]> = [
+    ["systemctl --user unmask abtars-watchdog", "unmask watchdog unit"],
+    ["systemctl --user enable abtars-watchdog", "enable watchdog unit"],
+    ["systemctl --user start abtars-watchdog", "start watchdog unit"],
+  ];
+  for (const [command, operation] of commands) {
+    try {
+      execSyncFn(command, { stdio: "ignore", timeout: 5000 });
+    } catch (err) {
+      return { ok: false, error: `${operation}: ${commandErrorMessage(err).slice(-300)}` };
+    }
+  }
+  return { ok: true };
+}
+
 export function runLaunchctlBootstrap(
   domain: string,
   plistPath: string,
@@ -60,7 +98,7 @@ export function runLaunchctlBootstrap(
           timeout: 5000,
           stdio: ["ignore", "pipe", "pipe"],
         });
-      } catch {}
+      } catch { /* the job may already be absent after the EIO race; the retry below is the source of truth */ }
       result = run();
       if (result.status === 0) {
         return { ok: true };
@@ -223,6 +261,16 @@ export async function deployActivation(
   args: { staged: StagedRelease; channel: SourceName; repoRoot: string },
   bootstrapFn?: BootstrapFn,
   healthProbeFn?: typeof healthProbe,
+  systemdStartFn: () => WatchdogStartResult = startSystemdWatchdog,
+  watchdogStopFn: () => void = () => {
+    if (process.platform === "darwin") {
+      const uid = `gui/${process.getuid?.() ?? 501}`;
+      try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog`, { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+    } else {
+      try { execSync("systemctl --user stop abtars-watchdog", { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+    }
+  },
+  inWatchdogServiceCgroupFn: () => boolean = inWatchdogServiceCgroup,
 ): Promise<number> {
   const { staged, channel, repoRoot } = args;
   const paths = packagePaths("abtars");
@@ -241,6 +289,25 @@ export async function deployActivation(
     if (preflightCode !== 0) return preflightCode;
   }
 
+  // ── Step 2.5: Skill dependency preparation (#1542) ────────────────────
+  // Validate + prepare declared dependencies for the staged core skills
+  // (templates/skills/*, which will replace runtime skills/core) and every
+  // preserved user-owned runtime skill, BEFORE the first activation mutation.
+  // Failure aborts the release — the previous active release and release
+  // history remain unchanged. reconcile()/restore stay synchronous and
+  // network-free; installation only happens at this controlled boundary.
+  const { prepareDeploySkillDependencies } = await import("../../components/skill-dependencies.js");
+  try {
+    const prep = await prepareDeploySkillDependencies(join(staged.stagedPath, "templates"), paths.home);
+    if (prep.installed.length > 0) {
+      process.stdout.write(`✓ skill deps prepared (${prep.installed.map(p => `${p.name}@${p.version}`).join(", ")})\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`x ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`x Skill dependency preparation failed — release not activated; previous release and history unchanged.\n`);
+    return 1;
+  }
+
   // ── Step 3: Deploy to releases dir + repoint symlink ────────────────
   mkdirSync(paths.releasesDir, { recursive: true });
   const releaseDir = join(paths.releasesDir, staged.commit || staged.version);
@@ -254,7 +321,22 @@ export async function deployActivation(
   // Dedup ensures history[1] is always a DIFFERENT commit than history[0],
   // so the circuit-breaker rollback target is never the just-deployed version.
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(paths.releasesHistory, "utf-8")); } catch {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(paths.releasesHistory, "utf-8"));
+    if (!Array.isArray(parsed) || !parsed.every((entry): entry is string => typeof entry === "string")) {
+      throw new Error("release history must be an array of strings");
+    }
+    history = parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`x Cannot read release history: ${message.slice(-300)}\n`);
+      return 1;
+    }
+    // #1828: absent history starts empty. Onboard scaffolds the manifest
+    // before the first update runs, so manifest presence cannot distinguish a
+    // fresh machine from an upgrade. Only corrupt content is fatal.
+  }
   const newRef = staged.commit || staged.version;
   history = history.filter(h => h !== newRef);
   history.unshift(newRef);
@@ -303,19 +385,20 @@ export async function deployActivation(
   // ── Step 7 + 8: Stop + respawn (FROZEN — abtars.md watchdog; #1299) ───
   // CGROUP DIVERGENCE (#1299): when this deploy process is inside the
   // abtars-watchdog.service cgroup (the `/update dev` bridge path — spawned
-  // detached but same cgroup, KillMode=control-group), stopping the service or
-  // killing the watchdog would SIGTERM THIS process before it finishes. So on
-  // that path we touch NEITHER the service NOR the watchdog: we kill only the
-  // bridge PID and let the live L3 watchdog (abtars-watchdog.sh poll loop)
-  // detect process-gone and respawn the bridge from the freshly-repointed app/
-  // symlink. Consequence: a changed abtars-watchdog.sh is NOT picked up on this
-  // path — use scripts/emergency-update.sh (runs OUTSIDE the cgroup) or a manual
-  // `abtars update --dev` for a full watchdog refresh.
+  // detached but same cgroup), stopping the service or killing the watchdog
+  // would SIGTERM THIS process before it finishes. So on that path we do not
+  // stop or kill the service: we kill only the bridge PID, then explicitly
+  // start the service and let its L3 poll loop respawn the bridge from the
+  // freshly-repointed app/ symlink. Starting is safe from inside the cgroup;
+  // it also repairs the case where a previous failed update already left the
+  // watchdog service dead. Consequence: a changed abtars-watchdog.sh is NOT
+  // picked up on this path — use scripts/emergency-update.sh (runs OUTSIDE the
+  // cgroup) or a manual `abtars update --dev` for a full watchdog refresh.
   // The out-of-cgroup CLI/emergency path and macOS keep the full stop → kill →
   // respawn sequence below (instant, and refreshes the watchdog).
   // DO NOT re-add `systemctl stop`/watchdog-kill to the in-cgroup branch — it
   // reintroduces the cgroup-suicide bug.
-  const inCgroup = inWatchdogServiceCgroup();
+  const inCgroup = inWatchdogServiceCgroupFn();
 
   // Capture old PID before any kill (health probe needs the pre-kill PID as
   // reference to detect that a new bridge has started).
@@ -334,7 +417,7 @@ export async function deployActivation(
       const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
       const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
       if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
-        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        try { process.kill(bridgePid, "SIGTERM"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
         process.stdout.write(`  x Killing bridge (PID ${bridgePid}) — L3 watchdog will respawn from new release...\n`);
         for (let i = 0; i < 10; i++) {
           await new Promise(r => setTimeout(r, 500));
@@ -352,12 +435,7 @@ export async function deployActivation(
         return 1;
       }
       // 7.1 Stop daemon service (tells WD to exit via service manager)
-      if (process.platform === "darwin") {
-        const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
-      } else {
-        try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-      }
+      watchdogStopFn();
 
       // 7.2 Wake the old watchdog; the durable command remains in state for the
       // replacement watchdog if this process also refreshes the service.
@@ -368,7 +446,10 @@ export async function deployActivation(
         if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
           process.kill(wdPid, "SIGUSR1");
         }
-      } catch {}
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ESRCH") throw err;
+      }
 
       // 7.3 Kill WD PID explicitly (belt)
       const wdLock = readBridgeLock(join(paths.home, "bridge.lock"));
@@ -376,7 +457,7 @@ export async function deployActivation(
       const wdIdentity = wdLock && typeof wdLock.watchdogStartIdentity === "string" ? wdLock.watchdogStartIdentity : null;
       if (wdPid && wdPid > 0) {
         if (wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
-          try { process.kill(wdPid, "SIGTERM"); } catch {}
+          try { process.kill(wdPid, "SIGTERM"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
         }
       }
 
@@ -385,7 +466,7 @@ export async function deployActivation(
       const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
       const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
       if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
-        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        try { process.kill(bridgePid, "SIGTERM"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
         process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
         for (let i = 0; i < 10; i++) {
           await new Promise(r => setTimeout(r, 500));
@@ -405,8 +486,8 @@ export async function deployActivation(
           const currentWdPid = currentWd && typeof currentWd.watchdogPid === "number" ? currentWd.watchdogPid : null;
           const currentWdIdentity = currentWd && typeof currentWd.watchdogStartIdentity === "string" ? currentWd.watchdogStartIdentity : null;
           if (currentWdPid === wdPid && currentWdIdentity &&
-              validateBridgePid(wdPid, currentWdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
-            try { process.kill(wdPid, "SIGKILL"); } catch {}
+            validateBridgePid(wdPid, currentWdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
+            try { process.kill(wdPid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
           }
         }
       }
@@ -419,8 +500,18 @@ export async function deployActivation(
 
   if (mode === "daemon") {
     if (inCgroup) {
-      // Nothing to start — the live L3 watchdog respawns the bridge from the
-      // new app/ symlink after the process-gone kill above.
+      // Starting (unlike stopping) the service does not tear down this
+      // deploy process. Do this even when the service is normally expected to
+      // be alive: a previous failed update may have left it inactive, and
+      // assuming a live watchdog bricks the host after the bridge is killed.
+      const startResult = systemdStartFn();
+      if (!startResult.ok) {
+        process.stderr.write(`x ${startResult.error}\n`);
+        writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "failed", version: staged.version, error: startResult.error.slice(-300), completedAt: new Date().toISOString() }) + "\n");
+        return 1;
+      }
+      // The watchdog respawns the bridge from the new app/ symlink after the
+      // process-gone kill above.
       process.stdout.write(`  Bridge killed — L3 watchdog respawning from new release\n`);
     } else {
       // 8.1 Restart daemon service. The pending update command survives the
@@ -436,9 +527,12 @@ export async function deployActivation(
           return 1;
         }
       } else {
-        try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        const startResult = systemdStartFn();
+        if (!startResult.ok) {
+          process.stderr.write(`x ${startResult.error}\n`);
+          writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "failed", version: staged.version, error: startResult.error.slice(-300), completedAt: new Date().toISOString() }) + "\n");
+          return 1;
+        }
       }
       process.stdout.write(`  Daemon started\n`);
     }
@@ -506,8 +600,11 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       if (srcContent !== dstContent) {
         writeFileSync(dst, srcContent);
         const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync(`launchctl bootstrap ${uid} "${dst}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog`, { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+        const bootstrapResult = runLaunchctlBootstrap(uid, dst);
+        if (!bootstrapResult.ok) {
+          throw new Error(`launchctl bootstrap failed: ${bootstrapResult.error}`);
+        }
         process.stdout.write(`  ✓ plist reloaded\n`);
       }
     }
@@ -519,7 +616,11 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       const dstContent = readFileSync(dst, "utf-8");
       if (srcContent !== dstContent) {
         copyFileSync(src, dst);
-        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try {
+          execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 });
+        } catch (err) {
+          throw new Error(`systemd daemon-reload failed: ${commandErrorMessage(err).slice(-300)}`);
+        }
         process.stdout.write(`  ✓ systemd unit reloaded\n`);
       }
     }

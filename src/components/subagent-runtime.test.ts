@@ -4,10 +4,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockSendPrompt = vi.fn();
 const mockDestroy = vi.fn();
 const mockResetSession = vi.fn();
+const mockSetSystemPrompt = vi.fn();
 const mockTransport = {
   sendPrompt: mockSendPrompt,
   destroy: mockDestroy,
   resetSession: mockResetSession,
+  setSystemPrompt: mockSetSystemPrompt,
   isReady: true,
   contextPercent: -1,
   initialize: vi.fn(),
@@ -136,6 +138,28 @@ describe("SubagentRuntime", () => {
     expect(result.taskId).toMatch(/^[0-9a-f]{8}$/);
   });
 
+  it("keeps the default spawn alive past 10 minutes", async () => {
+    vi.useFakeTimers();
+    let release!: (result: string) => void;
+    mockSendPrompt.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const onComplete = vi.fn();
+
+    try {
+      await runtime.spawn("browsie", "slow", { onComplete });
+      for (let i = 0; i < 50 && !mockSendPrompt.mock.calls.length; i++) await Promise.resolve();
+      expect(mockSendPrompt).toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+      release("response text");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(onComplete).toHaveBeenCalledWith(expect.any(String), "response text");
+    } finally {
+      await runtime.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn() calls onComplete with result", async () => {
     const onComplete = vi.fn();
     await runtime.spawn("browsie", "task", { onComplete });
@@ -163,30 +187,71 @@ describe("SubagentRuntime", () => {
   });
 });
 
-describe("SubagentRuntime shared registry", () => {
-  it("passes registry to createSubagentTransport when set", async () => {
-    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
-    const registry = new ModelHealthRegistry();
+describe("SubagentRuntime role SOUL system prompt (#1940)", () => {
+  /** Fresh transport per call so a background spawn from another test can
+   *  never contribute calls to this test's assertion. */
+  async function transportWith(ownSetSystemPrompt: ReturnType<typeof vi.fn>): Promise<void> {
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    // Test double: only the surface this case exercises (the factory mock
+    // replaces the real transport construction).
+    vi.mocked(createSubagentTransport).mockResolvedValueOnce({
+      transport: { ...mockTransport, setSystemPrompt: ownSetSystemPrompt } as unknown as import("./transport/kiro-transport.js").IKiroTransport,
+      model: "test-model",
+    });
+  }
+
+  it("uses the session type, not the agent name, for shared agents (Orc O, task T)", async () => {
+    const orcSet = vi.fn();
+    await transportWith(orcSet);
     const runtime = new SubagentRuntime();
-    runtime.setRegistry(registry);
+    await runtime.session("browsie", "proj", { sessionType: "O" });
+    const orcBundle = orcSet.mock.calls.at(-1)?.[0] as string;
+    expect(orcBundle).toBeDefined();
+    // Browsie's agent-default bundle is B; Orc must not receive it.
+    expect(orcBundle).not.toContain("I am a browse agent");
+
+    const taskSet = vi.fn();
+    await transportWith(taskSet);
+    const second = new SubagentRuntime();
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await second.complete("professor", "task", { sessionType: "T" });
+    const taskBundle = taskSet.mock.calls.at(-1)?.[0] as string;
+    expect(taskBundle).toContain("I am a task agent");
+  });
+
+  it("does not install a bundle for types whose profile owns none (S, D)", async () => {
+    const skillSet = vi.fn();
+    await transportWith(skillSet);
+    const runtime = new SubagentRuntime();
+    await runtime.session("coding", "skill", { sessionType: "S" });
+    expect(skillSet).not.toHaveBeenCalled();
+
+    const sleepSet = vi.fn();
+    await transportWith(sleepSet);
+    const second = new SubagentRuntime();
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await second.complete("dreamy", "sleep", { sessionType: "D" });
+    expect(sleepSet).not.toHaveBeenCalled();
+  });
+});
+
+describe("SubagentRuntime composed holders", () => {
+  it("forwards holders to createSubagentTransport", async () => {
+    const runtime = new SubagentRuntime();
 
     mockSendPrompt.mockResolvedValueOnce("ok");
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    // #1527: the late-bound durable context provider holder is the 4th arg;
-    // #1552: the memory-tool deps holder is the 5th.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined);
+    // #1552: the memory-tool deps holder is the 2nd arg.
+    // --- the transport factory's trailing workingDir override (#1807) is
+    // undefined here; the assertion pins forwarding of the first args.
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, undefined, undefined);
   });
 
-  it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
-    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
-    const registry = new ModelHealthRegistry();
+  it("#1552: forwards the composed memory-tool deps holder to lazy transports", async () => {
     const runtime = new SubagentRuntime();
-    runtime.setRegistry(registry);
 
-    const holder = { current: { projectContext: () => Promise.resolve({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 }) } };
-    runtime.setContextProvider(holder);
     const memoryDepsHolder = { current: null };
     runtime.setMemoryToolDependencies(memoryDepsHolder);
 
@@ -194,7 +259,7 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", memoryDepsHolder, undefined, undefined);
   });
 
   it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {
@@ -213,5 +278,90 @@ describe("SubagentRuntime shared registry", () => {
       runtime.session("dreamy", undefined, { candidatePolicy: "fallback-chain" }),
     ).rejects.toThrow(/conflicting reuse/);
     expect(createSubagentTransport, "the cached transport must not be recreated").toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SubagentRuntime sleep cwd binding (#1807)", () => {
+  let tmpA: string;
+  let tmpB: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockSendPrompt.mockResolvedValue("response text");
+    mockTransport.agentLabel = "professor";
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    tmpA = mkdtempSync(join(tmpdir(), "sleep-scope-a-"));
+    tmpB = mkdtempSync(join(tmpdir(), "sleep-scope-b-"));
+  });
+
+  function scope(cwd: string) {
+    return { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
+  }
+
+  it("records the binding on scoped creation and reuses it for the same cycle", async () => {
+    const { realpathSync } = await import("node:fs");
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    const s2 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    expect(s1.isReady).toBe(true);
+    expect(s2.isReady).toBe(true);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(runtime.verifyTransportBinding("dreamy", "cycle-1")).toBe(realpathSync(tmpA));
+  });
+
+  it("allocates separately per cycle identity", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    await runtime.session("dreamy", "cycle-2", { executionScope: scope(tmpA) });
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects mismatched scope reuse before any provider work", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    mockSendPrompt.mockClear();
+    await expect(
+      runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpB) }),
+    ).rejects.toThrow(/refusing reuse/);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport, "mismatched reuse must not recreate").toHaveBeenCalledTimes(1);
+    expect(mockSendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects scoped reuse of an unverified (scopeless) transport", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "legacy");
+    await expect(
+      runtime.session("dreamy", "legacy", { executionScope: scope(tmpA) }),
+    ).rejects.toThrow(/unverified/);
+  });
+
+  it("fails an unavailable cwd before creating anything", async () => {
+    const runtime = new SubagentRuntime();
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    const callsBefore = (createSubagentTransport as any).mock.calls.length;
+    await expect(
+      runtime.session("dreamy", "cycle-9", { executionScope: scope("/nonexistent-1807-scope") }),
+    ).rejects.toThrow(/unavailable/);
+    expect((createSubagentTransport as any).mock.calls.length).toBe(callsBefore);
+  });
+
+  it("a stale destroy callback cannot evict a newer entry under the same key", async () => {
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    await s1.destroy();
+    const s2 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    const creations = (createSubagentTransport as any).mock.calls.length;
+    // Stale callback from the first generation runs late: the live entry survives.
+    await s1.destroy();
+    const s3 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    expect((createSubagentTransport as any).mock.calls.length).toBe(creations);
+    expect(s3.isReady).toBe(true);
+    expect(s2.isReady).toBe(true);
   });
 });

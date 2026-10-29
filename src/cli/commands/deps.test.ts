@@ -6,17 +6,22 @@ import { createEmptyManifest, upsertRecord, writeManifest } from "../deploy-lib/
 import { hashContent } from "../deploy-lib/native-group.js";
 
 let tmpDir: string;
+let originalPath: string | undefined;
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: () => tmpDir };
 });
 
 beforeEach(() => {
+  originalPath = process.env.PATH;
+  process.env.PATH = "/usr/bin:/bin";
   tmpDir = mkdtempSync(join(tmpdir(), "deps-test-"));
   mkdirSync(join(tmpDir, ".local", "lib", "node_modules"), { recursive: true });
 });
 
 afterEach(() => {
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -150,12 +155,29 @@ describe("resolveGroupActions", () => {
     const actions = resolveGroupActions("update", ["pdf"]);
     expect(actions.some(a => a.group === "pdf" && a.reason === "missing")).toBe(true);
   });
+
+  it("all includes the auto-managed Lightpanda and Cloak binaries", async () => {
+    const { resolveSystemActions } = await import("./deps.js");
+    const actions = resolveSystemActions("install", ["all"]);
+    expect(actions.map(action => action.group)).toEqual(expect.arrayContaining(["lightpanda", "cloak"]));
+    expect(actions.every(action => action.reason === "missing")).toBe(true);
+  });
+
+  it("bare update refreshes installed auto-managed binaries and skips absent ones", async () => {
+    const localBin = join(tmpDir, ".local", "bin");
+    mkdirSync(localBin, { recursive: true });
+    writeFileSync(join(localBin, "cloak"), "");
+
+    const { resolveSystemActions } = await import("./deps.js");
+    const actions = resolveSystemActions("update", []);
+    expect(actions).toEqual([{ group: "cloak", reason: "refresh" }]);
+  });
 });
 
 // ── resolvePiUpdateAction (#1572) ─────────────────────────────────────────────
 
 describe("resolvePiUpdateAction (#1572)", () => {
-  const EXPECTED_SPEC = "@earendil-works/pi-coding-agent@~0.83.0";
+  const EXPECTED_SPEC = "@earendil-works/pi-coding-agent@~1.3.0";
   const REMEDIATION = "reinstall with: abtars deps install pi";
 
   it.each([
@@ -164,18 +186,18 @@ describe("resolvePiUpdateAction (#1572)", () => {
     ["absent", undefined, undefined, true, "install", "absent"],
     ["below-minimum", "0.82.0", undefined, false, "install", "below-pin"],
     ["below-minimum", "0.82.0", undefined, true, "install", "below-pin"],
-    ["compatible", "0.83.0", "at-pin", false, "install", "at-pin-refresh"],
-    ["compatible", "0.83.5", "at-pin", true, "install", "at-pin-refresh"],
-    ["compatible", "0.85.1", "above-pin", false, "refuse", null],
-    ["compatible", "0.85.1", "above-pin", true, "install", "forced"],
-    ["above-pin", "0.85.1", undefined, false, "refuse", null],
-    ["above-pin", "0.85.1", undefined, true, "install", "forced"],
-    ["incomplete", "0.83.0", undefined, false, "refuse", null],
-    ["incomplete", "0.83.0", undefined, true, "install", "forced"],
-    ["invalid", "0.83.0", undefined, false, "refuse", null],
-    ["invalid", "0.83.0", undefined, true, "install", "forced"],
-    ["unloadable", "0.83.0", undefined, false, "refuse", null],
-    ["unloadable", "0.83.0", undefined, true, "install", "forced"],
+    ["compatible", "1.3.0", "at-pin", false, "install", "at-pin-refresh"],
+    ["compatible", "1.3.5", "at-pin", true, "install", "at-pin-refresh"],
+    ["compatible", "1.4.0", "above-pin", false, "refuse", null],
+    ["compatible", "1.4.0", "above-pin", true, "install", "forced"],
+    ["above-pin", "1.4.0", undefined, false, "refuse", null],
+    ["above-pin", "1.4.0", undefined, true, "install", "forced"],
+    ["incomplete", "1.3.0", undefined, false, "refuse", null],
+    ["incomplete", "1.3.0", undefined, true, "install", "forced"],
+    ["invalid", "1.3.0", undefined, false, "refuse", null],
+    ["invalid", "1.3.0", undefined, true, "install", "forced"],
+    ["unloadable", "1.3.0", undefined, false, "refuse", null],
+    ["unloadable", "1.3.0", undefined, true, "install", "forced"],
   ] as const)(
     "%s v=%s force=%s → %s%s",
     async (state, version, pinStatus, force, kind, reason) => {
@@ -196,7 +218,7 @@ describe("resolvePiUpdateAction (#1572)", () => {
     const { resolvePiUpdateAction } = await import("./deps.js");
     for (const state of ["absent", "below-minimum", "compatible", "above-pin", "incomplete", "invalid", "unloadable"] as const) {
       for (const force of [false, true]) {
-        const decision = resolvePiUpdateAction({ state, version: "0.83.0", pinStatus: "at-pin" }, force);
+        const decision = resolvePiUpdateAction({ state, version: "1.3.0", pinStatus: "at-pin" }, force);
         if (decision.kind === "install") {
           expect(decision.npmSpec).toMatch(/@~?\d+\.\d+\.\d+$/);
         }
@@ -208,7 +230,7 @@ describe("resolvePiUpdateAction (#1572)", () => {
     const { resolvePiUpdateAction } = await import("./deps.js");
     for (const state of ["above-pin", "compatible"] as const) {
       const decision = resolvePiUpdateAction(
-        { state, version: "0.85.1", pinStatus: state === "compatible" ? "above-pin" : undefined },
+        { state, version: "1.4.0", pinStatus: state === "compatible" ? "above-pin" : undefined },
         false,
       );
       expect(decision.kind).not.toBe("install");
@@ -217,7 +239,7 @@ describe("resolvePiUpdateAction (#1572)", () => {
 
   it("refuse messages for above-pin carry the downgrade command", async () => {
     const { resolvePiUpdateAction } = await import("./deps.js");
-    const decision = resolvePiUpdateAction({ state: "above-pin", version: "0.85.1" }, false);
+    const decision = resolvePiUpdateAction({ state: "above-pin", version: "1.4.0" }, false);
     expect(decision.kind).toBe("refuse");
     if (decision.kind === "refuse") {
       expect(decision.message).toContain(`npm i -g '${EXPECTED_SPEC}'`);
@@ -226,7 +248,7 @@ describe("resolvePiUpdateAction (#1572)", () => {
 
   it("refuse messages for broken installs carry the remediation text", async () => {
     const { resolvePiUpdateAction } = await import("./deps.js");
-    const decision = resolvePiUpdateAction({ state: "unloadable", version: "0.83.0", remediation: REMEDIATION }, false);
+    const decision = resolvePiUpdateAction({ state: "unloadable", version: "1.3.0", remediation: REMEDIATION }, false);
     expect(decision.kind).toBe("refuse");
     if (decision.kind === "refuse") {
       expect(decision.message).toContain(REMEDIATION);
@@ -270,7 +292,48 @@ describe("abtars deps", () => {
     out.mockRestore();
   });
 
-  it("install with no args defaults to native group", async () => {
+  it("install cloak uses latest package specs and pre-downloads the browser", async () => {
+    const childProcess = await import("node:child_process");
+    const spawn = vi.mocked(childProcess.spawnSync);
+    let npmInstalled = false;
+    spawn.mockImplementation((cmd, args = []) => {
+      const result = (status: number, stdout = "", stderr = "") => ({
+        pid: -1,
+        output: [stdout, stderr],
+        status,
+        signal: null,
+        stdout,
+        stderr,
+      });
+      if (cmd === "which" && args[0] === "cloak") {
+        return npmInstalled
+          ? result(0, join(tmpDir, ".local", "bin", "cloak"))
+          : result(1);
+      }
+      if (cmd === "npm") npmInstalled = true;
+      return result(0);
+    });
+
+    const { deps } = await import("./deps.js");
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const code = await deps(["install", "cloak"]);
+    expect(code).toBe(0);
+
+    const npmCall = spawn.mock.calls.find(call => call[0] === "npm");
+    expect(npmCall).toBeDefined();
+    expect(npmCall?.[1]).toEqual(expect.arrayContaining([
+      "@dreamor/cloakbrowser-cli@latest",
+      "cloakbrowser@latest",
+      "playwright-core@latest",
+    ]));
+    expect(npmCall?.[1]).not.toEqual(expect.arrayContaining([expect.stringMatching(/@\d+\.\d+/)]));
+
+    const binaryCall = spawn.mock.calls.find(call => call[1]?.[0] === "binary");
+    expect(binaryCall?.[1]).toEqual(["binary", "install"]);
+    out.mockRestore();
+  });
+
+  it("install with no args defaults to all (pi included)", async () => {
     // Pre-create native packages at their exact targets so they appear "ready"
     const versions: Record<string, string> = { "better-sqlite3": "12.11.1", "sqlite-vec": "0.1.9" };
     for (const pkg of ["better-sqlite3", "sqlite-vec"]) {
@@ -280,8 +343,10 @@ describe("abtars deps", () => {
     }
     let manifest = createEmptyManifest();
     for (const pkg of ["better-sqlite3", "sqlite-vec"] as const) {
+      const version = versions[pkg];
+      if (!version) throw new Error(`missing test version for ${pkg}`);
       manifest = upsertRecord(manifest, pkg, {
-        version: versions[pkg], nodeAbi: process.versions.modules, nodeVersion: process.version,
+        version, nodeAbi: process.versions.modules, nodeVersion: process.version,
         platform: process.platform, arch: process.arch, contentHash: hashContent(join(tmpDir, ".local", "lib", "node_modules", pkg)), installedAt: new Date().toISOString(),
         installedBy: "abtars", consumers: ["abtars"], probe: pkg === "better-sqlite3" ? "sqlite-open-select-v1" : "sqlite-vec-load-query-v1",
       });
@@ -291,10 +356,13 @@ describe("abtars deps", () => {
     const { deps } = await import("./deps.js");
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const code = await deps(["install"]);
-    expect(code).toBe(0);
     const output = write.mock.calls.map(c => c[0]).join("");
-    expect(output).toContain("already up to date");
     write.mockRestore();
+    // Bare install must attempt pi (absent here → install attempted, fails
+    // only because the sandbox has no pi on PATH and no npm global bin).
+    expect(output).toContain("→ pi: installing");
+    expect(output).toContain("✗ pi failed");
+    expect(code).toBe(1);
   });
 
   it("list shows target version and observed version", async () => {

@@ -149,11 +149,20 @@ Interactive launches require a valid skill identifier, an exact target with `use
 ## Verify and manage
 
 ```bash
+abtars-task validate                    # dry-run check before a whole-file edit goes live
 abtars-task list
 abtars-task history <id>
 abtars-task pause <id>
 abtars-task resume <id>
 abtars-task remove <id>
 ```
+
+After a read/modify/write of `tasks.json`, run `abtars-task validate` before
+considering the file live. It checks every entry through the same parser the
+scheduler uses, rejects duplicate IDs, verifies `taskFile` and
+`report.requires.files` paths exist on disk, and reports orphaned task package
+directories under `~/.abtars/tasks/` — all in one machine-readable JSON result
+with exit code `0` only when clean. It never modifies files or task state. For
+a staged tree, set `HOME` and `ABTARS_HOME` to match that tree before running.
 
 After creation, confirm the normalized entry appears in `abtars-task list`. Trigger it with `/task run <id>` when an immediate run is appropriate, then inspect `abtars-task history <id>`. Never claim a task fired or delivered successfully without history or artifact evidence. Use `/tasks`, `/task pause <id>`, and `/task resume <id>` from chat for the corresponding operations.

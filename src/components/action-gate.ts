@@ -1,12 +1,19 @@
 /**
- * action-gate.ts — Out-of-band authorization for privileged actions.
- * Agent requests a privileged action → Telegram inline keyboard to master → proceed/deny.
+ * action-gate.ts — Out-of-band authorization for privileged actions (#1851).
+ * Agent requests a privileged action → Telegram inline keyboard to master →
+ * proceed/deny. Rules, seeds, and transport only: the caller (authorization.ts)
+ * records the outcome in the single authorization audit sink.
  */
 
 import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, sep } from "node:path";
+import { homedir } from "node:os";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+import { atomicWriteSync } from "./atomic-write.js";
+import { abmindHome, abtarsHome } from "../paths.js";
+import { resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 
 const TAG = "action-gate";
 
@@ -23,26 +30,151 @@ export interface AuthRule {
   pattern: string;
   action: "allow" | "deny";
   createdAt: string;
+  /** "seed" marks boot-seeded trusted-root defaults (user grants leave this unset). */
+  source?: "seed";
 }
+
+/**
+ * Approval verdict. `by` names which path produced it so the caller can record
+ * one meaningful authorization audit row without ActionGate owning a sink.
+ */
+export type AuthOutcome =
+  | { granted: true; by: "rule"; pattern: string }
+  | { granted: true; by: "always"; pattern: string }
+  | { granted: true; by: "once" }
+  | { granted: true; by: "unattended-task" }
+  | { granted: false; by: "rule"; pattern: string }
+  | { granted: false; by: "timeout" }
+  | { granted: false; by: "no-notify" }
+  | { granted: false; by: "send-failed" }
+  | { granted: false; by: "master" };
 
 export interface AuthRequest {
   id: string;
   category: string;
   detail: string;
-  resolve: (granted: boolean) => void;
+  resolve: (outcome: AuthOutcome) => void;
   timer: ReturnType<typeof setTimeout>;
   reminderSent: boolean;
 }
 
 export type NotifyFn = (text: string, buttons: Array<{ text: string; data: string }>) => Promise<void>;
 
+/** #1771: compile a stored rule pattern (glob: `*` → any run, `?` → one char) to an anchored regex. */
+export function globToRegExp(glob: string): RegExp {
+  let src = "^";
+  for (const ch of glob) {
+    if (ch === "*") src += ".*";
+    else if (ch === "?") src += ".";
+    else if ("\\.+^${}()|[]".includes(ch)) src += `\\${ch}`;
+    else src += ch;
+  }
+  return new RegExp(src + "$");
+}
+
+const PRIVILEGE_WRAPPERS = new Set(["sudo", "doas", "pkexec", "runuser", "su"]);
+const FAMILY_SUBCOMMAND_EXES = new Set(["git", "npm", "pnpm", "yarn", "docker"]);
+const GIT_OPTIONS_WITH_VALUES = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path", "--super-prefix"]);
+
+function commandBasename(value: string): string {
+  const slash = value.lastIndexOf("/");
+  return slash >= 0 ? value.slice(slash + 1) : value;
+}
+
 /**
- * #1629: trusted tool-authorization mode derived by Spin from durable Kanban
- * provenance. `unattended-task` is only ever set by bridge code for execution
- * whose durable root card has `source === "task"`; every other path fails
- * closed to `interactive`. The model can never supply or override it.
+ * #1771: derive the stored family pattern for an "Always allow" grant.
+ * Unwraps one privilege wrapper (prefix preserved: `sudo rm …` → `sudo rm*`)
+ * and transparent `env` + `VAR=value` prefixes (dropped). git/npm-style
+ * executables keep their subcommand (`git status*`, `npm run*`); anything
+ * else collapses to the executable (`node*`). Always ends with `*`.
  */
-export type ToolAuthorizationMode = "interactive" | "unattended-task";
+export function familyPattern(cmd: string): string {
+  const tokens = cmd.split(/\s+/).filter((t) => t.length > 0);
+  let i = 0;
+  let prefix = "";
+  if (tokens[0] !== undefined && PRIVILEGE_WRAPPERS.has(commandBasename(tokens[0]).toLowerCase())) {
+    prefix = `${tokens[0]} `;
+    i = 1;
+  }
+  if (tokens[i] === "env") {
+    i++;
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  } else {
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  }
+  const exe = tokens[i];
+  if (exe === undefined) {
+    const raw = cmd.trim();
+    return raw ? `${raw}*` : "*";
+  }
+  const rest = tokens.slice(i + 1);
+  if (FAMILY_SUBCOMMAND_EXES.has(commandBasename(exe).toLowerCase())) {
+    const optionsWithValues = commandBasename(exe).toLowerCase() === "git" ? GIT_OPTIONS_WITH_VALUES : undefined;
+    for (let k = 0; k < rest.length; k++) {
+      const arg = rest[k]!;
+      if (arg === "--") {
+        const sub = rest[k + 1];
+        return sub !== undefined ? `${prefix}${exe} ${sub}*` : `${prefix}${exe}*`;
+      }
+      if (optionsWithValues?.has(arg)) { k++; continue; }
+      if (arg.startsWith("-") && arg.length > 1) continue;
+      return `${prefix}${exe} ${arg}*`;
+    }
+  }
+  return `${prefix}${exe}*`;
+}
+
+/**
+ * REQUIREMENT: the 3 allowed directories (abmind home, abtars home,
+ * releases dir — the same trusted-root set guardrails uses) are
+ * prompt-free by default. Read-only discovery verbs (`cat`/`ls`/`find`)
+ * scoped under any of them auto-allow in ActionGate, so even a command
+ * the tier classifier flags `auth-required` (e.g. a `find ... -exec`
+ * tail) never pages the master when everything it touches is in-root.
+ *
+ * Commands match as raw text with unexpanded `~`, so each root is seeded
+ * in both `~/...` and absolute form. Seed verbs stay read-only by shape;
+ * code interpreters (`python3`, `node`, ...) are deliberately NOT seeded —
+ * an interactive interpreter prompt is correct behavior. OS-level
+ * containment stays with seatbelt; this is the authorization nuisance
+ * filter, same philosophy as the #1771 family rules (which are broader:
+ * a user-pressed "Always allow" on `cat x` stores bare `cat*`).
+ */
+const SEED_VERBS = ["cat", "ls", "find"] as const;
+
+export function buildDefaultSeedRules(
+  roots: string[] = [abmindHome(), abtarsHome(), resolveReleasesDir()],
+): AuthRule[] {
+  const now = new Date().toISOString();
+  const rules: AuthRule[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    const forms = new Set<string>([root]);
+    const home = homedir();
+    if (root === home) forms.add("~");
+    else if (root.startsWith(home + sep)) forms.add(`~/${root.slice(home.length + 1)}`);
+    for (const form of forms) {
+      for (const verb of SEED_VERBS) {
+        const pattern = `${verb} ${form}*`;
+        const key = `bash-auth\t${pattern}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rules.push({ category: "bash-auth", pattern, action: "allow", createdAt: now, source: "seed" });
+      }
+    }
+  }
+  return rules;
+}
+
+/**
+ * #1629/#1663: trusted tool-authorization mode derived by Spin from durable
+ * Kanban provenance. `unattended-task` is only ever set by bridge code for an
+ * execution whose durable root card has `source === "task"`. A card-backed
+ * execution whose provenance cannot be verified is `unverified`; it must not
+ * receive unattended grants or non-idempotent scheduled-delivery access. The
+ * model can never supply or override the mode.
+ */
+export type ToolAuthorizationMode = "interactive" | "unattended-task" | "unattended-sleep" | "unverified";
 
 export interface AuthRequestOptions {
   /** Defaults to interactive behavior when omitted or invalid. */
@@ -54,12 +186,10 @@ export class ActionGate {
   private pending = new Map<string, AuthRequest>();
   private rules: AuthRule[] = [];
   private rulesPath: string;
-  private auditPath: string;
   private notify: NotifyFn | null = null;
 
   constructor(authDir: string) {
     this.rulesPath = join(authDir, "rules.json");
-    this.auditPath = join(authDir, "audit.jsonl");
     mkdirSync(authDir, { recursive: true });
     this.loadRules();
   }
@@ -68,60 +198,89 @@ export class ActionGate {
     this.notify = fn;
   }
 
-  /** Check if a rule already allows/denies this action. */
+  /** Check if a rule already allows/denies this action (last match wins). */
   checkRules(category: string, pattern: string): "allow" | "deny" | null {
-    for (const rule of this.rules) {
-      if (rule.category !== category) continue;
-      if (rule.pattern === "*" || rule.pattern === pattern) {
-        return rule.action;
-      }
-    }
-    return null;
+    return this.matchedRule(category, pattern)?.action ?? null;
   }
 
   /**
-   * Request authorization for a privileged action.
-   * Returns true if granted, false if denied/timed out.
+   * #1771: last matching rule for (category, pattern), re-reading the file
+   * first so concurrent `abtars auth` CLI edits are honored without a
+   * restart. A parse failure keeps the last in-memory snapshot (never a
+   * silent empty set).
+   */
+  matchedRule(category: string, pattern: string): AuthRule | null {
+    this.reloadRules();
+    let matched: AuthRule | null = null;
+    for (const rule of this.rules) {
+      if (rule.category !== category) continue;
+      let re: RegExp;
+      try {
+        re = globToRegExp(rule.pattern);
+      } catch {
+        continue;
+      }
+      if (re.test(pattern)) matched = rule;
+    }
+    return matched;
+  }
+
+  /** #1771: rules for `abtars auth list` (re-reads; returns a copy). */
+  listRules(): AuthRule[] {
+    this.reloadRules();
+    return this.rules.map((r) => ({ ...r }));
+  }
+
+  /**
+   * #1771: remove rule by 0-based index for `abtars auth rm`.
+   * Re-reads before splicing and writes atomically. False on out-of-range.
+   */
+  removeRule(index: number): boolean {
+    this.reloadRules();
+    if (!Number.isInteger(index) || index < 0 || index >= this.rules.length) return false;
+    this.rules.splice(index, 1);
+    this.writeRules();
+    logInfo(TAG, `Removed rule at index ${index}`);
+    return true;
+  }
+
+  /**
+   * Request authorization for a privileged action. Returns the approval
+   * verdict; the caller records it (no audit sink here, #1851).
    *
    * #1629: persistent rules always take precedence. Only when no rule matches
    * may the unattended-task fallback auto-allow — and only for `bash-auth`.
    * The fallback never notifies and never enqueues a pending request.
    */
-  async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<boolean> {
+  async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<AuthOutcome> {
     // Check persistent rules first — they outrank every fallback
-    const rule = this.checkRules(category, detail);
-    if (rule === "allow") {
-      this.audit(category, detail, "allowed-by-rule");
-      return true;
+    const matched = this.matchedRule(category, detail);
+    if (matched?.action === "allow") {
+      return { granted: true, by: "rule", pattern: matched.pattern };
     }
-    if (rule === "deny") {
-      this.audit(category, detail, "denied-by-rule");
-      return false;
+    if (matched?.action === "deny") {
+      return { granted: false, by: "rule", pattern: matched.pattern };
     }
 
     // #1629: unattended scheduled-task execution — no rule, bash only.
-    // Audit evidence is preserved; no pending request, no notification.
     if (category === "bash-auth" && options.mode === "unattended-task") {
-      this.audit(category, detail, "allowed-unattended-task");
-      return true;
+      return { granted: true, by: "unattended-task" };
     }
 
     // No rule — ask master via Telegram
     if (!this.notify) {
       logWarn(TAG, `No notify function — auto-denying ${category}: ${detail.slice(0, 80)}`);
-      this.audit(category, detail, "denied-no-notify");
-      return false;
+      return { granted: false, by: "no-notify" };
     }
 
     const requestId = randomBytes(8).toString("hex");
     const message = this.formatMessage(category, detail);
 
-    return new Promise<boolean>((resolve) => {
+    return new Promise<AuthOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         logWarn(TAG, `Auth request timed out: ${category} ${detail.slice(0, 60)}`);
-        this.audit(category, detail, "denied-timeout");
-        resolve(false);
+        resolve({ granted: false, by: "timeout" });
       }, 120_000);
 
       // 60s reminder
@@ -129,15 +288,15 @@ export class ActionGate {
         const req = this.pending.get(requestId);
         if (req && !req.reminderSent) {
           req.reminderSent = true;
-          this.notify?.("⏳ Still waiting for authorization...", []).catch(() => {});
+          this.notify?.("⏳ Still waiting for authorization...", []).catch(err => logAndSwallow(TAG, "send authorization reminder", err));
         }
       }, 60_000);
 
-      this.pending.set(requestId, { id: requestId, category, detail, resolve: (granted) => {
+      this.pending.set(requestId, { id: requestId, category, detail, resolve: (outcome) => {
         clearTimeout(timer);
         clearTimeout(reminderTimer);
         this.pending.delete(requestId);
-        resolve(granted);
+        resolve(outcome);
       }, timer, reminderSent: false });
 
       this.notify!(message, [
@@ -149,10 +308,32 @@ export class ActionGate {
         clearTimeout(timer);
         clearTimeout(reminderTimer);
         this.pending.delete(requestId);
-        this.audit(category, detail, "denied-send-failed");
-        resolve(false);
+        resolve({ granted: false, by: "send-failed" });
       });
     });
+  }
+
+  /**
+   * Idempotently ensure the trusted-root default allows exist.
+   * REQUIREMENT: inside the 3 allowed directories the guardrail never
+   * pages the master; the defaults ship in code and every boot (hence
+   * every update/restart) re-seeds whatever is missing.
+   *
+   * Seeds are PREPENDED, never appended, so a user's own rule always
+   * keeps last-match-wins precedence over them. A deny written with the
+   * IDENTICAL pattern string also wins: the seed key is already present
+   * and gets skipped here, leaving the deny as the only matching rule.
+   * Returns the patterns that were added (empty when already seeded).
+   */
+  ensureSeededDefaults(): string[] {
+    this.reloadRules();
+    const have = new Set(this.rules.map((r) => `${r.category}\t${r.pattern}`));
+    const missing = buildDefaultSeedRules().filter((r) => !have.has(`${r.category}\t${r.pattern}`));
+    if (missing.length === 0) return [];
+    this.rules.unshift(...missing);
+    this.writeRules();
+    logInfo(TAG, `Seeded ${missing.length} trusted-root default allows`);
+    return missing.map((r) => r.pattern);
   }
 
   /** Handle callback from Telegram button press. */
@@ -165,15 +346,14 @@ export class ActionGate {
     if (!req) return false;
 
     if (action === "once") {
-      this.audit(req.category, req.detail, "allowed-once");
-      req.resolve(true);
+      req.resolve({ granted: true, by: "once" });
     } else if (action === "always") {
-      this.storeRule(req.category, req.detail, "allow");
-      this.audit(req.category, req.detail, "allowed-always");
-      req.resolve(true);
+      // #1771: store the command family, never the raw command text.
+      const family = familyPattern(req.detail);
+      this.storeRule(req.category, family, "allow");
+      req.resolve({ granted: true, by: "always", pattern: family });
     } else {
-      this.audit(req.category, req.detail, "denied");
-      req.resolve(false);
+      req.resolve({ granted: false, by: "master" });
     }
     return true;
   }
@@ -205,9 +385,29 @@ export class ActionGate {
   }
 
   private storeRule(category: string, pattern: string, action: "allow" | "deny"): void {
+    // #1771: re-read before appending so a concurrent CLI edit is not
+    // clobbered (and a just-removed rule is not resurrected).
+    this.reloadRules();
     this.rules.push({ category, pattern, action, createdAt: new Date().toISOString() });
-    writeFileSync(this.rulesPath, JSON.stringify({ rules: this.rules }, null, 2) + "\n");
+    this.writeRules();
     logInfo(TAG, `Stored rule: ${action} ${category}:${pattern}`);
+  }
+
+  private writeRules(): void {
+    try {
+      atomicWriteSync(this.rulesPath, JSON.stringify({ rules: this.rules }, null, 2) + "\n");
+    } catch (err) {
+      logAndSwallow(TAG, "write rules file", err);
+    }
+  }
+
+  private reloadRules(): void {
+    if (!existsSync(this.rulesPath)) { this.rules = []; return; }
+    try {
+      const data = JSON.parse(readFileSync(this.rulesPath, "utf-8")) as { rules?: unknown };
+      if (Array.isArray(data.rules)) this.rules = data.rules as AuthRule[];
+      // Non-array payload: keep the last in-memory snapshot.
+    } catch { /* keep the last in-memory snapshot */ }
   }
 
   private loadRules(): void {
@@ -216,11 +416,6 @@ export class ActionGate {
       const data = JSON.parse(readFileSync(this.rulesPath, "utf-8"));
       this.rules = data.rules ?? [];
     } catch { this.rules = []; }
-  }
-
-  private audit(category: string, detail: string, outcome: string): void {
-    const entry = JSON.stringify({ ts: new Date().toISOString(), category, detail: detail.slice(0, 200), outcome });
-    try { appendFileSync(this.auditPath, entry + "\n"); } catch { /* best effort */ }
   }
 
   private formatMessage(category: string, detail: string): string {

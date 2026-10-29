@@ -6,6 +6,7 @@
  */
 
 export { type MessageContext, type Middleware, runPipeline, createMessageContext } from "./middleware.js";
+export { emergencyRouteMiddleware } from "./emergency-route.js";
 export { voiceMiddleware } from "./voice.js";
 export { sessionSelectionMiddleware } from "./session-selection.js";
 export { commandMiddleware } from "./commands.js";

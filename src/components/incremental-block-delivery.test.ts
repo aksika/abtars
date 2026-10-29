@@ -229,11 +229,16 @@ describe("IncrementalBlockDeliveryController", () => {
 
 describe("isIncrementalEligible", () => {
   it("allows only direct authenticated master turns outside the TUI", () => {
-    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "telegram" })).toBe(true);
-    expect(isIncrementalEligible({ role: "master", isGroup: true, platform: "telegram" })).toBe(false);
-    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "tui" })).toBe(false);
-    expect(isIncrementalEligible({ role: "guest", isGroup: false, platform: "telegram" })).toBe(false);
-    expect(isIncrementalEligible({ role: undefined, isGroup: false, platform: "telegram" })).toBe(false);
-    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "discord" })).toBe(true);
+    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "telegram", showThinking: true })).toBe(true);
+    expect(isIncrementalEligible({ role: "master", isGroup: true, platform: "telegram", showThinking: true })).toBe(false);
+    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "tui", showThinking: true })).toBe(false);
+    expect(isIncrementalEligible({ role: "guest", isGroup: false, platform: "telegram", showThinking: true })).toBe(false);
+    expect(isIncrementalEligible({ role: undefined, isGroup: false, platform: "telegram", showThinking: true })).toBe(false);
+    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "discord", showThinking: true })).toBe(true);
+  });
+
+  it("#1654: showThinking false excludes otherwise-eligible master turns", () => {
+    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "telegram", showThinking: false })).toBe(false);
+    expect(isIncrementalEligible({ role: "master", isGroup: false, platform: "discord", showThinking: false })).toBe(false);
   });
 });

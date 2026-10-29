@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -8,7 +8,7 @@ import { resolveAbmindEndpoint, AbmindEndpointConfigError, type ResolvedAbmindEn
 let uid = 0;
 
 function setup(): { root: string; configDir: string } {
-  const root = mkdtempSync(join(tmpdir(), `abtars-endpoint-${++uid}-`));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `abtars-endpoint-${++uid}-`)));
   const configDir = join(root, "config");
   mkdirSync(configDir, { recursive: true });
   chmodSync(configDir, 0o700);

@@ -36,6 +36,10 @@ export const CONTRADICTION_DISPOSITIONS = [
 
 export const INVALID_CONTRACT_PROPOSALS_EXHAUSTED = "invalid_contract_proposals_exhausted";
 export const REVIEW_REQUEST_ABANDONED = "review_request_abandoned";
+/** #1686: a persisted repair decision cannot authorize a Worker — its repair
+ * items lack a usable source contract (missing, corrupt, foreign, or not
+ * covering the affected criteria). One structural block, never a review loop. */
+export const REPAIR_SOURCE_CONTRACT_INVALID = "repair_source_contract_invalid";
 
 export type ProjectReviewAction = (typeof REVIEW_ACTIONS)[number];
 export type CriterionVerdict = (typeof CRITERION_VERDICTS)[number];
@@ -103,6 +107,10 @@ export interface ProjectReviewDecisionV1 {
 export interface ProjectRepairProposal {
   items: Array<{
     id: string;
+    /** #1686: the validated Worker contract whose evidence paths and execution
+     * routing this repair must preserve. One repair item references one
+     * mapped source contract and spans only root criteria it covers. */
+    source_contract_id: string;
     affected_criterion_ids: string[];
     required_evidence: string;
     strategy: string;
@@ -185,6 +193,7 @@ export const REVIEW_REPAIR_ITEM_SCHEMA = {
   additionalProperties: false,
   properties: {
     id: { type: "string" },
+    source_contract_id: { type: "string", description: "id of the mapped Worker contract (from the review case children/mapped contracts) whose evidence and routing this repair preserves — one repair item references exactly one source contract and may affect only root criteria that contract covers" },
     affected_criterion_ids: { type: "array", items: { type: "string" } },
     required_evidence: { type: "string" },
     strategy: { type: "string" },
@@ -200,7 +209,7 @@ export const REVIEW_REPAIR_ITEM_SCHEMA = {
       required: [],
     },
   },
-  required: ["id", "affected_criterion_ids", "required_evidence", "strategy"],
+  required: ["id", "source_contract_id", "affected_criterion_ids", "required_evidence", "strategy"],
 } as const;
 
 export const REVIEW_BLOCKER_SCHEMA = {
@@ -269,7 +278,7 @@ export const REVIEW_PROJECT_PARAMETERS = {
       items: REVIEW_RESIDUAL_RISK_SCHEMA,
     },
     synthesis: { type: "string", description: "Final synthesis of the review" },
-    repair: { ...REVIEW_REPAIR_SCHEMA, description: "Repair proposal (required if action=repair)" },
+    repair: { ...REVIEW_REPAIR_SCHEMA, description: "Repair proposal (required if action=repair). Each item references exactly one mapped source contract (source_contract_id) and may affect only delegated root criteria that contract covers; a repair spanning contracts must be split into one item per source contract." },
     blocker: { ...REVIEW_BLOCKER_SCHEMA, description: "Blocker information (required if action=blocked)" },
     input_request: { ...REVIEW_INPUT_REQUEST_SCHEMA, description: "Input request (required if action=needs_input)" },
   },
@@ -363,6 +372,10 @@ function narrowObject(value: unknown, path: string, issues: ValidationIssue[]): 
 
 function narrowRepairItem(raw: Record<string, unknown>, path: string, issues: ValidationIssue[]): ProjectRepairProposal["items"][number] {
   const id = narrowString(raw.id, `${path}.id`, issues);
+  // #1686: structural narrowing requires a non-empty source contract reference
+  // for new provider responses. A legacy item without one cannot authorize a
+  // Worker; the reconciler records an actionable structural blocker instead.
+  const sourceContractId = narrowString(raw.source_contract_id, `${path}.source_contract_id`, issues);
   const affected = narrowStringArray(raw.affected_criterion_ids, `${path}.affected_criterion_ids`, issues);
   const requiredEvidence = narrowString(raw.required_evidence, `${path}.required_evidence`, issues);
   const strategy = narrowString(raw.strategy, `${path}.strategy`, issues);
@@ -377,8 +390,12 @@ function narrowRepairItem(raw: Record<string, unknown>, path: string, issues: Va
       maxTokens = raw.budget == null ? undefined : narrowNumber(budget.max_tokens, `${path}.budget.max_tokens`, issues);
     }
   }
+  if (sourceContractId === undefined || sourceContractId.trim().length === 0) {
+    issues.push(validationError("empty_string", `${path}.source_contract_id`, "source_contract_id is required — reference the mapped Worker contract whose evidence this repair must preserve"));
+  }
   return {
     id: id ?? "",
+    source_contract_id: sourceContractId ?? "",
     affected_criterion_ids: affected,
     required_evidence: requiredEvidence ?? "",
     strategy: strategy ?? "",

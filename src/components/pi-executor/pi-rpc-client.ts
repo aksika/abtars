@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { logDebug, logWarn, logError } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { JsonlReader } from "./jsonl-reader.js";
 import type {
   RpcCommand, RpcResponse, RpcExtensionUIRequest, RpcExtensionUIResponse,
@@ -66,6 +67,8 @@ export class SupervisedPiRpcClient {
   private _closed = false;
   private _ready = false;
   private _terminationFired = false;
+  private processExitPromise: Promise<void> | null = null;
+  private resolveProcessExit: (() => void) | null = null;
 
   get closed(): boolean { return this._closed; }
   get ready(): boolean { return this._ready; }
@@ -80,6 +83,10 @@ export class SupervisedPiRpcClient {
     if (this.child) throw new PiRpcError("already_started", "Pi RPC client is already running");
     logDebug(TAG, `Launching: ${command} ${args.join(" ")}`);
 
+    this.processExitPromise = new Promise<void>((resolve) => {
+      this.resolveProcessExit = resolve;
+    });
+
     this.child = spawn(command, args, {
       cwd,
       env,
@@ -88,6 +95,8 @@ export class SupervisedPiRpcClient {
     });
 
     this.child.on("exit", (code, signal) => {
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = null;
       logDebug(TAG, `Pi process exited: code=${code} signal=${signal}`);
       this._fireTermination({ kind: "exit", code, signal });
       if (!this._closed) {
@@ -95,6 +104,8 @@ export class SupervisedPiRpcClient {
       }
     });
     this.child.on("error", (err) => {
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = null;
       logError(TAG, `Pi process error: ${err.message}`);
       this._fireTermination({ kind: "error", error: err });
       if (!this._closed) this._rejectAll(new PiRpcError("process_error", err.message));
@@ -120,14 +131,28 @@ export class SupervisedPiRpcClient {
     this.child.stdin!.on("error", () => {});
   }
 
-  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
+  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } }> {
     const result = await this.send({ type: "get_state" });
     const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+    // #1804: carry the selected model identity (provider + id) when Pi
+    // reports it. RpcSessionState.model is optional; validate bounded
+    // strings and drop malformed values rather than throwing.
+    let model: { provider: string; id: string } | undefined;
+    const rawModel = data?.model as unknown;
+    if (rawModel && typeof rawModel === "object") {
+      const provider = (rawModel as Record<string, unknown>).provider;
+      const id = (rawModel as Record<string, unknown>).id;
+      if (typeof provider === "string" && provider.length > 0 && provider.length <= 128
+        && typeof id === "string" && id.length > 0 && id.length <= 256) {
+        model = { provider, id };
+      }
+    }
     return {
       sessionId: (data?.sessionId as string) ?? "",
       sessionFile: data?.sessionFile as string | undefined,
       isStreaming: (data?.isStreaming as boolean) ?? false,
       isCompacting: (data?.isCompacting as boolean) ?? false,
+      ...(model ? { model } : {}),
     };
   }
 
@@ -144,14 +169,26 @@ export class SupervisedPiRpcClient {
   }
 
   async abort(): Promise<void> {
-    try { await this.send({ type: "abort" }); } catch { }
+    try { await this.send({ type: "abort" }); } catch (err) { logAndSwallow(TAG, "send abort", err); }
   }
 
   async getAvailableModels(): Promise<Array<{ provider: string; id: string }>> {
     const result = await this.send({ type: "get_available_models" });
     const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
-    const models = data?.models as Array<{ provider: string; id: string }> | undefined;
-    return models ?? [];
+    const raw = data?.models as unknown;
+    if (!Array.isArray(raw)) return [];
+    // #1804: Pi's availability list is credential-derived; validate bounded
+    // provider/id pairs and drop malformed entries without throwing.
+    const models: Array<{ provider: string; id: string }> = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const provider = (entry as Record<string, unknown>).provider;
+      const id = (entry as Record<string, unknown>).id;
+      if (typeof provider !== "string" || provider.length === 0 || provider.length > 128) continue;
+      if (typeof id !== "string" || id.length === 0 || id.length > 256) continue;
+      models.push({ provider, id });
+    }
+    return models;
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {
@@ -242,15 +279,38 @@ export class SupervisedPiRpcClient {
     }
     if (this.jsonl) { this.jsonl.flush(); this.jsonl = null; }
     if (this.child && !this.child.killed) {
-      try { this.child.stdin?.end(); } catch { }
+      try { this.child.stdin?.end(); } catch (err) { logAndSwallow(TAG, "end child stdin during close", err); }
       const { pid } = this.child;
-      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch { } }, 5000);
+      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, "force-kill child after SIGTERM", err); } }, 5000);
       this.child.on("exit", () => clearTimeout(killTimer));
-      try { this.child.kill("SIGTERM"); } catch { }
+      try { this.child.kill("SIGTERM"); } catch (err) { logAndSwallow(TAG, `send SIGTERM to child`, err); }
     }
     this.child = null;
     this.eventListeners.clear();
     this.uiRequestListeners.clear();
+  }
+
+  /**
+   * Request shutdown and wait until the child is reaped. The ordinary
+   * `close()` API remains prompt for callers that only need to detach; shared
+   * workspace/slot owners use this bounded variant so they never release a
+   * generation while its Pi process is still alive.
+   */
+  async closeAndWait(timeoutMs = 5_500): Promise<void> {
+    const exit = this.processExitPromise;
+    await this.close();
+    if (!exit) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        exit,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   getStderr(): string {

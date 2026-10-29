@@ -20,7 +20,7 @@ fi
 
 OUTPUT=$(lightpanda fetch \
   --dump markdown \
-  --strip-mode full \
+  --strip-mode clutter \
   --http-connect-timeout 10000 \
   --http-timeout 15000 \
   --wait-ms 10000 \

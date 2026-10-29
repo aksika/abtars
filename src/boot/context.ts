@@ -11,6 +11,7 @@ export type PhaseResult = "ran" | "skipped";
 import type { Config } from "../types/index.js";
 import type { MemoryConfig } from "abmind";
 import { createDisabledRuntime } from "../components/memory-runtime.js";
+import type { MemoryRecompositionSupervisor } from "../components/memory-recomposition.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
@@ -24,7 +25,6 @@ import type { IDashboardSlot } from "../components/skeleton.js";
 import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { spin as spinInstance } from "../components/spin.js";
-import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { ResolvedHailMary } from "../components/transport-config.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -69,11 +69,12 @@ export interface BootCtx {
   /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
   memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
   /**
-   * #1527: late-bound durable context provider. Transport construction and
-   * memory negotiation boot in parallel, so phase-pipeline-deps populates
-   * this holder once memory is ready; Pi transports read it per call.
+   * #1706: generation-owned late-composition supervisor. Created idle by
+   * phase-memory on recoverable composition failure; startBridge starts it
+   * after bootGraph finalization; shutdown cancels and drains it before the
+   * memory runtime is closed.
    */
-  durableContextProvider: import("../components/transport/pi-core-context.js").DurableContextProviderHolder;
+  memoryRecomposition: MemoryRecompositionSupervisor | null;
   /**
    * #1552: bridge-owned durable memory_store quota service. Created and
    * closed by phase-pipeline-deps / bridge shutdown; read by every Pi
@@ -111,9 +112,27 @@ export interface BootCtx {
   /** #1429 — Boot-recorded sleep-unavailable reason (set by phase-sleep). */
   sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
-  modelHealthRegistry: ModelHealthRegistry | null;
   hailMary: (ResolvedHailMary & { apiKey?: string }) | null;
-  selfHealerTask: { enabled: boolean } | null;
+  /**
+   * #1468: boot-owned emergency execution service. Constructed at the early
+   * platform/recovery composition boundary (phase-platforms-connect) and
+   * reused by the full pipeline through PipelineDeps. Independent of Spin,
+   * memory readiness, and the normal transport.
+   */
+  emergencyExecution: import("../components/emergency-execution-service.js").EmergencyExecutionService | null;
+  /** #1688: the log-source heartbeat task; no process-local enable toggle. */
+  selfHealerTask: import("../types/index.js").HeartbeatTask | null;
+  /** #1688: sole SHA admission/transition owner. Set by phase-pipeline-deps. */
+  shaCoordinator: import("../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator | null;
+  /**
+   * #1724: trusted synthetic-Main-turn boundary for scheduled announcements.
+   * Composed once by registerTier3Tasks (inside phase-pipeline-deps) over the
+   * pipeline deps and the platform adapter registry; consumed by the Kanban
+   * delivery closure. Resolves adapters lazily at delivery time.
+   */
+  mainIngress: import("../components/main-conversation-ingress.js").MainConversationIngress | null;
+  /** #1688: stage-progression nerve subscriber disposer (shutdown). */
+  _shaStageSubscriberDisposer?: () => void;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
   actionGate: any;
@@ -149,6 +168,29 @@ export interface BootCtx {
   piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
   /** #1357: Disposer for Pi executor capability registration. Called on shutdown. */
   _piCapDisposer?: () => void;
+  /** #1635: interactive Pi coding session service (live-turn interruption on
+   * shutdown). */
+  codingSessionService?: import("../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService;
+
+  // ── #1554: Reconciler lifecycle ownership ──────────────────────────────
+  /** Set by phase-pipeline-deps; owned by the bridge generation, explicitly
+   * stopped in Bridge.shutdown before Pi teardown. */
+  lifecycleWakeScheduler: import("../components/lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null;
+  /** Set by phase-pipeline-deps: scheduled-run projection ports for the
+   * Reconciler. Consumed (not mutated) by phase-reconciler. */
+  reconcilerInputs: {
+    projectRunProgress: (cardId: number) => void;
+    failureCascade?: (event: import("../components/sha/sha-types.js").ScheduledFailureEvent) => void;
+  } | null;
+  /** #1554: set by phase-pipeline-deps; recovery + admission by
+   * phase-reconciler after the Reconciler generation starts. */
+  scheduledRunCoordinator: import("../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator | null;
+  /** Set by phase-reconciler after successful start. */
+  reconcilerHandle: import("../components/reconciler.js").ReconcilerHandle | null;
+  /** Set by phase-reconciler after successful start. */
+  reconcilerRecovery: import("../components/reconciler.js").ReconcilerRecoveryReport | null;
+  /** #1935: generation-owned workflow driver (stopped on bridge shutdown). */
+  workflowDriver: import("../components/orc-project/orc-workflow-driver.js").WorkflowDriver | null;
 }
 
 /**
@@ -189,7 +231,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     runtime: new SubagentRuntimeClass(),
     client: null,
     memoryRuntime: createDisabledRuntime(),
-    durableContextProvider: { current: null },
+    memoryRecomposition: null,
     memoryStoreQuota: null,
     memoryToolDependencies: { current: null },
     transport: null,
@@ -216,15 +258,25 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     abmindModule: null,
     sleepUnavailable: null,
     sleepHandle: null,
-    modelHealthRegistry: null,
     hailMary: null,
+    emergencyExecution: null,
     selfHealerTask: null,
+    shaCoordinator: null,
+    mainIngress: null,
     dashboardServer: null,
     agentApiServer: null,
     actionGate: null,
     sandboxEnabled: false,
     seatbeltActive: false,
     mcpDaemonStarted: false,
+
+    // #1554: Reconciler lifecycle slots
+    lifecycleWakeScheduler: null,
+    reconcilerInputs: null,
+    scheduledRunCoordinator: null,
+    reconcilerHandle: null,
+    reconcilerRecovery: null,
+    workflowDriver: null,
 
     // Callbacks
     isSleepActive: () => false,

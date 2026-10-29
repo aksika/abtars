@@ -1,11 +1,36 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import {
   createClientRuntime,
   createDisabledRuntime,
   createUnavailableRuntime,
   attemptMemoryMutation,
+  asSessionSoulBundle,
+  asExplicitKeywords,
   type MemoryRuntimeCapability,
 } from "./memory-runtime.js";
+
+function ownedPacket(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contract: "owned-v1",
+    profile: "recall_fast",
+    packetId: "test-packet",
+    status: "evidence",
+    items: [
+      {
+        ref: { kind: "db", layer: "durable", recordId: 9, owner: "u1", version: "1" },
+        excerpt: "The dog chased the fox.",
+        rationale: "projection porter",
+        excerptProvenance: "projection porter",
+      },
+    ],
+    text: "[1] (db:durable:9:u1:1) The dog chased the fox.",
+    effective: { maxItems: 5, maxOutputBytes: 2000, deadlineMs: 500, policyVersion: "owned-v1" },
+    stageOutcomes: {},
+    omissionReasons: [],
+    ...overrides,
+  };
+}
+import type { AbmindRouteSnapshotV1Like } from "./abmind-route-contract.js";
 
 type AbmindCapabilitiesV1 = { version: number; methods: string[]; domains: string[]; features: Record<string, string> };
 
@@ -14,7 +39,7 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
     capabilities: caps,
     privateMemory: {
       recordMessage: vi.fn().mockResolvedValue({ id: 42 }),
-      recall: vi.fn().mockResolvedValue({ results: [] }),
+      recall: vi.fn().mockResolvedValue(ownedPacket({ items: [], text: "" })),
       assembleSessionContext: vi.fn().mockResolvedValue({ wakeUp: "", recall: "", coreKnowledge: "", soulBundle: { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" } }),
       getRecentConversation: vi.fn().mockResolvedValue([]),
       getRuntimeStatus: vi.fn().mockResolvedValue(null),
@@ -23,7 +48,9 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
       embed: vi.fn().mockResolvedValue({ vectors: [], model: "" }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
-      editMemory: vi.fn().mockResolvedValue({ ok: true }),
+      adjustRelevance: vi.fn().mockResolvedValue({ ok: true }),
+      mergeMemories: vi.fn().mockResolvedValue({ merged: true }),
+      cascadeDelete: vi.fn().mockResolvedValue({ ok: true }),
       projectConversationContext: vi.fn().mockResolvedValue({
         version: 1,
         messages: [{ role: "user", content: "prior" }],
@@ -42,8 +69,7 @@ function caps(methods: string[], features: Record<string, string> = {}): AbmindC
 
 const ALL_METHODS = [
   "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-  "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
-  "private.projectConversationContext",
+  "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
 ];
 
 describe("capability projection", () => {
@@ -51,17 +77,17 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "instantStore", "rebuildFts", "coreKnowledge", "status"],
     },
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "false" },
-      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "coreKnowledge", "status"],
     },
     {
       methods: ALL_METHODS,
       features: {},
-      expected: ["recordMessage", "feedback", "coreKnowledge", "status"],
+      expected: ["recordMessage", "coreKnowledge", "status"],
     },
     {
       methods: ["private.recall", "private.recordMessage"],
@@ -76,7 +102,7 @@ describe("capability projection", () => {
     {
       methods: ["private.instantStore", "private.edit", "private.rebuildFts"],
       features: { private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["instantStore", "editMemory", "rebuildFts"],
+      expected: ["instantStore", "rebuildFts"],
     },
     {
       methods: [],
@@ -89,7 +115,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "rebuildFts", "coreKnowledge", "status"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -152,14 +178,6 @@ describe("createClientRuntime", () => {
     expect(client.privateMemory.instantStore).toHaveBeenCalled();
   });
 
-  it("editMemory dispatches when supported", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" }));
-    const rt = createClientRuntime(client);
-    const result = await rt.editMemory({ memoryId: 1, expectedRevision: 1, userId: "u1" });
-    expect(result.ok).toBe(true);
-    expect(client.privateMemory.editMemory).toHaveBeenCalled();
-  });
-
   it("supports recall when private_read=true", async () => {
     const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
     const rt = createClientRuntime(client);
@@ -187,12 +205,15 @@ describe("createClientRuntime", () => {
     const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
     const restoredSnapshot = { version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 };
     let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
-    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
+    // No-op initial: assignments inside the onRouteChange closure are
+    // invisible to control-flow analysis, which would otherwise fold the
+    // null initializer and reject every call below as `never`.
+    let listener: (snapshot: AbmindRouteSnapshotV1Like) => void = () => {};
     const client = mockClient(currentCaps, {
       routeSnapshot: readySnapshot,
       onRouteChange: (fn: typeof listener) => {
         listener = fn as typeof listener;
-        return () => { listener = null; };
+        return () => {};
       },
     } as never);
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
@@ -203,86 +224,89 @@ describe("createClientRuntime", () => {
 
     // Route loss: capabilities clear, runtime goes unavailable immediately.
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
-    listener?.(lostSnapshot);
+    listener(lostSnapshot);
     expect(rt.state).toBe("unavailable");
     expect(rt.supports("recall")).toBe(false);
 
     // Recovery: capabilities re-project only after the route is ready again.
     currentCaps = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
-    listener?.(restoredSnapshot);
+    listener(restoredSnapshot);
     expect(rt.state).toBe("ready");
     expect(rt.supports("recall")).toBe(true);
   });
+});
 
-  it("projects durable context when advertised and normalizes the result (#1527)", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
-    const rt = createClientRuntime(client);
-    expect(rt.supports("durableContext")).toBe(true);
+describe("#1659 runtime failure contract", () => {
+  const WRITE_CAPS = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
 
-    const result = await rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
-    expect(result).toEqual({
-      messages: [{ role: "user", content: "prior" }],
-      estimatedTokens: 10,
-      sourceMessageCount: 1,
+  function structuralError(code: string, message: string, stage: string, retryable: boolean, action: string): Error {
+    return Object.assign(new Error(message), {
+      name: "AbmindClientError", code, requestId: "req-123", retryable, action, stage,
     });
-    expect(client.privateMemory.projectConversationContext).toHaveBeenCalledWith({
-      userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000,
-    });
+  }
+
+  it.each<{ code: string; stage: string; retryable: boolean; action: string; bridgeCode: string }>([
+    { code: "validation_error", stage: "pre_dispatch", retryable: false, action: "fix_input", bridgeCode: "memory_validation" },
+    { code: "not_found", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_not_found" },
+    { code: "conflict", stage: "pre_dispatch", retryable: false, action: "re_recall", bridgeCode: "memory_conflict" },
+    { code: "unauthorized", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_unauthorized" },
+    { code: "idempotency_conflict", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_idempotency_conflict" },
+    { code: "unavailable", stage: "pre_dispatch", retryable: true, action: "retry", bridgeCode: "memory_unavailable" },
+    { code: "outcome_unknown", stage: "response", retryable: false, action: "reconcile", bridgeCode: "memory_outcome_unknown" },
+  ])("instantStore preserves the structural failure contract for $code", async ({ code, stage, retryable, action, bridgeCode }) => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue(structuralError(code, `${code} happened`, stage, retryable, action));
+    const rt = createClientRuntime(client);
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result).toMatchObject({
+        code: bridgeCode,
+        message: `${code} happened`,
+        requestId: "req-123",
+        retryable,
+        action,
+        stage,
+      });
+    }
   });
 
-  it("fails closed when durable context is not advertised — provider is never invoked", async () => {
-    const client = mockClient(caps(["private.recall", "private.recordMessage"], { private_read: "true" }));
+  it("an unstructured thrown error becomes an uncertain response-stage failure, never pre_dispatch", async () => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue(new Error("connection reset"));
     const rt = createClientRuntime(client);
-    expect(rt.supports("durableContext")).toBe(false);
-    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
-      .rejects.toThrow(/capability unavailable: durableContext/);
-    expect(client.privateMemory.projectConversationContext).not.toHaveBeenCalled();
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result.code).toBe("unknown");
+      expect(result.stage).toBe("response");
+      expect(result.action).toBe("reconcile");
+      expect(result.message).toContain("connection reset");
+    }
   });
 
-  it("rejects malformed projection responses instead of returning empty context (#1527)", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
-    (client.privateMemory.projectConversationContext as ReturnType<typeof vi.fn>)
-      .mockResolvedValue({ version: 1, messages: [{ role: "robot", content: "x" }] });
+  it("preserves a plain structural error object's message while bounding it", async () => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue({
+        code: "outcome_unknown",
+        message: `secret sk-${"a".repeat(30)} ${"x".repeat(700)}`,
+        requestId: "req-object",
+        retryable: false,
+        action: "reconcile",
+        stage: "response",
+      });
     const rt = createClientRuntime(client);
-    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
-      .rejects.toThrow(/malformed message/);
-
-    (client.privateMemory.projectConversationContext as ReturnType<typeof vi.fn>)
-      .mockResolvedValue({ messages: "nope" });
-    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
-      .rejects.toThrow(/no messages array/);
-  });
-
-  it("route loss makes durable projection reject until renegotiation recovers (#1527)", async () => {
-    const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
-    const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
-    let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true" });
-    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
-    const client = mockClient(currentCaps, {
-      routeSnapshot: readySnapshot,
-      onRouteChange: (fn: typeof listener) => {
-        listener = fn as typeof listener;
-        return () => { listener = null; };
-      },
-    } as never);
-    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
-
-    const rt = createClientRuntime(client);
-    expect(rt.supports("durableContext")).toBe(true);
-
-    // Route loss clears capabilities → projection must reject without a call.
-    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
-    listener?.(lostSnapshot);
-    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
-      .rejects.toThrow(/capability unavailable/);
-
-    // Recovery re-projects capabilities → a new execution may project again.
-    currentCaps = caps(ALL_METHODS, { private_read: "true" });
-    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
-    listener?.({ version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 });
-    const result = await rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
-    expect(result.messages.length).toBe(1);
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result.code).toBe("memory_outcome_unknown");
+      expect(result.message).toContain("***REDACTED***");
+      expect(result.message.length).toBeLessThanOrEqual(512);
+    }
   });
 });
 
@@ -320,8 +344,8 @@ describe("attemptMemoryMutation", () => {
   it("never retries — run is called at most once", async () => {
     const run = vi.fn().mockRejectedValue(new Error("fail"));
     await attemptMemoryMutation({
-      phase: "feedback",
-      family: "feedback",
+      phase: "after_delivery",
+      family: "assistant",
       operationKey: "test-key-3",
       run,
     });
@@ -370,10 +394,138 @@ describe("Disabled and Unavailable runtimes", () => {
     await expect(rt.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi", timestamp: 1 }, "k"))
       .rejects.toThrow("Memory unavailable");
   });
+});
 
-  it("disabled and unavailable runtimes reject durable projection rather than returning empty context (#1527)", async () => {
-    const input = { userId: "u", sessionId: "s", beforeMessageId: 1, maxContext: 8000 };
-    await expect(createDisabledRuntime().projectDurableContext(input)).rejects.toThrow("Memory is disabled");
-    await expect(createUnavailableRuntime().projectDurableContext(input)).rejects.toThrow("Memory unavailable");
+describe("#1928 M4 — owned recall through createClientRuntime", () => {
+  function recallClient(packet: Record<string, unknown>) {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue(packet);
+    return client;
+  }
+
+  it("fast sends the verbatim raw turn under the owned contract", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    const res = await rt.recall({ query: "deploy now", userId: "u1", profile: "recall_fast", rawTurn: "deploy now" });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      contract: "owned-v1",
+      profile: "recall_fast",
+      identity: { principal: "u1" },
+      rawTurn: "deploy now",
+    }));
+    expect(res.status).toBe("evidence");
+    expect(res.context).toBe("[1] (db:durable:9:u1:1) The dog chased the fox.");
+    expect(res.hits).toEqual([expect.objectContaining({ ref: "db:durable:9:u1:1", kind: "db", content: "The dog chased the fox." })]);
+  });
+
+  it("clamps host capacity to the profile ceiling, never expands it", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "x", userId: "u1", profile: "recall_fast", rawTurn: "x", limit: 50, maxOutputBytes: 100000 });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(
+      expect.objectContaining({ capacity: expect.objectContaining({ maxItems: 5, maxOutputBytes: 2000 }) }),
+    );
+  });
+
+  it("explicit anchor crosses verbatim with filters", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    const keywords = ["Migration", "AND", "rollback", "rollback"];
+    await rt.recall({ query: keywords.join(" "), userId: "u1", profile: "recall_normal", text: keywords.join(" "), keywords, timeStart: 10, timeEnd: 20 });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: { text: keywords.join(" "), keywords },
+        filters: expect.objectContaining({ timeStart: 10, timeEnd: 20 }),
+      }),
+    );
+  });
+
+  it("rejects empty keywords before any retrieval runs", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    await expect(rt.recall({ query: "q", userId: "u1", profile: "recall_normal", text: "q", keywords: [] })).rejects.toThrow(/non-empty array/);
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed packets instead of injecting a lie", async () => {
+    for (const bad of [
+      { contract: "legacy", profile: "recall_fast" },
+      ownedPacket({ items: [{ noRef: true, excerpt: "x" }] }),
+      ownedPacket({ items: [{ ref: { kind: "db", layer: "durable" }, excerpt: "x" }] }),
+      ownedPacket({ text: 42 }),
+      null,
+    ]) {
+      const rt = createClientRuntime(recallClient(bad as Record<string, unknown>));
+      await expect(rt.recall({ query: "x", userId: "u1", profile: "recall_fast", rawTurn: "x" })).rejects.toThrow(/recall returned a/);
+    }
+  });
+
+  it("surfaces packet status, refs, and continuation", async () => {
+    const rt = createClientRuntime(recallClient(ownedPacket({
+      status: "partial",
+      omissionReasons: ["stage-degraded: Se (failed)"],
+      continuation: "h1",
+      items: [
+        { ref: { kind: "artifact", owner: "u1", artifact: "daily/d.md", contentVersion: "v1" }, excerpt: "Weekly note." },
+        { ref: { kind: "graph", edge: "e", sources: ["a", "b"] }, excerpt: "Linked pair." },
+      ],
+      text: "Weekly note.\nLinked pair.",
+    })));
+    const res = await rt.recall({ query: "x", userId: "u1", profile: "recall_full", text: "x" });
+    expect(res.status).toBe("partial");
+    expect(res.omissionReasons).toEqual(["stage-degraded: Se (failed)"]);
+    expect(res.continuation).toBe("h1");
+    expect(res.hits.map((h) => h.ref)).toEqual(["artifact:u1:daily/d.md:v1", "graph:e:a+b"]);
+    expect(res.context).toBe("Weekly note.\nLinked pair.");
+  });
+
+  it("asExplicitKeywords accepts verbatim arrays and rejects anything else", async () => {
+    expect(asExplicitKeywords(["a", "B", "a"])).toEqual(["a", "B", "a"]);
+    for (const bad of [undefined, null, [], ["ok", ""], ["ok", "  "], "x", [42]]) {
+      expect(() => asExplicitKeywords(bad)).toThrow(/non-empty array of non-blank strings/);
+    }
+  });
+});
+
+describe("#1869 session parts and test-mode status", () => {
+  const FULL = { soul: "s", profile: "p", notes: "n", memoryTools: "t", coreFacts: "f" };
+
+  it("asSessionSoulBundle accepts the five-string shape, rejects the rest", () => {
+    expect(asSessionSoulBundle(FULL)).toEqual(FULL);
+    for (const bad of [undefined, null, 42, "x", [], { ...FULL, soul: 1 }, { ...FULL, coreFacts: null }, { soul: "s" }]) {
+      expect(asSessionSoulBundle(bad)).toBeUndefined();
+    }
+  });
+
+  it("passes parts through from new daemons; absent on old ones", async () => {
+    const withParts = mockClient(caps(ALL_METHODS));
+    (withParts.privateMemory.assembleSessionContext as Mock).mockResolvedValue({
+      wakeUp: "", recall: "", coreKnowledge: "", soulBundle: FULL, parts: FULL,
+    });
+    const rt = createClientRuntime(withParts);
+    const res = await rt.assembleSessionContext({ identity: { principalId: "u", executionId: "s" } });
+    expect(res.parts).toEqual(FULL);
+
+    const legacy = createClientRuntime(mockClient(caps(ALL_METHODS)));
+    const old = await legacy.assembleSessionContext({ identity: { principalId: "u", executionId: "s" } });
+    expect(old.parts).toBeUndefined();
+    expect(old.coreKnowledge).toBe("");
+  });
+
+  it("maps the daemon memoryTest mode, defaulting absent to false", async () => {
+    for (const [raw, expected] of [
+      [{ memoryTest: true }, true],
+      [{ memoryTest: false }, false],
+      [{}, false],
+      [null, false],
+    ] as const) {
+      const client = mockClient(caps(ALL_METHODS));
+      (client.privateMemory.getRuntimeStatus as Mock).mockResolvedValue(raw);
+      const rt = createClientRuntime(client);
+      expect((await rt.getStatus()).memoryTest).toBe(expected);
+    }
+    // Disabled/unavailable runtimes throw before returning a status.
+    await expect(createDisabledRuntime().getStatus()).rejects.toThrow();
+    await expect(createUnavailableRuntime().getStatus()).rejects.toThrow();
   });
 });

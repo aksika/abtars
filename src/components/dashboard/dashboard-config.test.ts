@@ -223,9 +223,9 @@ describe("formatUptime — Property 11: Uptime formatting", () => {
       const hourMatch = s.match(/(\d+)h/);
       const minMatch = s.match(/(\d+)m/);
       const secMatch = s.match(/(\d+)s/);
-      if (hourMatch) totalMs += parseInt(hourMatch[1], 10) * 3600 * 1000;
-      if (minMatch) totalMs += parseInt(minMatch[1], 10) * 60 * 1000;
-      if (secMatch) totalMs += parseInt(secMatch[1], 10) * 1000;
+      if (hourMatch) totalMs += parseInt(hourMatch[1] ?? "0", 10) * 3600 * 1000;
+      if (minMatch) totalMs += parseInt(minMatch[1] ?? "0", 10) * 60 * 1000;
+      if (secMatch) totalMs += parseInt(secMatch[1] ?? "0", 10) * 1000;
       return totalMs;
     };
 
@@ -268,9 +268,9 @@ describe("formatUptime — Property 11: Uptime formatting", () => {
       const hourMatch = s.match(/(\d+)h/);
       const minMatch = s.match(/(\d+)m/);
       const secMatch = s.match(/(\d+)s/);
-      if (hourMatch) totalMs += parseInt(hourMatch[1], 10) * 3600 * 1000;
-      if (minMatch) totalMs += parseInt(minMatch[1], 10) * 60 * 1000;
-      if (secMatch) totalMs += parseInt(secMatch[1], 10) * 1000;
+      if (hourMatch) totalMs += parseInt(hourMatch[1] ?? "0", 10) * 3600 * 1000;
+      if (minMatch) totalMs += parseInt(minMatch[1] ?? "0", 10) * 60 * 1000;
+      if (secMatch) totalMs += parseInt(secMatch[1] ?? "0", 10) * 1000;
       return totalMs;
     };
 

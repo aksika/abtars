@@ -1,0 +1,162 @@
+/**
+ * memory-runtime-1515.test.ts — #1515 dreamQuestions capability projection
+ * and normalized runtime methods.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import { createClientRuntime, createDisabledRuntime, createUnavailableRuntime } from "./memory-runtime.js";
+
+function mockClient(overrides: Record<string, unknown> = {}) {
+  const dreamQuestions = {
+    nextPending: vi.fn().mockResolvedValue({
+      id: "q-1", memoryAId: 10, memoryBId: 20, question: "test question?", status: "pending",
+      createdAt: 1000, expiresAt: 605800000,
+    }),
+    list: vi.fn().mockResolvedValue({ questions: [] }),
+    markAsked: vi.fn().mockResolvedValue({ status: "asked" }),
+    dismiss: vi.fn().mockResolvedValue({ status: "dismissed" }),
+    ...(overrides.dreamQuestions ?? {}),
+  };
+  return {
+    capabilities: { version: 1, methods: ["private.dreamQuestions.nextPending", "private.dreamQuestions.list", "private.dreamQuestions.markAsked", "private.dreamQuestions.dismiss"], features: {} },
+    privateMemory: { ...(overrides.privateMemory ?? {}), dreamQuestions },
+    sleep: { status: vi.fn().mockResolvedValue({ state: "idle" }) },
+    routeSnapshot: { version: 1, state: "ready", generation: 1, retryEligible: 0, terminalUnknown: 0 },
+    close: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  } as unknown as import("abmind").AbmindClient;
+}
+
+describe("dreamQuestions capability projection", () => {
+  it("adds the dreamQuestions capability only when all four methods are negotiated", () => {
+    const full = createClientRuntime(mockClient());
+    expect(full.supports("dreamQuestions")).toBe(true);
+    expect(full.supports("dreamQuestionsNextPending")).toBe(true);
+
+    const partial = createClientRuntime(mockClient({
+      capabilities: {
+        version: 1,
+        methods: ["private.dreamQuestions.nextPending"],
+        features: {},
+      },
+    }));
+    expect(partial.supports("dreamQuestions")).toBe(false);
+    expect(partial.supports("dreamQuestionsNextPending")).toBe(true);
+
+    const none = createClientRuntime(mockClient({ capabilities: { version: 1, methods: [], features: {} } }));
+    expect(none.supports("dreamQuestions")).toBe(false);
+    expect(none.supports("dreamQuestionsNextPending")).toBe(false);
+  });
+
+  it("disabled and unavailable runtimes never support dream questions", () => {
+    expect(createDisabledRuntime().supports("dreamQuestions")).toBe(false);
+    expect(createDisabledRuntime().supports("dreamQuestionsNextPending")).toBe(false);
+    expect(createUnavailableRuntime().supports("dreamQuestions")).toBe(false);
+    expect(createUnavailableRuntime().supports("dreamQuestionsNextPending")).toBe(false);
+  });
+});
+
+describe("dreamQuestions runtime methods", () => {
+  it("nextPending normalizes and returns the wire projection", async () => {
+    const client = mockClient();
+    const rt = createClientRuntime(client);
+    const pending = await rt.dreamQuestions.nextPending("master");
+    expect(pending).toEqual({
+      id: "q-1", memoryAId: 10, memoryBId: 20, question: "test question?", status: "pending",
+      createdAt: 1000, expiresAt: 605800000,
+    });
+    expect(client.privateMemory.dreamQuestions.nextPending).toHaveBeenCalledWith("master");
+  });
+
+  it("nextPending returns null for an empty result", async () => {
+    const client = mockClient({ dreamQuestions: { nextPending: vi.fn().mockResolvedValue(null) } });
+    const rt = createClientRuntime(client);
+    expect(await rt.dreamQuestions.nextPending("master")).toBeNull();
+  });
+
+  it("nextPending rejects a terminal or already-asked row", async () => {
+    const client = mockClient({ dreamQuestions: { nextPending: vi.fn().mockResolvedValue({
+      id: "q-1", memoryAId: 10, memoryBId: 20, question: "test question?", status: "asked",
+      createdAt: 1000, expiresAt: 605800000, askedAt: 2000,
+    }) } });
+    const rt = createClientRuntime(client);
+    await expect(rt.dreamQuestions.nextPending("master")).rejects.toThrow("non-pending");
+  });
+
+  it("markAsked derives a stable idempotency key from question id and delivery key", async () => {
+    const client = mockClient();
+    const rt = createClientRuntime(client);
+    const result = await rt.dreamQuestions.markAsked("master", "q-1", "delivery-1");
+    expect(result.status).toBe("asked");
+    expect(client.privateMemory.dreamQuestions.markAsked).toHaveBeenCalledWith(
+      { userId: "master", questionId: "q-1", deliveryKey: "delivery-1" },
+      "dream-question-ask-q-1-delivery-1",
+    );
+  });
+
+  it("bounds derived idempotency keys for maximum-sized identifiers", async () => {
+    const markAsked = vi.fn().mockResolvedValue({ status: "asked" });
+    const dismiss = vi.fn().mockResolvedValue({ status: "dismissed" });
+    const client = mockClient({ dreamQuestions: { markAsked, dismiss } });
+    const rt = createClientRuntime(client);
+    const questionId = "q".repeat(128);
+    const deliveryKey = "d".repeat(128);
+    await rt.dreamQuestions.markAsked("master", questionId, deliveryKey);
+    await rt.dreamQuestions.dismiss("master", questionId);
+    const askKey = markAsked.mock.calls[0]?.[1] as string;
+    const dismissKey = dismiss.mock.calls[0]?.[1] as string;
+    expect(askKey.length).toBeLessThanOrEqual(128);
+    expect(dismissKey.length).toBeLessThanOrEqual(128);
+    expect(askKey).toMatch(/^dream-question-ask-v1-/);
+    expect(dismissKey).toMatch(/^dream-question-dismiss-v1-/);
+  });
+
+  it("markAsked returns conflict and not_found as data", async () => {
+    const conflict = createClientRuntime(mockClient({ dreamQuestions: { markAsked: vi.fn().mockResolvedValue({ status: "conflict" }) } }));
+    expect((await conflict.dreamQuestions.markAsked("master", "q-1", "d")).status).toBe("conflict");
+    const notFound = createClientRuntime(mockClient({ dreamQuestions: { markAsked: vi.fn().mockResolvedValue({ status: "not_found" }) } }));
+    expect((await notFound.dreamQuestions.markAsked("master", "q-1", "d")).status).toBe("not_found");
+  });
+
+  it("dismiss uses a stable per-question idempotency key", async () => {
+    const client = mockClient();
+    const rt = createClientRuntime(client);
+    await rt.dreamQuestions.dismiss("master", "q-1");
+    expect(client.privateMemory.dreamQuestions.dismiss).toHaveBeenCalledWith(
+      { userId: "master", questionId: "q-1" },
+      "dream-question-dismiss-q-1",
+    );
+  });
+
+  it("list passes the status filter and bounded limit through", async () => {
+    const client = mockClient({ dreamQuestions: { list: vi.fn().mockResolvedValue({ questions: [] }) } });
+    const rt = createClientRuntime(client);
+    await rt.dreamQuestions.list("master", "pending", 5);
+    expect(client.privateMemory.dreamQuestions.list).toHaveBeenCalledWith("master", "pending", 5);
+  });
+
+  it("malformed responses fail closed instead of fabricating data", async () => {
+    const bad = createClientRuntime(mockClient({ dreamQuestions: { nextPending: vi.fn().mockResolvedValue({ id: 42 }) } }));
+    await expect(bad.dreamQuestions.nextPending("master")).rejects.toThrow();
+    const badStatus = createClientRuntime(mockClient({ dreamQuestions: { markAsked: vi.fn().mockResolvedValue({ status: "bogus" }) } }));
+    await expect(badStatus.dreamQuestions.markAsked("master", "q-1", "d")).rejects.toThrow();
+  });
+
+  it("rejects oversized or otherwise unbounded wire projections", async () => {
+    const oversized = createClientRuntime(mockClient({ dreamQuestions: {
+      nextPending: vi.fn().mockResolvedValue({
+        id: "q".repeat(129), memoryAId: 10, memoryBId: 20, question: "bounded question?",
+        status: "pending", createdAt: 1000, expiresAt: 2000,
+      }),
+    } }));
+    await expect(oversized.dreamQuestions.nextPending("master")).rejects.toThrow();
+
+    const tooMany = createClientRuntime(mockClient({ dreamQuestions: {
+      list: vi.fn().mockResolvedValue({ questions: Array.from({ length: 51 }, () => ({
+        id: "q-1", memoryAId: 10, memoryBId: 20, question: "bounded question?",
+        status: "pending", createdAt: 1000, expiresAt: 2000,
+      })) }),
+    } }));
+    await expect(tooMany.dreamQuestions.list("master")).rejects.toThrow();
+  });
+});

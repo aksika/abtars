@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { ScheduledTaskRunner } from "./scheduled-task-runner.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { ProviderExecutionError } from "../transport/provider-failure.js";
+import type { ContentOutcome } from "../clean-response.js";
 
 vi.mock("./task-state-store.js", () => ({
   updateActiveRun: vi.fn(),
@@ -12,6 +13,8 @@ vi.mock("./task-state-store.js", () => ({
   incrementDeferrals: vi.fn(() => 0),
   advanceNextRun: vi.fn(),
   readLastPromptAt: vi.fn(() => 0),
+  persistReportContract: vi.fn(() => true),
+  readReportContract: vi.fn(() => undefined),
 }));
 vi.mock("./kanban-board.js", () => ({
   kanbanComplete: vi.fn(),
@@ -108,9 +111,9 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
 
   it("keeps a late completion from winning after the deadline", async () => {
     let started!: (control: any) => void;
-    let complete!: (value: { cardId: number; result: string }) => void;
+    let complete!: (value: { cardId: number; result: string; outcome: ContentOutcome }) => void;
     const startedPromise = new Promise<any>((resolve) => { started = resolve; });
-    const resultPromise = new Promise<{ cardId: number; result: string }>((resolve) => { complete = resolve; });
+    const resultPromise = new Promise<{ cardId: number; result: string; outcome: ContentOutcome }>((resolve) => { complete = resolve; });
     const runner = new ScheduledTaskRunner({
       agentRunner: async (request) => {
         request.executionControl?.setCardId(43);
@@ -123,7 +126,7 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     const control = await startedPromise;
     expect(control.cardId).toBe(43);
     await vi.advanceTimersByTimeAsync(10_000);
-    complete({ cardId: 43, result: "late" });
+    complete({ cardId: 43, result: "late", outcome: "text" });
     await vi.advanceTimersByTimeAsync(4_999);
     expect(vi.mocked(settleRunOnce)).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
     await vi.advanceTimersByTimeAsync(1);
@@ -137,9 +140,9 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
   it("#1539 accepts a child fact whose own time predates the deadline even when observed after it", async () => {
     const deadlineAt = Date.now() + 10_000;
     let started!: (control: any) => void;
-    let complete!: (value: { cardId: number; result: string; factAt: number }) => void;
+    let complete!: (value: { cardId: number; result: string; outcome: "text"; factAt: number }) => void;
     const startedPromise = new Promise<any>((resolve) => { started = resolve; });
-    const resultPromise = new Promise<{ cardId: number; result: string; factAt: number }>((resolve) => { complete = resolve; });
+    const resultPromise = new Promise<{ cardId: number; result: string; outcome: "text"; factAt: number }>((resolve) => { complete = resolve; });
     const runner = new ScheduledTaskRunner({
       agentRunner: async (request) => {
         request.executionControl?.setCardId(44);
@@ -152,7 +155,7 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     const control = await startedPromise;
     await vi.advanceTimersByTimeAsync(10_000);
     // The fact occurred 5s BEFORE the deadline but is observed after it.
-    complete({ cardId: 44, result: "pre-deadline result", factAt: deadlineAt - 5000 });
+    complete({ cardId: 44, result: "pre-deadline result", outcome: "text", factAt: deadlineAt - 5000 });
     await vi.advanceTimersByTimeAsync(5_000);
 
     const outcome = await runPromise;
@@ -174,7 +177,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("routes maxAgents=1 through the direct agent runner exactly once", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const outcome = await runner.run(makeEntry("dispatch-direct"), makeReservation("dispatch-direct"));
@@ -192,23 +195,33 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     expect(vi.mocked((await import("./kanban-board.js")).kanbanComplete)).not.toHaveBeenCalled();
   });
 
-  it("runs an old production-shaped task without orchestration through the direct runner exactly once", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 9, result: "legacy result" }));
+  it("fails closed when a single-agent runner omits the required outcome", async () => {
+    // #1651 v2: AgentTaskRunner now requires `outcome`. This test pins the
+    // documented defensive branch — a legacy runner that omits outcome is a
+    // contract violation production must fail closed on (empty_model_response).
+    // The mock's declared return satisfies the current type; the runtime shape
+    // deliberately omits `outcome` to simulate that legacy caller.
+    const agentRunner: (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string; outcome: ContentOutcome }> =
+      vi.fn(async () => ({ cardId: 9, result: "legacy result", outcome: undefined as never }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const legacy = makeEntry("dispatch-legacy");
     delete legacy.orchestration;
     const outcome = await runner.run(legacy, makeReservation("dispatch-legacy"));
 
-    expect(outcome.status).toBe("success");
+    expect(outcome.status).toBe("failed");
     expect(agentRunner).toHaveBeenCalledTimes(1);
     expect(projectRunner).not.toHaveBeenCalled();
-    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 9 }));
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      cardId: 9,
+      diagnostic: expect.objectContaining({ code: "empty_model_response" }),
+    }));
   });
 
   it("routes maxAgents>1 through the project runner exactly once, never the direct runner", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
-    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project synthesis" }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
+    const projectRunner = vi.fn(async (_request: import("./scheduled-project-runner.js").ScheduledProjectRequest) => ({ cardId: 8, result: "project synthesis" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const entry = makeEntry("dispatch-project");
     entry.orchestration = { maxAgents: 4 };
@@ -233,7 +246,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("passes the resolved report artifact path to the project runner for report tasks", async () => {
-    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+    const projectRunner = vi.fn(async (_request: import("./scheduled-project-runner.js").ScheduledProjectRequest) => ({ cardId: 8, result: "synthesis" }));
     const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
     const entry = makeEntry("dispatch-report");
     entry.orchestration = { maxAgents: 2 };
@@ -267,6 +280,80 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 });
 
+describe("ScheduledTaskRunner #1789 report-contract snapshot log split", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSettle.mockClear();
+  });
+
+  function reportEntry(id: string): any {
+    const entry = makeEntry(id);
+    entry.orchestration = { maxAgents: 2 };
+    entry.delivery = "report";
+    return entry;
+  }
+
+  async function mockPreflightOk(): Promise<void> {
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+  }
+
+  it("benign reattach (snapshot present after lost CAS race) logs debug, not warn", async () => {
+    await mockPreflightOk();
+    const storeMod = await import("./task-state-store.js");
+    vi.mocked(storeMod.persistReportContract).mockReturnValue(false);
+    vi.mocked(storeMod.readReportContract).mockReturnValue({
+      snapshot: { artifactPath: "/tmp/daily.md", minBytes: 100, requiredSections: ["# Summary"], baseline: { existed: false } },
+      reservedAt: Date.now(),
+    });
+    const loggerMod = await import("../logger.js");
+    const debugSpy = vi.spyOn(loggerMod, "logDebug").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(loggerMod, "logWarn").mockImplementation(() => {});
+    try {
+      const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+      const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
+      const outcome = await runner.run(reportEntry("reattach-report"), makeReservation("reattach-report"));
+      expect(outcome.status).toBe("success");
+      expect(debugSpy).toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("already persisted"));
+      expect(warnSpy).not.toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("falls back to review routing"));
+    } finally {
+      debugSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("genuinely lost write (snapshot absent) keeps the warn", async () => {
+    await mockPreflightOk();
+    const storeMod = await import("./task-state-store.js");
+    vi.mocked(storeMod.persistReportContract).mockReturnValue(false);
+    vi.mocked(storeMod.readReportContract).mockReturnValue(undefined);
+    const loggerMod = await import("../logger.js");
+    const warnSpy = vi.spyOn(loggerMod, "logWarn").mockImplementation(() => {});
+    try {
+      const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+      const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
+      const outcome = await runner.run(reportEntry("lost-report"), makeReservation("lost-report"));
+      expect(outcome.status).toBe("success");
+      expect(warnSpy).toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("falls back to review routing"));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
 describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -274,7 +361,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("settles a raw agent entry with no interaction as definition_failed, with no dispatch", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "must not run" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const raw = makeEntry("raw-entry");
@@ -292,7 +379,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("guards a null interaction object with the same classification", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const raw = makeEntry("null-interaction");
     raw.interaction = null;
@@ -307,7 +394,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("settles an unsupported interaction discriminant as definition_failed without dispatch", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const raw = makeEntry("bad-mode");
     raw.interaction = { mode: "weird" };
@@ -319,7 +406,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("keeps valid oneshot entries flowing through the direct runner", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("valid-oneshot"), makeReservation("valid-oneshot"));
     expect(outcome.status).toBe("success");
@@ -390,21 +477,24 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   ].join("\n");
 
   it("appends the delivery contract to one-shot announce dispatch prompts", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("contract-announce"), makeReservation("contract-announce"));
 
     expect(outcome.status).toBe("success");
     const goal = agentRunner.mock.calls[0]![0].goal as string;
     expect(goal).toContain("[DELIVERY CONTRACT]");
-    expect(goal).toContain("automatically delivered");
+    // #1724: the contract names Main as the announcer — the worker hands the
+    // result over, cannot deliver it, and must not claim it announced.
+    expect(goal).toContain("handed to Main");
     expect(goal).toContain("Do not call platform delivery tools");
+    expect(goal).toContain("you must not claim that you announced or sent it");
     expect(goal).not.toContain("Telegram");
     expect(goal).not.toContain("DeepSeek");
   });
 
   it("leaves report dispatch prompts unchanged", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "report result" }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "report result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const entry = makeEntry("contract-report");
     entry.delivery = "report";
@@ -450,7 +540,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   });
 
   it("passes the final response as deliveryText while detail stays a short prefix", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: LONG_RESULT }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: LONG_RESULT, outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("contract-long"), makeReservation("contract-long"));
 
@@ -463,6 +553,114 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
       detail: LONG_RESULT.slice(0, 200),
     }));
     expect(outcome.safeDetail).toBe(LONG_RESULT.slice(0, 200));
+  });
+
+  it.each<[string, string]>([
+    ["empty", ""],
+    ["no_reply", "[NO_REPLY]"],
+    ["reaction", "[REACT:👋]"],
+  ])("#1651 v2: a %s announce turn settles failed with empty_model_response — never success, never delivery", async (_name, raw) => {
+    const { classifyContent } = await import("../clean-response.js");
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: raw, outcome: classifyContent(raw) }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry(`announce-${_name}`), makeReservation(`announce-${_name}`));
+
+    expect(outcome.status).toBe("failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      cardId: 7,
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "empty_model_response",
+        retryability: "none",
+      }),
+    }));
+    const settleCall = mockedSettle.mock.calls[0]![0];
+    expect(settleCall["deliveryText"]).toBeUndefined();
+    expect(settleCall["releaseDelivery"]).not.toBe(true);
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
+  });
+
+  it("#1651 v2: a text announce turn keeps success settlement and delivery", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "morning briefing", outcome: "text" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("announce-text"), makeReservation("announce-text"));
+
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "success",
+      cardId: 7,
+      deliveryText: "morning briefing",
+      releaseDelivery: true,
+    }));
+  });
+
+  it("#1651 v2: a report with a valid artifact succeeds even when the final prose is non-text", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "[NO_REPLY]", outcome: "no_reply" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const entry = makeEntry("report-artifact-wins");
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+    const outcome = await runner.run(entry, makeReservation("report-artifact-wins"));
+
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", releaseDelivery: true }));
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ code: "empty_model_response" }));
+  });
+
+  it("#1651 v2: a report with an invalid artifact still fails — the text gate never rescues a bad artifact", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "lots of useful prose", outcome: "text" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const entry = makeEntry("report-artifact-fails");
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: false, code: "artifact_too_small", reason: "artifact is 12 bytes, minimum is 100" });
+    const outcome = await runner.run(entry, makeReservation("report-artifact-fails"));
+
+    expect(outcome.status).toBe("failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({ category: "validation", code: "artifact_too_small" }),
+    }));
   });
 });
 
@@ -509,9 +707,9 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
     const outcome = await runner.run(makeEntry("credits-noretry"), makeReservation("credits-noretry"));
 
     expect(outcome.status).toBe("failed");
-    const settleCall = mockedSettle.mock.calls[0]![0] as Record<string, unknown>;
+    const settleCall = mockedSettle.mock.calls[0]![0];
     expect(settleCall["retryAt"]).toBeUndefined();
-    expect((settleCall["diagnostic"] as { retryability: string }).retryability).toBe("none");
+    expect(settleCall.diagnostic?.retryability).toBe("none");
   });
 
   it("keeps generic mapping for ordinary model errors (no typed provider failure)", async () => {
@@ -525,6 +723,30 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
       outcome: "failed",
       diagnostic: expect.objectContaining({ code: "model_error" }),
+    }));
+  });
+
+  it("#1905: a typed all_candidates_failed maps without an unknown-code throw", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new ProviderExecutionError({
+        code: "all_candidates_failed",
+        retryable: false,
+        attemptedCandidates: 0,
+        message: "All model candidates failed",
+      });
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("generic-exhaustion"), makeReservation("generic-exhaustion"));
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.safeDetail).toBe("All model candidates failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "all_candidates_failed",
+        retryability: "none",
+      }),
     }));
   });
 });

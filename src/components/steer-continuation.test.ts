@@ -3,7 +3,7 @@ import { renderSteeringContinuation } from "./spin.js";
 import type { QueuedSessionInstruction } from "./spin-types.js";
 
 function makeInst(text: string, idx: number): QueuedSessionInstruction {
-  return { id: `s${idx}`, sessionId: "s1", executionId: "e1", source: "tui", text, createdAt: Date.now() };
+  return { id: `s${idx}`, sessionId: "s1", executionId: "e1", kind: "steer", source: "tui", text, bytes: Buffer.byteLength(text, "utf-8"), createdAt: Date.now(), state: "queued" };
 }
 
 describe("renderSteeringContinuation", () => {

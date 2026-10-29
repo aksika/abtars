@@ -9,6 +9,7 @@ import {
   createContractId,
   createAttemptId,
   findErrorsForPath,
+  acceptancePassed,
   SUPPORTED_SCHEMA_VERSION,
   MAX_GOAL_LENGTH,
   MAX_CONTRACT_JSON_BYTES,
@@ -50,7 +51,7 @@ const MINIMAL_ENVELOPE: Record<string, unknown> = {
     ordinal: 1,
     contract_id: "c_test_001",
     contract_digest: "abc123",
-    executor_kind: "local_worker",
+    executor_kind: "agent",
     executor_id: "spin-01",
     started_at: "2026-07-12T00:00:00.000Z",
     finished_at: "2026-07-12T00:01:00.000Z",
@@ -209,6 +210,103 @@ describe("contract validation", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some(e => e.tag === "shell_string")).toBe(true);
+    }
+  });
+
+  // ── #1656: one workspace-relative path language ─────────────────────────
+
+  it("rejects a leading-home artifact ref (unexpanded by execFileSync/path.resolve)", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "~/output/report.md", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.expected_artifacts[0].ref" && /home path/.test(e.message))).toBe(true);
+    }
+  });
+
+  it("rejects a bare-tilde artifact ref", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "~", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.expected_artifacts[0].ref")).toBe(true);
+    }
+  });
+
+  it("rejects traversal as a path component but allows innocent '..' substrings", () => {
+    const bad = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "reports/../out.md", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.errors.some(e => e.path === "$.expected_artifacts[0].ref" && e.tag === "traversal")).toBe(true);
+    }
+    const good = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "a..b/report.md", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(good.ok).toBe(true);
+  });
+
+  it("rejects an absolute Windows artifact ref", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "C:\\Users\\x\\out.md", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.expected_artifacts[0].ref")).toBe(true);
+    }
+  });
+
+  it("rejects control characters in an artifact ref", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      expected_artifacts: [
+        { id: "a1", kind: "file", ref: "out\u0000.md", required: true, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a leading-home verification command cwd", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      verification_commands: [
+        { id: "v1", argv: ["test", "-f", "x"], cwd: "~/work", timeout_ms: 5000, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.verification_commands[0].cwd" && /home path/.test(e.message))).toBe(true);
+    }
+  });
+
+  it("rejects a leading-home argv element", () => {
+    const result = validateContract({
+      ...MINIMAL_CONTRACT,
+      verification_commands: [
+        { id: "v1", argv: ["cat", "~/out.md"], timeout_ms: 5000, criterion_ids: ["c1"] },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.verification_commands[0].argv[1]" && /home path/.test(e.message))).toBe(true);
     }
   });
 
@@ -388,6 +486,46 @@ describe("normalizeContract", () => {
       expect(result.contract.provenance.authored_by).toBe("unknown");
     }
   });
+
+  it("#1638: preserves a valid workspace_alias and includes it in the digest", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "repo-a" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.contract.workspace_alias).toBe("repo-a");
+      const noAlias = normalizeContract(MINIMAL_CONTRACT);
+      if (noAlias.ok) {
+        expect(noAlias.contract.digest).not.toBe(result.contract.digest);
+      }
+    }
+  });
+
+  it("#1638: rejects a non-string workspace_alias instead of routing it as Spin", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: 42 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.workspace_alias" && e.tag === "type_error")).toBe(true);
+    }
+  });
+
+  it("#1638: trims whitespace around the alias", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "  repo-a  " });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.contract.workspace_alias).toBe("repo-a");
+    }
+  });
+
+  it("#1638: rejects traversal, separators, absolute, and control-char aliases", () => {
+    for (const bad of ["../x", "a/b", "a\\b", "/abs", "C:\\x", "a\x00b", "a\x1fb", ""]) {
+      const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: bad });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("#1638: rejects an alias over the length bound", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "x".repeat(129) });
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe("createContractId / createAttemptId", () => {
@@ -502,6 +640,84 @@ describe("redactEnvelope", () => {
     } as unknown as WorkerResultEnvelopeV1;
     const redacted = redactEnvelope(longCheck);
     expect(redacted.checks[0]!.stdout_excerpt.length).toBeLessThan(600);
+  });
+});
+
+describe("acceptancePassed (#1656)", () => {
+  // Call once: two separate validateContract() calls cannot share narrowing.
+  const validated = validateContract(MINIMAL_CONTRACT);
+  if (!validated.ok) throw new Error("fixture invalid");
+  const contract: WorkerAcceptanceContractV1 = { ...validated.contract };
+  const passedEnvelope: WorkerResultEnvelopeV1 = {
+    ...MINIMAL_ENVELOPE,
+    attempt: { ...(MINIMAL_ENVELOPE.attempt as Record<string, unknown>), contract_id: contract.id, contract_digest: contract.digest },
+  } as WorkerResultEnvelopeV1;
+
+  it("is true only for an exact completed envelope with every criterion passed once", () => {
+    expect(acceptancePassed(contract, passedEnvelope)).toBe(true);
+  });
+
+  it("is false when any criterion failed even though the execution completed", () => {
+    const failed = {
+      ...passedEnvelope,
+      criteria: [
+        { criterion_id: "c1", status: "passed", evidence_ids: ["v1"] },
+        { criterion_id: "c2", status: "failed", evidence_ids: ["a1"] },
+      ],
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, failed)).toBe(false);
+  });
+
+  it("is false when a criterion is missing from the envelope", () => {
+    const partial = {
+      ...passedEnvelope,
+      criteria: [{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }],
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, partial)).toBe(false);
+  });
+
+  it("is false when the envelope names an unknown criterion", () => {
+    const unknown = {
+      ...passedEnvelope,
+      criteria: [
+        { criterion_id: "c1", status: "passed", evidence_ids: ["v1"] },
+        { criterion_id: "cX", status: "passed", evidence_ids: [] },
+      ],
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, unknown)).toBe(false);
+  });
+
+  it("is false when a criterion is duplicated in the envelope", () => {
+    const duplicate = {
+      ...passedEnvelope,
+      criteria: [
+        { criterion_id: "c1", status: "passed", evidence_ids: ["v1"] },
+        { criterion_id: "c1", status: "passed", evidence_ids: ["v1"] },
+      ],
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, duplicate)).toBe(false);
+  });
+
+  it("is false when the envelope outcome is not completed", () => {
+    const notCompleted = { ...passedEnvelope, outcome: "failed" } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, notCompleted)).toBe(false);
+  });
+
+  it("is false when the envelope names a different contract id or digest", () => {
+    const otherId = {
+      ...passedEnvelope,
+      attempt: { ...passedEnvelope.attempt, contract_id: "c_other", contract_digest: "other" },
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, otherId)).toBe(false);
+    const otherDigest = {
+      ...passedEnvelope,
+      attempt: { ...passedEnvelope.attempt, contract_digest: "other" },
+    } as WorkerResultEnvelopeV1;
+    expect(acceptancePassed(contract, otherDigest)).toBe(false);
+  });
+
+  it("is false for an undefined envelope", () => {
+    expect(acceptancePassed(contract, undefined)).toBe(false);
   });
 });
 

@@ -23,7 +23,7 @@ vi.mock("../transport-config.js", () => ({
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-const Database: typeof import("better-sqlite3") = _require(sharedPath);
+const Database: new (p: string) => import("better-sqlite3").Database = _require(sharedPath);
 
 function createTestDb(): TaskDatabase {
   const raw = new Database(":memory:");
@@ -56,6 +56,7 @@ function createTestDb(): TaskDatabase {
     },
     exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
   };
 }
 
@@ -71,7 +72,7 @@ let wsPath: string;
 
 function makeService(configOverrides: Record<string, unknown> = {}): PiRunService {
   const db = createTestDb();
-  const store = new PiRunStore({ db });
+  const store = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
   const executor = {
     execute: mockExecute,
     reply: mockReply,
@@ -335,7 +336,7 @@ describe("PiRunService.compact() (#1406)", () => {
 
   function makeCompactService(): { svc: PiRunService; db: TaskDatabase } {
     const db = createTestDb();
-    const store = new PiRunStore({ db });
+    const store = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
     const executor = {
       execute: mockExecute,
       reply: mockReply,

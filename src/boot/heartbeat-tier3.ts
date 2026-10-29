@@ -1,11 +1,11 @@
 import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
+import { shaAdmissionNotice } from "../components/sha/sha-admission-notice.js";
 import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
-import { logInfo } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
-import { runModelHealthCheck } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
@@ -98,18 +98,43 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   // #1539: R3 bounded safety scan — a no-op whenever the lifecycle wake
   // scheduler is healthy. No acceptance criterion may depend on it.
+  // #1554: reads the scheduler from BootCtx (bridge-generation owned), not a
+  // Reconciler getter.
   heartbeat.registerTask({
     name: "lifecycle-due-safety-scan",
     execute: async () => {
       try {
-        const { getWakeScheduler } = await import("../components/reconciler.js");
-        getWakeScheduler()?.safetyScan();
+        ctx.lifecycleWakeScheduler?.safetyScan();
         return { state: "idle" as const };
       } catch (err) { logAndSwallow(TAG, "lifecycle-due-safety-scan", err); return { state: "idle" as const }; }
     },
   });
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
+
+  // #1724: compose the trusted scheduled-announcement ingress once. Adapters
+  // and pipeline deps resolve lazily at delivery time — later boot phases
+  // populate both after this registration.
+  const { MainConversationIngress } = await import("../components/main-conversation-ingress.js");
+  ctx.mainIngress = new MainConversationIngress({
+    getPipelineDeps: () => ctx.pipelineDeps,
+    getAdapter: (platform) => ctx.platformAdapters.get(platform) ?? null,
+  });
+
+  const { loadUsers } = await import("../components/user-registry.js");
+
+  // #1724: resolve the announcement target identity from the durable card
+  // chat id at delivery time. Platform-neutral at this boundary: the user
+  // registry owns the platform↔chat mapping; no platform is named here.
+  const resolveAnnouncementTarget = (chatId: string): { userId: string; platform: string; chatId: string } | null => {
+    const registry = loadUsers();
+    for (const user of registry.users) {
+      for (const [platform, id] of Object.entries(user.platforms)) {
+        if (String(id) === chatId) return { userId: user.userId, platform, chatId };
+      }
+    }
+    return null;
+  };
 
   const deliveryDeps = () => ({
     sendMessage: async (chatId: string, text: string): Promise<import("../components/tasks/kanban-delivery.js").SendOutcome> => {
@@ -136,10 +161,55 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       if (ctx.sendSystemMessage) await ctx.sendSystemMessage(prompt);
     },
     chatIdFor: (card: import("../components/tasks/kanban-board.js").KanbanCard) => card.chat_id || String(masterChatId),
+    // #1724: Main-owned announcement route for scheduled one-shot T announce
+    // cards. Resolves identity now (never from the display title), derives
+    // the stable card-derived event ID, and waits for Main's definite
+    // delivery outcome before the card state advances.
+    announceToMain: async (card: import("../components/tasks/kanban-board.js").KanbanCard): Promise<import("../types/platform.js").MainDeliveryResult> => {
+      const ingress = ctx.mainIngress;
+      if (!ingress) {
+        logWarn(TAG, `Card ${card.id}: no Main ingress composed — announcement not sent`);
+        return "not_sent";
+      }
+      const chatId = card.chat_id || String(masterChatId);
+      const target = resolveAnnouncementTarget(chatId);
+      if (!target) {
+        logWarn(TAG, `Card ${card.id}: no registered user for chat ${chatId} — announcement not sent`);
+        return "not_sent";
+      }
+      return ingress.announceToMain({
+        eventId: `scheduled-card:${card.id}`,
+        cardId: card.id,
+        title: card.title,
+        userId: target.userId,
+        platform: target.platform,
+        chatId: target.chatId,
+        result: card.result_summary ?? "",
+      });
+    },
   });
 
   // #1520: the delivery poll — a periodic bounded claim over done cards.
   // Delivery is strictly downstream of settlement; failures never rerun work.
+  //
+  // #1724 (aksika-approved 2026-08-25, separate heartbeat gate): this poll is
+  // now also the durable-outbox trigger for Main-owned scheduled-T announce
+  // handoffs. Documented contract:
+  //   - interval: unchanged 60s tick; no new task registered;
+  //   - worst case: zero-cost scan when no matching card; for a claimed
+  //     scheduled-T announce card, one full Main pipeline turn (model call +
+  //     platform send), typically seconds, bounded ~2min by provider timeout
+  //     plus the pipeline's 3-attempt delivery retry. Single-flight: the
+  //     Kanban claim CAS admits at most one active attempt, and
+  //     bridge.lock.lastHeartbeat updates before tasks run, so watchdog
+  //     liveness cannot be starved;
+  //   - failure behavior: execute() never throws (logAndSwallow); every
+  //     ingress failure maps to card not_sent (bounded ≤5 retry) or unknown
+  //     (operator review, no automatic resend);
+  //   - why this poll remains the correct trigger: it already owns restart
+  //     recovery and bounded retry wake-ups for the durable outbox; the nerve
+  //     card:done hook provides immediacy at settlement. Routing through Main
+  //     changes the payload path only — no second owner, no new timer.
   heartbeat.registerTask({
     name: "kanban-delivery-poll",
     execute: async () => {
@@ -175,33 +245,19 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects, retryPendingReviewRequests }) => {
-    startReconciler();
-    heartbeat.registerTask({
-      name: "reconciler-resync",
-      execute: async () => {
-        scanActiveProjects();
-        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
-        const expired = new ProjectReviewStore().abandonExpiredRequests();
-        return { state: expired > 0 ? "ran" : "idle" as const };
-      },
-    });
-    heartbeat.registerTask({
-      name: "review-request-retry",
-      execute: async () => {
-        const count = retryPendingReviewRequests();
-        return { state: count > 0 ? "ran" : "idle" as const };
-      },
-    });
-    heartbeat.registerTask({
-      name: "project-acceptance-outbox",
-      execute: async () => {
-        const { drainAcceptanceOutbox } = await import("../components/project-acceptance/project-review-service.js");
-        const count = await drainAcceptanceOutbox();
-        return { state: count > 0 ? "ran" : "idle" as const };
-      },
-    });
-  }).catch(err => logAndSwallow(TAG, "reconciler", err));
+  // #1554 (approved heartbeat move): project-acceptance-outbox is registered
+  // independently of Reconciler startup so a Reconciler failure can never
+  // suppress durable outbox delivery. reconciler-resync and review-request-
+  // retry register in phase-reconciler only after a successful generation
+  // start (Reconciler-owned safety/retry work must not exist without one).
+  heartbeat.registerTask({
+    name: "project-acceptance-outbox",
+    execute: async () => {
+      const { drainAcceptanceOutbox } = await import("../components/project-acceptance/project-review-service.js");
+      const count = await drainAcceptanceOutbox();
+      return { state: count > 0 ? "ran" : "idle" as const };
+    },
+  });
 
   // #1358 review — Drain unacknowledged remote Pi events for connected peers
   // on each heartbeat tick, under the declared DRAIN_BUDGET (spec #1358
@@ -283,8 +339,19 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   }
 
   let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
-  if (getEnv().selfhealEnabled) {
-    selfHealerTask = createSelfHealerTask(() => ctx.telegramAdapter, config.telegram.allowedUserIds);
+  // #1688 (approved predicate change, 2026-08-21): register the log scanner
+  // only when mode is not off. No other heartbeat behavior changed. The task
+  // emits typed LogFailureEvents into the SHA coordinator; it owns no agent
+  // state, clone, or dispatch.
+  if (getEnv().selfhealMode !== "off") {
+    selfHealerTask = createSelfHealerTask((event) => {
+      if (!ctx.shaCoordinator) return;
+      const outcome = ctx.shaCoordinator.admit(event);
+      const notice = shaAdmissionNotice(event, outcome);
+      if (notice && ctx.telegramAdapter) {
+        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), notice);
+      }
+    });
     heartbeat.registerTask(selfHealerTask);
   }
   ctx.selfHealerTask = selfHealerTask;
@@ -316,8 +383,4 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       ).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
     },
   }));
-
-  queueMicrotask(() => {
-    runModelHealthCheck(ctx).catch(err => logAndSwallow(TAG, "runModelHealth boot", err));
-  });
 }

@@ -9,8 +9,11 @@ import { readEnv } from "./doctor-render.js";
 import { getPiVersion } from "./pi-version-access.js";
 import { describeSoulInputs } from "../../components/soul-input-manifest.js";
 import { readSnapshot } from "../../components/runtime-health-snapshot.js";
+import { readSecretResult } from "../../components/secrets.js";
 import { KANBAN_STALE_CANDIDATE_MS } from "../../components/executor-progress.js";
-import type { ProbeResult, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
+import { createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError, type MemoryRuntimeFactoryResult } from "../../boot/phase-memory.js";
+import { resolveAbmindEndpoint, AbmindEndpointConfigError, type ResolvedAbmindEndpoint } from "../../components/abmind-endpoint-config.js";
+import type { ProbeResult, ProbeStatus, EvidenceLevel, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
 import { truncate } from "./doctor-types.js";
 
 const home = abtarsHome();
@@ -50,45 +53,134 @@ function ago(ms: number): string {
 
 // ── Body Probes ──
 
+// #1258: platform credentials resolve through the same effective source the
+// bridge uses — an already-present non-empty process.env override (operator /
+// service manager), then the secrets policy layer. Credential-shaped
+// config/.env assignments are NOT an input: #1354 makes the secret store
+// authoritative for provider credentials and forbids plaintext .env use.
+// Stale TELEGRAM_TOKEN / DISCORD_TOKEN aliases are not runtime configuration
+// and do not configure a platform.
+// Bound is 15s, not the original #1258 5s: on hosts with a slow resolver
+// (KP/WSL) undici fetch resolves DNS twice (lookup + net.connect), so a fresh
+// request to api.telegram.org measures ~10.6-10.8s. 5s aborted mid-DNS and
+// produced false "unreachable" warnings for a bridge that was actually healthy.
+// 15s still bounds the probe; both platforms run in parallel.
+const PLATFORM_TIMEOUT_MS = 15000;
+
+type PlatformName = "telegram" | "discord";
+
+interface PlatformDescriptor {
+  name: PlatformName;
+  canonical: string;
+  buildRequest: (token: string) => { url: string; headers: Record<string, string> };
+}
+
+const PLATFORMS: readonly PlatformDescriptor[] = [
+  {
+    name: "telegram",
+    canonical: "TELEGRAM_BOT_TOKEN",
+    // The credential necessarily appears in Telegram's fixed getMe URL path.
+    buildRequest: (token) => ({ url: `https://api.telegram.org/bot${token}/getMe`, headers: {} }),
+  },
+  {
+    name: "discord",
+    canonical: "DISCORD_BOT_TOKEN",
+    buildRequest: (token) => ({ url: "https://discord.com/api/v10/users/@me", headers: { Authorization: `Bot ${token}` } }),
+  },
+];
+
+function resolvePlatformCredential(canonical: string): import("../../components/secrets.js").SecretReadResult {
+  const override = process.env[canonical];
+  if (override !== undefined && override.length > 0) return { status: "available", value: override };
+  return readSecretResult(canonical);
+}
+
+/** Verify one platform's identity endpoint; never lets a credential or raw
+ *  provider error escape into a ProbeResult. */
+async function verifyPlatform(p: PlatformDescriptor, token: string): Promise<ProbeResult> {
+  let request: { url: string; headers: Record<string, string> };
+  try {
+    request = p.buildRequest(token);
+  } catch {
+    return { name: p.name, status: "failed", evidence: "filesystem", detail: "request build failed", ms: 0 };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PLATFORM_TIMEOUT_MS);
+  try {
+    const res = await fetch(request.url, { headers: request.headers, signal: controller.signal });
+    if (res.ok) return { name: p.name, status: "ok", evidence: "reachable", detail: "verified", ms: 0 };
+    // Authoritative authentication rejection: 401/403 for either provider;
+    // Telegram 404 too, because the credential is part of its fixed getMe route.
+    if (res.status === 401 || res.status === 403 || (p.name === "telegram" && res.status === 404)) {
+      return { name: p.name, status: "failed", evidence: "reachable", detail: "invalid token", ms: 0 };
+    }
+    return { name: p.name, status: "warning", evidence: "reachable", detail: `http ${res.status}`, ms: 0 };
+  } catch {
+    // Timeout (AbortError), network rejection, or DNS failure — bounded,
+    // value-free detail. The abort signal may carry the URL (with Telegram's
+    // token); it is never stringified into the result.
+    return { name: p.name, status: "warning", evidence: "reachable", detail: "unreachable", ms: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function probePlatforms(): Promise<ProbeResult> {
-  const env = readEnv();
-  const results: Array<{ name: string; status: "ok" | "warning" | "failed" | "skipped"; detail: string }> = [];
+  try {
+    const results: ProbeResult[] = [];
+    let requestsAttempted = 0;
+    let unreadableSecrets = 0;
 
-  if (env.get("TELEGRAM_BOT_TOKEN") || env.get("TELEGRAM_TOKEN")) {
-    const tok = env.get("TELEGRAM_BOT_TOKEN") ?? env.get("TELEGRAM_TOKEN") ?? "";
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(`https://api.telegram.org/bot${tok}/getMe`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) results.push({ name: "telegram", status: "ok", detail: "verified" });
-      else if (res.status === 401 || res.status === 403) results.push({ name: "telegram", status: "failed", detail: "invalid token" });
-      else results.push({ name: "telegram", status: "warning", detail: `http ${res.status}` });
-    } catch { results.push({ name: "telegram", status: "warning", detail: "unreachable" }); }
+    for (const platform of PLATFORMS) {
+      const cred = resolvePlatformCredential(platform.canonical);
+      if (cred.status === "missing") continue; // absent platform — excluded from aggregation
+      if (cred.status === "unreadable") {
+        // Configured-but-broken: never collapse into "no platform configured".
+        unreadableSecrets++;
+        results.push({
+          name: platform.name,
+          status: "failed",
+          evidence: "filesystem",
+          detail: "credential unreadable",
+          remediation: `Reinstall the credential in the secret store: ~/.abtars/secret/${platform.canonical}`,
+          ms: 0,
+        });
+        continue;
+      }
+      requestsAttempted++;
+      results.push(await verifyPlatform(platform, cred.value));
+    }
+
+    if (results.length === 0) {
+      return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
+    }
+
+    const status: ProbeStatus = results.some(r => r.status === "failed")
+      ? "failed"
+      : results.some(r => r.status === "warning")
+        ? "warning"
+        : "ok";
+    const evidence: EvidenceLevel = requestsAttempted > 0
+      ? "reachable"
+      : unreadableSecrets > 0
+        ? "filesystem"
+        : "configuration";
+    // Only the aggregate result is rendered, so per-platform remediations are
+    // surfaced on it (bounded, value-free — names the canonical secret path).
+    const remediations = results.flatMap(r => r.remediation ? [r.remediation] : []);
+
+    return {
+      name: "platforms",
+      status,
+      evidence,
+      detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "),
+      ...(remediations.length > 0 ? { remediation: remediations.join("; ") } : {}),
+      ms: 0,
+    };
+  } catch {
+    // Sanitize every path: timedProbe() renders an escaped error verbatim.
+    return { name: "platforms", status: "failed", evidence: "filesystem", detail: "platform probe failed", ms: 0 };
   }
-
-  if (env.get("DISCORD_BOT_TOKEN") || env.get("DISCORD_TOKEN")) {
-    const tok = env.get("DISCORD_BOT_TOKEN") ?? env.get("DISCORD_TOKEN") ?? "";
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch("https://discord.com/api/v10/users/@me", {
-        headers: { Authorization: `Bot ${tok}` },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (res.ok) results.push({ name: "discord", status: "ok", detail: "verified" });
-      else if (res.status === 401 || res.status === 403) results.push({ name: "discord", status: "failed", detail: "invalid token" });
-      else results.push({ name: "discord", status: "warning", detail: `http ${res.status}` });
-    } catch { results.push({ name: "discord", status: "warning", detail: "unreachable" }); }
-  }
-
-
-  if (results.length === 0) return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
-
-  const failed = results.filter(r => r.status === "failed");
-  const status = failed.length > 0 ? "failed" : results.every(r => r.status === "ok") ? "ok" : "ok";
-  return { name: "platforms", status, evidence: "reachable", detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "), ms: 0 };
 }
 
 async function probeDashboard(): Promise<ProbeResult> {
@@ -151,6 +243,24 @@ async function probeWatchdog(): Promise<ProbeResult> {
   const bridgeAlive = bridgePid > 0 && pidAlive(bridgePid);
   const wdAlive = wdPid > 0 && pidAlive(wdPid);
 
+  // #1711 R5/P7: an ownership-inconclusive episode must be visible to the
+  // operator here — watchdog absence or ownership uncertainty is never
+  // reported as a healthy supervised bridge.
+  const { readSupervisorState } = await import("../../supervisor/state.js");
+  const supState = readSupervisorState(home);
+  const episode = supState.ok ? supState.state.ownershipEpisode : undefined;
+  if (episode) {
+    const ageMin = Math.max(0, Math.round((Date.now() - episode.since) / 60000));
+    return {
+      name: "watchdog",
+      status: "warning",
+      evidence: "runtime",
+      detail: `${bridgePid}, wd:${wdPid}, ownership-inconclusive ${ageMin}m (${episode.reason})`,
+      remediation: "Verify bridge.lock integrity and check logs/watchdog.log; resolve manually if a duplicate bridge exists",
+      ms: 0,
+    };
+  }
+
   if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", evidence: "runtime", detail: `${bridgePid}, wd:${wdPid}`, ms: 0 };
   if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} dead, wd:${wdPid} dead`, remediation: "Run abtars start", ms: 0 };
   if (!wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} alive, wd:${wdPid} dead`, remediation: "Check watchdog configuration", ms: 0 };
@@ -158,12 +268,48 @@ async function probeWatchdog(): Promise<ProbeResult> {
 }
 
 async function probeBridge(): Promise<ProbeResult> {
-  const { spawnSync } = await import("node:child_process");
-  const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
-  const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
-  if (pids.length === 0) return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
-  if (pids.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${pids[0]}`, ms: 0 };
-  return { name: "bridge", status: "failed", evidence: "runtime", detail: `${pids.length} bridges: ${pids.join(",")}`, remediation: "Run abtars restart", ms: 0 };
+  // #1711 R2/B5: doctor uses the SAME literal identity predicate and
+  // enumeration as reconciliation — never a substring pgrep. Read-only: this
+  // probe observes, it never signals or repairs.
+  // #1711 R2.1: unattributable relative-spelled processes are reported by name
+  // with recovery text — a silent supervision freeze is a spec violation (B13).
+  const { potentialHomeBridgeProcesses } = await import("../../supervisor/identity.js");
+  const scope = potentialHomeBridgeProcesses(home);
+  if (!scope.complete) {
+    return { name: "bridge", status: "warning", evidence: "runtime", detail: `process enumeration failed (${scope.reason})`, ms: 0 };
+  }
+  if (scope.unattributable.length > 0) {
+    const detail = scope.unattributable.map((u) => `PID ${u.pid} (${u.argv.join(" ")})`).join("; ");
+    return {
+      name: "bridge",
+      status: "warning",
+      evidence: "runtime",
+      detail: `blocked-unattributable: ${detail}`,
+      remediation: "This process predates the canonical spawn target and cannot be attributed to a home; restart or terminate it to restore supervision",
+      ms: 0,
+    };
+  }
+  const exact = scope.blockers.filter((p) => p.exactTarget);
+  const pids = exact.map((p) => p.pid).slice(0, 5).join(",");
+  if (exact.length === 0) {
+    // A legacy/relative-spelled same-home process (or an absolute spelling
+    // inside this home) is a spawn blocker: report it by PID — never represent
+    // the blocked state as healthy supervision (invariant 10).
+    if (scope.blockers.length > 0) {
+      const detail = scope.blockers.map((p) => `PID ${p.pid} (${p.argv.join(" ")})`).join("; ");
+      return {
+        name: "bridge",
+        status: "warning",
+        evidence: "runtime",
+        detail: `blocked-bridge-processes: ${detail}`,
+        remediation: "A same-home bridge process is already present; restart or terminate it before starting another",
+        ms: 0,
+      };
+    }
+    return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
+  }
+  if (exact.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${exact[0]!.pid}`, ms: 0 };
+  return { name: "bridge", status: "failed", evidence: "runtime", detail: `${exact.length} bridges: ${pids}`, remediation: "Run abtars restart", ms: 0 };
 }
 
 async function probeTui(): Promise<ProbeResult> {
@@ -478,14 +624,59 @@ async function probeSoul(): Promise<ProbeResult> {
   return { name: "soul", status, evidence: "filesystem", detail: truncate(issues.join("; ")), ms: 0 };
 }
 
+// #1662: package availability is not service health. The mind probe follows
+// boot's production memory boundary (phase-memory): effective MEMORY provider,
+// the configured endpoint (local or WSS), negotiation, and the required recall
+// capability. A stopped daemon renders as failed — never a green "abmind
+// loaded (in-process)" line. No daemon is started/restarted here, no service
+// manager is invoked, and no SQLite or in-process memory owner is opened.
 async function probeMind(): Promise<ProbeResult> {
+  // Non-secret MEMORY provider: operator process.env wins over the .env file,
+  // matching boot's effective resolution. Any value other than "none" means
+  // memory is expected (phase-config: memoryEnabled = provider !== "none").
+  const env = readEnv();
+  const memoryProvider = process.env["MEMORY"] ?? env.get("MEMORY");
+  if (memoryProvider === "none") {
+    return { name: "mind", status: "skipped", evidence: "configuration", detail: "memory disabled", ms: 0 };
+  }
+
+  const configDir = join(home, "config");
+  let endpoint: ResolvedAbmindEndpoint;
   try {
-    const { loadAbmind } = await import("../../utils/abmind-lazy.js");
-    const mod = await loadAbmind();
-    if (!mod) return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind not installed", ms: 0 };
-    return { name: "mind", status: "ok", evidence: "runtime", detail: "abmind loaded (in-process)", ms: 0 };
-  } catch {
-    return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind load failed", ms: 0 };
+    endpoint = resolveAbmindEndpoint(configDir);
+  } catch (err) {
+    // Bounded configuration failure: the raw reason can carry credential
+    // paths or permission detail — only the typed reason code escapes.
+    const code = err instanceof AbmindEndpointConfigError ? err.code : "config_invalid";
+    return { name: "mind", status: "failed", evidence: "configuration", detail: `abmind endpoint config rejected (${code})`, ms: 0 };
+  }
+
+  let factoryResult: MemoryRuntimeFactoryResult | null = null;
+  try {
+    factoryResult = await createMemoryRuntimeFromEndpoint(endpoint, home);
+    if (!factoryResult.runtime.supports("recall")) {
+      return { name: "mind", status: "failed", evidence: "runtime", detail: "abmind endpoint incompatible", ms: 0 };
+    }
+    return { name: "mind", status: "ok", evidence: "runtime", detail: `abmind endpoint ready (${factoryResult.mode})`, ms: 0 };
+  } catch (err) {
+    if (err instanceof AbmindModuleMissingError) {
+      return { name: "mind", status: "failed", evidence: "executable", detail: "abmind package unavailable", remediation: "Install abmind: npm install -g abmind", ms: 0 };
+    }
+    if (err instanceof MemoryEndpointUnavailableError) {
+      return { name: "mind", status: "failed", evidence: "reachable", detail: "abmind endpoint unavailable", ms: 0 };
+    }
+    // Negotiation succeeded but the endpoint lacked the core recall path — the
+    // factory's capability assertion throws this stable, bounded marker.
+    if (err instanceof Error && err.message.includes("negotiation did not advertise core memory capabilities")) {
+      return { name: "mind", status: "failed", evidence: "runtime", detail: "abmind endpoint incompatible", ms: 0 };
+    }
+    return { name: "mind", status: "failed", evidence: "reachable", detail: "abmind endpoint unavailable", ms: 0 };
+  } finally {
+    // Doctor owns no persistent memory connection — release whatever the
+    // factory left open so no socket/reconnect resources survive the probe.
+    if (factoryResult) {
+      try { await factoryResult.client.close(); } catch { /* best-effort */ }
+    }
   }
 }
 
@@ -498,7 +689,10 @@ export async function runAllProbes(): Promise<DoctorOutputV2> {
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
     Promise.all([
-      timedProbe("platforms", "configuration", () => probePlatforms().then(r => ({ ...r, evidence: "reachable" as const }))),
+      // #1258: no unconditional evidence override — the platform probe owns
+      // its evidence (configuration / filesystem / reachable) so a
+      // configuration-only result survives unchanged.
+      timedProbe("platforms", "configuration", probePlatforms),
       timedProbe("dashboard", "reachable", probeDashboard),
       timedProbe("security", "configuration", probeSecurity),
       timedProbe("watchdog", "runtime", probeWatchdog),

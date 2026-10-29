@@ -1,61 +1,65 @@
 /**
- * pi-ai adapter — the L1 "motor prosthetic" for PiCoreTransport (#1311).
+ * pi-ai adapter — candidate → Pi model shape and Pi's thinking-level clamp.
  *
- * Anatomy: pi-ai attaches at Brain (model-transport motor) only. This module
- * takes an abtars candidate {endpoint, apiKey, model, apiFormat} + conversation
- * and executes ONE streamed completion through pi-ai, translating pi-ai stream
- * events into abtars's internal SSEEvent contract. It does NOT touch pi-ai's
- * model catalog — the single pi Model is constructed FROM the candidate via
- * createProvider (Phase 1 boundary: catalog adoption is a later task).
+ * #1940: Pi's AgentSession makes every provider call; this module only maps
+ * the abtars API format to Pi's API family and resolves the effective
+ * reasoning level with Pi's own clamp (for status and /effort).
  *
- * Resilience contract (downward-only):
- *   - L1 executes one call; it does not rotate or retry. pi-ai is called with
- *     maxRetries: 0 — abtars L2 (fallback-policy) owns the retry budget.
- *   - If pi-ai cannot be loaded, streamPiAiCompletion throws PiAiUnavailableError;
- *     the gate catches it and falls through to the L0 reptile floor.
- *   - Request errors (provider down, quota, auth) are mapped to an Error whose
- *     message carries "API error <status>" so sendWithPolicy's existing
- *     parseErrorStatus/classifyError/parseRetryAfter classify them unchanged.
- *
- * Contracts verified against @earendil-works/pi-ai@~0.83.0 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~1.3.0 via devDependency.
  */
 
-import type {
-  Api,
-  ThinkingLevel,
-  ModelThinkingLevel,
-  Model,
-  Usage,
-  TextContent,
-  ThinkingContent,
-  ImageContent,
-  ToolCall,
-  Tool,
-  Context,
-  Message,
-  UserMessage,
-  ToolResultMessage,
-  AssistantMessage,
+import type { Api, ThinkingLevel, ModelThinkingLevel, Model } from "@earendil-works/pi-ai";
 
-  ProviderStreams,
-  SimpleStreamOptions,
-  Provider,
-  CreateProviderOptions,
-} from "@earendil-works/pi-ai";
+// #1746: Pi's authoritative thinking-level clamp, captured from the runtime
+// pi-ai root module. It is held in a module slot because resolveCandidateModel()
+// is synchronous and is called from PiCoreTransport's constructor and from
+// setReasoningEffort() — neither may become async (#1619 clamps at construction
+// so /status cannot claim xhigh before the first turn). Populated by
+// ensurePiThinkingClamp(); unset means "pi not loaded yet", never "no clamp
+// needed". No @earendil-works implementation may enter the bundle through a
+// static import — the pi installation is the only source of this function
+// (enforced by scripts/check-pi-boundary.mjs and scripts/check-bundle-boundary.mjs).
+let piThinkingClamp: ((model: Model<Api>, level: ModelThinkingLevel) => ModelThinkingLevel) | null = null;
 
-import {
-  clampThinkingLevel,
-} from "@earendil-works/pi-ai";
+/** #1746: log the unpopulated-clamp pass-through at most once per process. */
+let clampMissLogged = false;
 
-import { logWarn } from "../logger.js";
+/**
+ * #1746: load the pi-ai root module once and capture `clampThinkingLevel`.
+ * Idempotent and safe to call from several boot paths. Accepts a pi-ai root
+ * module the caller has already loaded (the runtime-contract probe) and
+ * otherwise resolves it through the standard installation-scoped loader. No
+ * new module specifier: the pi-ai root is what defaultLoadPi/defaultLoadApi
+ * resolve today. Resolves without populating the slot when the installation
+ * is absent or unloadable — the api route fails its runtime contract on the
+ * first prompt in that case, so a boot-time throw would only move the same
+ * failure earlier and less informatively. Never throws to its caller.
+ */
+export async function ensurePiThinkingClamp(piAiRoot?: Record<string, unknown>): Promise<void> {
+  if (piThinkingClamp) return;
+  let root = piAiRoot;
+  if (!root) {
+    try {
+      const result = resolvePiInstallation();
+      if (result.state !== "compatible") return;
+      const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
+      root = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
+    } catch {
+      // absent or unloadable installation — degrade, never throw
+      return;
+    }
+  }
+  const clamp = root.clampThinkingLevel;
+  if (typeof clamp === "function") {
+    piThinkingClamp = clamp as (model: Model<Api>, level: ModelThinkingLevel) => ModelThinkingLevel;
+  }
+}
+
+import { logDebug } from "../logger.js";
+import { resolveModelMeta } from "./pi-catalog.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
 import type { ReasoningEffort } from "./kiro-transport.js";
-
-// Shared message types (moved from deleted conversation-session.ts)
-export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
 
 export type LegacyToolCall = {
   id: string;
@@ -63,25 +67,11 @@ export type LegacyToolCall = {
   function: { name: string; arguments: string };
 };
 
-export type ChatMessage = {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | ContentPart[] | null;
-  tool_calls?: LegacyToolCall[];
-  tool_call_id?: string;
-  name?: string;
-};
-
 const TAG = "pi-ai-adapter";
 
 // ─── abtars-side input types ────────────────────────────────────────────────
 
 export type ApiFormat = "chat" | "responses" | "anthropic";
-
-/** An abtars tool schema in OpenAI function-tool shape (getToolSchemas output). */
-export type OpenAiToolSchema = {
-  type: "function";
-  function: { name: string; description: string; parameters: Record<string, unknown> };
-};
 
 /** The active candidate L2 selected — exactly what L0 would call with. */
 export interface PiAiCandidate {
@@ -109,23 +99,6 @@ export interface PiAiCandidate {
   reasoningEffort?: "off" | "low" | "medium" | "high" | "xhigh" | null;
 }
 
-export interface PiAiConversation {
-  messages: ChatMessage[];
-  tools: OpenAiToolSchema[];
-}
-
-// ─── pi-ai module wrapper (abtars-owned) ─────────────────────────────────────
-
-/** The pi-ai root module surface this adapter uses, narrowed from the lazy require. */
-export interface PiAiModule {
-  createProvider(input: CreateProviderOptions): Provider;
-  isRetryableAssistantError(message: AssistantMessage): boolean;
-}
-
-// ─── error tagging ──────────────────────────────────────────────────────────
-
-// Legacy L0 adapter classes removed in #1447.
-
 // ─── pure translators ───────────────────────────────────────────────────────
 
 /** Map abtars apiFormat → pi Api family. chat/undefined → openai-completions. */
@@ -146,17 +119,6 @@ const EFFORT_LEVELS: readonly string[] = ["off", "low", "medium", "high", "xhigh
 function mapEffortLevel(s: string | undefined): ModelThinkingLevel | undefined {
   if (!s) return undefined;
   return EFFORT_LEVELS.includes(s) ? (s as ModelThinkingLevel) : "medium";
-}
-
-/** Derive a stable provider id from the endpoint host (cosmetic; pi uses it for logging). */
-function deriveProviderId(endpoint: string): string {
-  try {
-    const host = new URL(endpoint).hostname;
-    const id = host.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    return id || "abtars-direct";
-  } catch {
-    return "abtars-direct";
-  }
 }
 
 /**
@@ -218,6 +180,14 @@ export interface ResolvedPiModel {
  * `model.reasoning` false so no reasoning param is emitted. A custom Pi model
  * without a non-null `thinkingLevelMap.xhigh` never claims xhigh — Pi's
  * clamped result wins.
+ *
+ * #1770: maxOutput is never invented here. The threaded candidate value
+ * (resolved at construction: pi catalog wins, models.json floor) leads; a
+ * live pi-catalog lookup covers ad-hoc candidates built without resolution;
+ * the models.json-miss default (8192, mirroring transport-config/resolver)
+ * is the last resort. A hardcoded small cap starves thinking models —
+ * reasoning and answer share max_tokens, so the cap burns on thinking and
+ * the turn settles length-truncated with empty content.
  */
 export function resolveCandidateModel(
   candidate: {
@@ -227,11 +197,15 @@ export function resolveCandidateModel(
     apiFormat?: ApiFormat;
     thinking?: PiAiCandidate["thinking"];
     maxContext: number;
+    maxOutput?: number;
     provider: string;
   },
   requestedEffort: ReasoningEffort,
   hasImage: boolean,
 ): ResolvedPiModel {
+  const maxOutput = candidate.maxOutput
+    ?? resolveModelMeta(candidate.model, candidate.provider)?.maxOutput
+    ?? 8192;
   const piCandidate: PiAiCandidate = {
     model: candidate.model,
     endpoint: candidate.endpoint,
@@ -239,153 +213,16 @@ export function resolveCandidateModel(
     apiFormat: candidate.apiFormat,
     thinking: candidate.thinking,
     reasoningEffort: requestedEffort,
-    maxOutput: 4096,
+    maxOutput,
     contextWindow: candidate.maxContext,
   };
   const model = buildPiModel(piCandidate, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
-  const clamped = clampThinkingLevel(model, requestedEffort);
+  const clamped = piThinkingClamp ? piThinkingClamp(model, requestedEffort) : requestedEffort;
   const effective = clamped === "minimal" || clamped === "max" ? ("high" as ReasoningEffort) : (clamped as ReasoningEffort);
   if (effective === "off") model.reasoning = false;
+  if (!piThinkingClamp && !clampMissLogged) {
+    clampMissLogged = true;
+    logDebug(TAG, "#1746: thinking clamp not populated — passing requested effort through (pi not loaded yet)");
+  }
   return { model, requested: requestedEffort, effective };
-}
-
-const DATA_URL_RE = /^data:([^;,]+);base64,(.+)$/s;
-
-function toPiUserContent(content: string | ContentPart[] | null): string | (TextContent | ImageContent)[] {
-  if (typeof content === "string" || content === null) return content ?? "";
-  const parts: (TextContent | ImageContent)[] = [];
-  for (const p of content) {
-    if (p.type === "text") parts.push({ type: "text", text: p.text });
-    else {
-      const m = DATA_URL_RE.exec(p.image_url.url);
-      if (m) parts.push({ type: "image", data: m[2] as string, mimeType: m[1] as string });
-      else logWarn(TAG, `Non-data-URL image not supported on pi-ai path; skipping`);
-    }
-  }
-  return parts;
-}
-
-function parseArgsObject(argsStr: string): Record<string, unknown> {
-  try { return JSON.parse(argsStr) as Record<string, unknown>; } catch { return {}; }
-}
-
-const ZERO_USAGE: Usage = {
-  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
-
-/**
- * Translate an abtars ChatMessage[] conversation → pi Context.
- * system messages collapse into systemPrompt; assistant tool_calls become pi
- * toolCall content blocks (arguments parsed to objects); tool messages become
- * pi toolResult messages.
- */
-export function buildPiContext(conv: PiAiConversation, api?: Api, providerId?: string): Context {
-  const systemParts: string[] = [];
-  const messages: Message[] = [];
-  const now = Date.now();
-
-  for (const m of conv.messages) {
-    if (m.role === "system") {
-      if (typeof m.content === "string" && m.content) systemParts.push(m.content);
-      continue;
-    }
-    if (m.role === "user") {
-      messages.push({ role: "user", content: toPiUserContent(m.content), timestamp: now } as UserMessage);
-    } else if (m.role === "assistant") {
-      const blocks: (TextContent | ThinkingContent | ToolCall)[] = [];
-      if (typeof m.content === "string" && m.content) blocks.push({ type: "text", text: m.content });
-      for (const tc of m.tool_calls ?? []) {
-        blocks.push({ type: "toolCall", id: tc.id, name: tc.function.name, arguments: parseArgsObject(tc.function.arguments) });
-      }
-      messages.push({
-        role: "assistant",
-        content: blocks,
-        api: api ?? "openai-completions",
-        provider: providerId ?? "abtars",
-        model: "",
-        usage: ZERO_USAGE,
-        stopReason: (m.tool_calls?.length ? "toolUse" : "stop") as AssistantMessage["stopReason"],
-        timestamp: now,
-      } as AssistantMessage);
-    } else if (m.role === "tool") {
-      const text = typeof m.content === "string" ? m.content : "";
-      messages.push({
-        role: "toolResult",
-        toolCallId: m.tool_call_id ?? "",
-        toolName: m.name ?? "",
-        content: [{ type: "text", text }],
-        isError: false,
-        timestamp: now,
-      } as ToolResultMessage);
-    }
-  }
-
-  const tools: Tool[] | undefined = conv.tools.length
-    ? conv.tools.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters } as Tool))
-    : undefined;
-
-  return { systemPrompt: systemParts.join("\n\n") || undefined, messages, tools };
-}
-
-/**
- * Translate a pi-ai AssistantMessageEvent stream → abtars SSEEvent stream.
- *
- * - text_delta  → chunk (folded into the answer)
- * - thinking_delta → thinking (streamed to the user, NOT folded into the answer)
- * - toolcall_end → one complete tool_call_delta (id+name+args); providers that
- *   only emit deltas are flushed at done as a fallback.
- * - done → done (usage + cacheRead/cacheWrite)
- * - error → throws an Error whose message carries "API error <status>", mapped
- *   via pi's classifier so L2 buckets it correctly.
- */
-
-async function defaultLoadPi(): Promise<PiAiModule> {
-  const result = resolvePiInstallation();
-  if (result.state !== "compatible") throw new Error(`Pi not available: ${result.state}`);
-  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
-  const piModule = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
-  return piModule as unknown as PiAiModule;
-}
-
-async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
-  const result = resolvePiInstallation();
-  if (result.state !== "compatible") throw new Error(`Pi not available: ${result.state}`);
-  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai", subpath: `api/${api}` };
-  const mod = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
-  return mod as unknown as ProviderStreams;
-}
-
-export async function createPiAiAssistantStream(
-  candidate: PiAiCandidate,
-  model: Model<Api>,
-  context: Context,
-  options: SimpleStreamOptions,
-  signal: AbortSignal,
-): Promise<import("@earendil-works/pi-ai").AssistantMessageEventStream> {
-  const api = pickPiApi(candidate.apiFormat);
-  const pi = await (defaultLoadPi)();
-  const apiMod = await defaultLoadApi(api);
-  const providerId = deriveProviderId(candidate.endpoint);
-  const provider = pi.createProvider({
-    id: providerId,
-    name: providerId,
-    baseUrl: candidate.endpoint,
-    auth: {
-      apiKey: {
-        name: `${providerId} API key`,
-        resolve: async () => candidate.apiKey
-          ? { auth: { apiKey: candidate.apiKey }, source: "abtars candidate" }
-          : undefined,
-      },
-    },
-    models: [model],
-    api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
-  });
-  return provider.streamSimple(model, context, {
-    ...options,
-    apiKey: candidate.apiKey,
-    signal,
-    maxRetries: 0,
-  });
 }

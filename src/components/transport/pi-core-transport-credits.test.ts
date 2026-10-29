@@ -1,82 +1,30 @@
 /**
- * pi-core-transport-credits.test.ts — #1297: the stream boundary's typed
- * terminal failure (credits_exhausted) becomes a ProviderExecutionError at the
- * transport surface. The Pi stream factory is mocked so the terminal failure
- * fires synchronously; committed output and per-execution isolation are
- * verified against the real settlement precedence chain.
+ * pi-core-transport-credits.test.ts — #1940: provider errors propagate raw.
+ *
+ * Pi owns retry and overflow recovery; abtars never masks provider errors.
+ * A provider failure from session.prompt() surfaces unchanged at the
+ * transport surface (never wrapped, never a silent empty answer), committed
+ * output wins, and a failed turn clears the slot without leaking state.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import {
+  makeAgentSessionHarness,
+  latestSession,
+  waitForPrompt,
+  settleAgentTurn,
+  FakeAgentSession,
+} from "../../test-support/fake-agent-session.js";
+import type { PiAgentSessionFactoryLoader } from "./pi-agent-session-store.js";
 
-const { FakeHost, hostBehavior } = vi.hoisted(() => {
-  const hostBehavior: { emitMessageEnd: boolean } = { emitMessageEnd: false };
-  class FakeHost {
-    isSettled = false;
-    state = "created";
-    ready = Promise.resolve();
-    private readonly options: { onEvent?: (event: unknown) => unknown };
-
-    constructor(options: { onEvent?: (event: unknown) => unknown }) {
-      this.options = options;
-    }
-
-    async start(): Promise<void> {
-      this.state = "running";
-      if (hostBehavior.emitMessageEnd) {
-        this.options.onEvent?.({ type: "message_end", message: { role: "assistant", content: "committed output" } });
-      }
-      this.isSettled = true;
-      this.state = "settled";
-    }
-
-    async waitForSettlement(): Promise<void> {}
-    cancel(): void { this.isSettled = true; }
-    async steer(): Promise<void> {}
-    async followUp(): Promise<void> {}
-  }
-  return { FakeHost, hostBehavior };
-});
-
-const { terminalFailureMode } = vi.hoisted(() => ({
-  terminalFailureMode: { fire: true },
-}));
-
-vi.mock("./pi-core-host.js", () => ({ PiCoreExecutionHost: FakeHost }));
-vi.mock("./pi-core-types.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./pi-core-types.js")>();
-  return {
-    ...actual,
-    loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
-      module: {},
-      installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
-    }),
-  };
-});
-vi.mock("./pi-stream-fn.js", () => ({
-  createPiStreamFn: vi.fn((options: { onTerminalFailure?: (f: unknown) => void }) => {
-    if (terminalFailureMode.fire) {
-      options.onTerminalFailure?.({
-        code: "credits_exhausted",
-        retryable: false,
-        attemptedCandidates: 2,
-        message: "All model candidates are blocked by provider credit exhaustion",
-      });
-    }
-    return vi.fn(() => ({
-      [Symbol.asyncIterator]: async function* () {
-        yield { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} } };
-      },
-      result: async () => ({ role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} }),
-    }));
-  }),
+vi.mock("./pi-runtime-contract.js", () => ({
+  validatePiRuntimeContract: vi.fn(async () => {}),
 }));
 
 import { PiCoreTransport } from "./pi-core-transport.js";
-import { ProviderExecutionError } from "./provider-failure.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 
-function makeTransport(): PiCoreTransport {
-  const candidate: ModelCandidate = {
+function makeCandidate(): ModelCandidate {
+  return {
     model: "test-model",
     provider: "test-provider",
     endpoint: "https://api.test/v1",
@@ -84,52 +32,82 @@ function makeTransport(): PiCoreTransport {
     apiKey: "test-key",
     source: "primary",
   };
+}
+
+function makeTransport(loader: PiAgentSessionFactoryLoader): PiCoreTransport {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "system",
-    candidates: [candidate],
-    healthRegistry: new ModelHealthRegistry(),
+    candidate: makeCandidate(),
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    sessionFactoryLoader: loader,
   });
 }
 
-describe("PiCoreTransport terminal provider failure (#1297)", () => {
-  beforeEach(() => {
-    terminalFailureMode.fire = true;
-    hostBehavior.emitMessageEnd = false;
-  });
+/** Loader whose sessions fail the next prompt with the given error. */
+function failingPromptLoader(error: unknown): PiAgentSessionFactoryLoader {
+  return (async () => ({
+    createAgentSession: vi.fn(async () => {
+      const session = new FakeAgentSession();
+      session.failNextPrompt = error;
+      return { session };
+    }),
+    SessionManager: { inMemory: vi.fn(() => ({})) },
+    SettingsManager: { inMemory: vi.fn(() => ({})) },
+    ModelRuntime: {
+      create: vi.fn(async () => ({
+        getModel: vi.fn(() => ({ id: "m" })),
+        registerProvider: vi.fn(),
+      })),
+    },
+    DefaultResourceLoader: class {
+      async reload(): Promise<void> {}
+    },
+  })) as PiAgentSessionFactoryLoader;
+}
 
-  it("throws ProviderExecutionError carrying the typed failure when no committed output supersedes it", async () => {
-    const transport = makeTransport();
+describe("PiCoreTransport provider errors propagate raw (#1940 R6)", () => {
+  it("a provider failure rejects unchanged and clears the slot", async () => {
+    const providerError = new Error("provider exploded: 503 upstream");
+    const transport = makeTransport(failingPromptLoader(providerError));
     await transport.initialize();
 
     const err = await transport.sendPrompt("session", "continue").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ProviderExecutionError);
-    expect((err as ProviderExecutionError).failure).toMatchObject({
-      code: "credits_exhausted",
-      retryable: false,
-      attemptedCandidates: 2,
-    });
+    expect(err).toBe(providerError);
+    expect((transport as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
   });
 
-  it("returns committed successful output, never overridden by the captured terminal failure", async () => {
-    hostBehavior.emitMessageEnd = true;
-    const transport = makeTransport();
+  it("returns committed successful output", async () => {
+    const harness = makeAgentSessionHarness();
+    const transport = makeTransport(harness.loader);
     await transport.initialize();
 
-    const text = await transport.sendPrompt("session", "continue");
-    expect(text).toBe("committed output");
+    const pending = transport.sendPrompt("session", "continue");
+    const session = await waitForPrompt(harness);
+    settleAgentTurn(session, { text: "committed output" });
+    await expect(pending).resolves.toBe("committed output");
   });
 
-  it("does not leak terminal-failure state into the next execution", async () => {
-    const transport = makeTransport();
+  it("an aborted turn clears the slot and the same session serves the next turn", async () => {
+    const harness = makeAgentSessionHarness();
+    const transport = makeTransport(harness.loader);
     await transport.initialize();
-    // Execution 1 captures a terminal credit failure.
-    await expect(transport.sendPrompt("session", "continue")).rejects.toBeInstanceOf(ProviderExecutionError);
-    // Execution 2 has no terminal failure — it must settle generically, not
-    // replay the previous execution's credits_exhausted.
-    terminalFailureMode.fire = false;
-    const text = await transport.sendPrompt("session", "continue");
-    expect(text).toBe("");
+
+    // Execution 1 aborts (cancel path) and settles empty.
+    const first = transport.sendPrompt("session", "continue");
+    const firstSession = await waitForPrompt(harness);
+    firstSession.emit({ type: "agent_settled", aborted: true });
+    firstSession.streaming = false;
+    await expect(first).resolves.toBe("");
+    expect((transport as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
+
+    // Execution 2 reuses the same live session and settles generically.
+    const second = transport.sendPrompt("session", "continue");
+    const secondSession = await waitForPrompt(harness);
+    expect(secondSession).toBe(firstSession);
+    settleAgentTurn(secondSession, {});
+    await expect(second).resolves.toBe("");
+    expect((transport as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
+    expect(latestSession(harness)).toBe(firstSession);
   });
 });

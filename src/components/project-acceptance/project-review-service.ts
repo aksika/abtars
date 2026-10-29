@@ -1,15 +1,12 @@
 import { ProjectReviewStore } from "./project-review-store.js";
-import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
-import type { ValidationIssue } from "./project-review-contract.js";
+import type { ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
-import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
-import { nerve } from "../nerve.js";
-import { randomUUID } from "node:crypto";
 
-const MAX_INVALID_PROPOSALS = 5;
-
-/** #1620: stable blocker class for protocol exhaustion — review failed, criteria were not semantically evaluated. */
-export const REVIEW_PROTOCOL_EXHAUSTED = "review_protocol_exhausted";
+// #1792: the decision/settle path (ProjectReviewService.processDecision +
+// repair-source validation) is deleted with the supervised review-turn world —
+// the runner judges via submitVerdict and settles through the store directly.
+// What remains is the acceptance-outbox drain (heartbeat-tier3) and the pure
+// delivered-synthesis renderer.
 
 export async function drainAcceptanceOutbox(): Promise<number> {
   const store = new ProjectReviewStore();
@@ -21,7 +18,14 @@ export async function drainAcceptanceOutbox(): Promise<number> {
   let sent = 0;
   for (const row of pending) {
     try {
-      await broker.sendRequest(row.peer, "help.event.v1", JSON.parse(row.payload_json));
+      // #1680: transport request resolution is NOT delivery success. Only the
+      // requester's literal `{ ok: true }` application ACK authorizes `sent_at`.
+      // A negative, malformed, or timed-out response keeps the row pending.
+      const ack = await broker.sendRequest<unknown>(row.peer, "help.event.v1", JSON.parse(row.payload_json));
+      const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+      if (!isRecord(ack) || ack.ok !== true) {
+        throw new Error("help_event_not_applied");
+      }
       if (store.markAcceptanceOutboxSent(row.id)) sent++;
     } catch (err) {
       store.markAcceptanceOutboxAttempt(row.id, err instanceof Error ? err.message : String(err));
@@ -29,20 +33,6 @@ export async function drainAcceptanceOutbox(): Promise<number> {
   }
   return sent;
 }
-
-export type ReviewOutcome =
-  | { kind: "accepted"; decisionId: string; summary: string; warnings?: readonly string[] }
-  | { kind: "repair"; decisionId: string; summary: string; warnings?: readonly string[] }
-  | { kind: "blocked"; decisionId: string; summary: string; warnings?: readonly string[] }
-  | { kind: "needs_input"; decisionId: string; summary: string; warnings?: readonly string[] }
-  | {
-      kind: "invalid";
-      errors: readonly string[];
-      issues: readonly ValidationIssue[];
-      invalidProposalCount: number;
-      remainingAttempts: number;
-    }
-  | { kind: "blocked_invalid"; decisionId: string; summary: string; invalidProposalCount: number };
 
 /** #1605: cap for the rendered synthesis (card result summary limit is 4000). */
 export const RENDERED_SYNTHESIS_MAX = 4000;
@@ -94,209 +84,4 @@ export function renderAcceptedSynthesis(
   const boundedSection = section.slice(0, RENDERED_SYNTHESIS_MAX);
   const maxBase = Math.max(0, RENDERED_SYNTHESIS_MAX - boundedSection.length);
   return decision.synthesis.slice(0, maxBase) + boundedSection;
-}
-
-export class ProjectReviewService {
-  private store: ProjectReviewStore;
-  private validator: ProjectReviewValidator;
-
-  constructor() {
-    this.store = new ProjectReviewStore();
-    this.validator = new ProjectReviewValidator();
-  }
-
-  /**
-   * Process a review decision submitted by Orc.
-   * Validates, persists, and transitions project state.
-   * #1620: validation issues are partitioned by severity — errors reject and
-   * count against the invalid-proposal budget; warnings ride along on
-   * successful outcomes and never increment the counter.
-   */
-  processDecision(decision: ProjectReviewDecisionV1): ReviewOutcome {
-    // Load the case
-    const caseRow = this.store.getReviewCase(decision.review_case_id);
-    if (!caseRow) {
-      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" not found`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
-    }
-
-    if (caseRow.status !== "open") {
-      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" is ${caseRow.status}, not open`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
-    }
-
-    let caseSnapshot: ReviewCaseSnapshot;
-    try {
-      caseSnapshot = JSON.parse(caseRow.case_json) as ReviewCaseSnapshot;
-    } catch {
-      return { kind: "invalid", errors: ["failed to parse case snapshot"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
-    }
-    if (!caseSnapshot || caseSnapshot.schema_version !== 1 ||
-        caseSnapshot.project_card_id !== caseRow.project_card_id ||
-        caseSnapshot.generation !== caseRow.generation) {
-      return { kind: "invalid", errors: ["review case snapshot is structurally invalid"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
-    }
-
-    // Validate the decision
-    const issues = this.validator.validateDecision(decision, caseSnapshot);
-    const errors = issues.filter(i => i.severity === "error");
-    const warnings = issues.filter(i => i.severity === "warn");
-
-    if (errors.length > 0) {
-      // A foreign project/generation is a stale or misbound invocation, not a
-      // proposal for this case. Fail closed without spending this case's
-      // correction budget; the Orc tool performs the same check before calling
-      // the service, but the service must remain safe for direct callers too.
-      if (decision.project_card_id !== caseRow.project_card_id || decision.project_generation !== caseRow.generation) {
-        return {
-          kind: "invalid",
-          errors: errors.map(e => `[${e.path}] ${e.message}`),
-          issues: errors,
-          invalidProposalCount: 0,
-          remainingAttempts: MAX_INVALID_PROPOSALS,
-        };
-      }
-
-      // Track and, at the threshold, settle in one SQLite transaction. A
-      // concurrent duplicate therefore cannot increment after the winning
-      // fifth proposal has already terminalized the case.
-      const cardId = caseRow.project_card_id;
-      const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-      const summary = `Project blocked after ${MAX_INVALID_PROPOSALS} invalid proposals: review_protocol_exhausted; no valid semantic decision was produced`;
-      const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary, evidenceSource: caseSnapshot });
-      const exhaustionDecision = {
-        action: "blocked",
-        blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
-        reason: "review protocol exhausted before a valid semantic decision",
-      };
-      const record = this.store.recordInvalidProposal(
-        cardId,
-        decision.review_case_id,
-        MAX_INVALID_PROPOSALS,
-        { ...exhaustionDecision, invalid_proposals: MAX_INVALID_PROPOSALS },
-        REVIEW_PROTOCOL_EXHAUSTED,
-        peerEvent,
-        decisionId,
-      );
-      if (record.kind === "blocked") {
-        try { nerve.fire("card:failed", cardId); } catch {}
-        return {
-          kind: "blocked_invalid",
-          decisionId: record.decisionId,
-          summary,
-          invalidProposalCount: record.total,
-        };
-      }
-      const count = record.total;
-      return {
-        kind: "invalid",
-        errors: errors.map(e => `[${e.path}] ${e.message}`),
-        issues: errors,
-        invalidProposalCount: count,
-        remainingAttempts: Math.max(0, MAX_INVALID_PROPOSALS - count),
-      };
-    }
-
-    const cardId = decision.project_card_id;
-
-    switch (decision.action) {
-      case "accept": {
-        // #1605: the delivered synthesis carries the Orc's declared optional
-        // omissions deterministically; the authored decision JSON stays as the
-        // Orc wrote it.
-        const deliveredSynthesis = renderAcceptedSynthesis(decision, caseSnapshot);
-        // Atomic settlement: decision + supervision + kanban in one transaction
-        const acceptanceId = `rd_settle_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId: acceptanceId, kind: "completed", summary: deliveredSynthesis, evidenceSource: caseSnapshot });
-        const { decisionId } = this.store.settleAcceptance(
-          cardId,
-          decision.review_case_id,
-          decision,
-          deliveredSynthesis,
-          peerEvent,
-          acceptanceId,
-        );
-
-        // Fire events after commit
-        try { nerve.fire("card:done", cardId); } catch {}
-        return {
-          kind: "accepted",
-          decisionId,
-          summary: `Project accepted: ${deliveredSynthesis.slice(0, 200)}`,
-          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
-        };
-      }
-
-      case "repair": {
-        const repairItems = decision.repair?.items ?? [];
-        // Persist the decision, advance generation, close the review turn, and
-        // reserve repair budget together so a restart cannot leave an open
-        // case blocking the next review round.
-        const totalRepairTokens = repairItems.reduce((sum, i) => sum + (i.budget?.max_tokens ?? 0), 0);
-        const { decisionId } = this.store.settleRepair(
-          cardId,
-          decision.review_case_id,
-          decision,
-          caseSnapshot.generation,
-          totalRepairTokens,
-        );
-
-        return {
-          kind: "repair",
-          decisionId,
-          summary: `Repair planned: ${repairItems.length} items (${repairItems.map(i => i.affected_criterion_ids.join(",")).join("; ")})`,
-          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
-        };
-      }
-
-      case "blocked": {
-        const blocker = decision.blocker!;
-        // #1618: a blocked receiver settlement emits a FAILED terminal event —
-        // never false success — in the same transaction as the settlement.
-        const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary: `Project blocked: ${blocker.blocker_class}`, evidenceSource: caseSnapshot });
-        // Atomic settlement: decision + supervision + kanban in one transaction
-        const { decisionId: settledId } = this.store.settleBlocked(
-          cardId,
-          decision.review_case_id,
-          decision,
-          blocker.blocker_class,
-          peerEvent,
-          decisionId,
-        );
-        // Fire events after commit
-        try { nerve.fire("card:failed", cardId); } catch {}
-        return {
-          kind: "blocked",
-          decisionId: settledId,
-          summary: `Project blocked: ${blocker.blocker_class}`,
-          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
-        };
-      }
-
-      case "needs_input": {
-        const inputReq = decision.input_request!;
-        const { decisionId } = this.store.settleNeedsInput(
-          cardId,
-          decision.review_case_id,
-          decision,
-          {
-            question: inputReq.question,
-            affectedCriterionIds: inputReq.affected_criterion_ids,
-            expectedResponseKind: inputReq.expected_response_kind,
-            context: inputReq.context,
-          },
-        );
-        // #1480: durable run release is owned by the bound Orc execution;
-        // no process-global active-card state is cleared here.
-        return {
-          kind: "needs_input",
-          decisionId,
-          summary: `Input requested: ${inputReq.question.slice(0, 200)}`,
-          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
-        };
-      }
-
-      default:
-        return { kind: "invalid", errors: [`unknown action: ${decision.action}`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
-    }
-  }
 }

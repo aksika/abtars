@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 
@@ -39,9 +39,26 @@ export function isLogLevel(minLevel: LogLevel): boolean {
 // ── Buffered file writer ────────────────────────────────────────────────────
 let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let pruned = false;
+
+// #1837 — prune bridge-*.log files older than 5 days on first write (mirrors
+// abmind). Never touches the active file; failures are silently ignored.
+function pruneOldLogs(): void {
+  if (pruned) return;
+  pruned = true;
+  try {
+    const cutoff = Date.now() - 5 * 86400000;
+    for (const f of readdirSync(LOG_DIR)) {
+      if (!f.startsWith("bridge-") || !f.endsWith(".log")) continue;
+      const fp = join(LOG_DIR, f);
+      try { if (statSync(fp).mtimeMs < cutoff) unlinkSync(fp); } catch { /* best effort */ }
+    }
+  } catch { /* log dir may not exist yet */ }
+}
 
 function writeToFile(line: string): void {
   if (!fileLogging) return;
+  pruneOldLogs();
   buffer.push(redactSecrets(line));
   if (buffer.length >= 200) flush();
   else if (!flushTimer) {
@@ -133,6 +150,22 @@ function formatLine(level: string, tag: string, msg: string): string {
   return `${ts()} ${level.toUpperCase().padEnd(5)} [${tag}] ${msg}`;
 }
 
+function serializeError(err: unknown): string {
+  try {
+    if (err instanceof Error) return err.stack ?? err.message;
+    if (typeof err === "object" && err !== null) {
+      return JSON.stringify(err) ?? "<unserializable error>";
+    }
+    return String(err ?? "");
+  } catch {
+    return "<unserializable error>";
+  }
+}
+
+function formatErrorDetail(err: unknown): string {
+  return serializeError(err).replace(/\r?\n/g, "\\n");
+}
+
 /** LOW: operational milestones — startup, connections, errors */
 export function logInfo(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
@@ -154,11 +187,11 @@ export function logWarn(tag: string, msg: string): void {
 /** LOW: errors (always shown unless OFF) */
 export function logError(tag: string, msg: string, err?: unknown): void {
   if (!shouldLog("low")) return;
-  const errStr = err instanceof Error ? err.message : (typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? ""));
+  const errStr = err === undefined ? "" : formatErrorDetail(err);
   const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
   const safe = redactSecrets(fullMsg);
   const line = formatLine("error", tag, safe);
-  if (err) { if (process.stdout.isTTY) console.error(`[${tag}] ${redactSecrets(msg)}`, redactSecrets(String(err))); }
+  if (err !== undefined) { if (process.stdout.isTTY) console.error(`[${tag}] ${redactSecrets(msg)}`, redactSecrets(errStr)); }
   else { if (process.stdout.isTTY) console.error(`[${tag}] ${safe}`); }
   writeToFile(line);
 }

@@ -1,25 +1,18 @@
 import { logDebug, logInfo, logWarn } from "../logger.js";
 import type { IKiroTransport, PromptRequestContext, ReasoningEffort, ReasoningEffortState, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
-import type { ModelHealthRegistry } from "./model-health-registry.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { PiCoreExecutionHost } from "./pi-core-host.js";
-import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
-import { createPiStreamFn } from "./pi-stream-fn.js";
-import { createPiAgentTools } from "./pi-core-tools.js";
-import type { PiCoreToolContext } from "./pi-core-tools.js";
+import { PiAgentSessionStore } from "./pi-agent-session-store.js";
+import type { PiAgentSessionTurnResult } from "./pi-agent-session-store.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
+import type { PiCoreToolContext } from "./pi-core-tools.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
-import type { AgentMessage } from "./pi-core-types.js";
-import { createCurrentTurnMessage, PiCoreContractError } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
-import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { resolveCandidateModel } from "./pi-ai-adapter.js";
-import { candidateKey } from "./model-candidates.js";
-import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
+import { PiCoreToolExecutionError, buildTerminalDiagnostic, shouldThrowAfterToolFailure } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { ProviderExecutionError } from "./provider-failure.js";
-import type { ProviderTerminalFailure } from "./provider-failure.js";
+import { markDelivered, markConsumed, failAfterDelivery } from "../session-instruction-queue.js";
+import type { InstructionLease } from "../spin-types.js";
 
 const TAG = "pi-core-transport";
 
@@ -48,53 +41,69 @@ export function hasToolCallContent(content: unknown): boolean {
 export interface PiCoreTransportOptions {
   role: "main" | "specialist" | "background" | "task";
   systemPrompt: string;
-  candidates: ModelCandidate[];
-  healthRegistry: ModelHealthRegistry;
+  /** #1932: exactly one configured candidate serves every turn. No fallback
+   *  chain, no rotation, no health-gated selection. */
+  candidate: ModelCandidate;
   sandboxPolicy: SandboxPolicy;
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
-  /** #1527: late-bound durable context provider holder (parallel boot composition). */
-  contextProvider?: DurableContextProviderHolder;
   /** #1552: late-bound memory-tool dependencies holder (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   maxPromptRounds?: number;
-  maxCandidateRounds?: number;
+  /** #1940: injectable AgentSession factory loader (tests). Production uses
+   *  installed-Pi discovery and fails closed when unavailable. */
+  sessionFactoryLoader?: import("./pi-agent-session-store.js").PiAgentSessionFactoryLoader;
+  /**
+   * #1506/#1932: bound for awaiting real idleness on interrupt. Cancel
+   * itself is signal-only and never waits for provider acquisition (which
+   * is bounded by the attempt's own inactivity timeout); the interrupt
+   * observes teardown up to this bound, then returns. Tests inject a
+   * small bound.
+   */
+  interruptIdleTimeoutMs?: number;
 }
 
 let executionSeq = 0;
 
 /**
  * #1531: Execution-local steering slot. Created synchronously at the start of
- * `sendPrompt()` before its first await so a steer arriving while the Pi host
- * is still opening captures the slot and waits for host readiness instead of
- * hitting a dead-host error. Only one slot may be active on a transport;
- * finalization clears it only if it still owns the same generation.
+ * `sendPrompt()` before its first await so a steer arriving while the SDK
+ * conversation is still opening captures the slot and waits for readiness
+ * instead of hitting a dead-execution error. Only one slot may be active on
+ * a transport; finalization clears it only if it still owns the same
+ * generation.
  */
 interface ActivePiExecution {
   generation: number;
-  hostReady: Promise<PiCoreExecutionHost>;
-  resolveHost(host: PiCoreExecutionHost): void;
-  rejectHost(error: unknown): void;
+  sessionKey: string;
+  executionId: string;
+  ready: Promise<void>;
+  resolveReady(): void;
+  rejectReady(error: unknown): void;
   settled: boolean;
 }
 
+/** Outstanding steering/follow-up lease awaiting its instruction ack. */
+interface OutstandingLease {
+  lease: InstructionLease;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 export class PiCoreTransport implements IKiroTransport {
-  readonly config: { candidates: ModelCandidate[]; systemPrompt: string; role: string };
-  private policy: FallbackPolicy;
-  private healthRegistry: ModelHealthRegistry;
+  readonly config: { candidate: ModelCandidate; systemPrompt: string; role: string };
   private sandboxPolicy: SandboxPolicy;
   private session?: PiCoreTransportOptions["session"];
   private maxPromptRounds?: number;
-  private maxCandidateRounds?: number;
   private maxToolRoundsOverride: number | null = null;
   private timeoutOverrideMs: number | null = null;
-  private activeHost: PiCoreExecutionHost | null = null;
   private activeSlot: ActivePiExecution | null = null;
+  private outstandingLeases = new Map<string, OutstandingLease>();
   private _executionGeneration = 0;
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
+  /** #1573: shared in-flight initialization probe; cleared after settlement. */
+  private _initializing: Promise<void> | null = null;
 
-  /** #1527: late-bound durable context provider; populated once memory is ready. */
-  private _contextProvider: DurableContextProviderHolder;
   /** #1552: late-bound memory-tool dependencies; read per execution. */
   private _memoryToolDeps: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   private _toolCallsSucceeded = 0;
@@ -102,10 +111,6 @@ export class PiCoreTransport implements IKiroTransport {
   private _intermediateText = "";
   /** Most recent tool failure diagnostic from the current sendPrompt call. */
   private _lastToolFailure: ToolFailureDiagnosticV1 | null = null;
-
-  /** Last candidate that produced semantic output; reused by specialists. */
-  lastSuccessfulCandidate: CandidateSpec | null = null;
-  onLastSuccessfulChanged?: (candidate: CandidateSpec) => void;
 
   onReady?: () => void;
   onIntermediateResponse?: (text: string) => void;
@@ -124,29 +129,30 @@ export class PiCoreTransport implements IKiroTransport {
   private currentContextTokens: number | null = null;
   /** #1619: context window paired with the committed candidate. */
   private currentContextWindow: number | null = null;
+  /** #1940: in-memory AgentSession store (lazy; one per transport). */
+  private agentSessions: PiAgentSessionStore | null = null;
+  /** #1940: injectable session factory loader (tests). */
+  private sessionFactoryLoader?: import("./pi-agent-session-store.js").PiAgentSessionFactoryLoader;
+  private interruptIdleTimeoutMs: number;
 
   constructor(opts: PiCoreTransportOptions) {
-    this.config = { candidates: opts.candidates, systemPrompt: opts.systemPrompt, role: opts.role };
-    this.healthRegistry = opts.healthRegistry;
+    this.config = { candidate: opts.candidate, systemPrompt: opts.systemPrompt, role: opts.role };
     this.sandboxPolicy = opts.sandboxPolicy;
     this.session = opts.session;
-    this._contextProvider = opts.contextProvider ?? { current: null };
     this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
     this.maxPromptRounds = opts.maxPromptRounds;
-    this.maxCandidateRounds = opts.maxCandidateRounds;
-    this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
-    // #1619: baseline from the primary candidate's effort-style config; a
+    this.sessionFactoryLoader = opts.sessionFactoryLoader;
+    this.interruptIdleTimeoutMs = opts.interruptIdleTimeoutMs ?? 5000;
+    // #1619: baseline from the configured candidate's effort-style config; a
     // transport without one starts at Pi's truthful headless baseline.
-    const primary = opts.candidates[0];
+    const primary = opts.candidate;
     this.requestedEffort = primary?.thinking?.style === "effort"
       ? primary.thinking.default
       : "off";
     // The configured default is subject to the same Pi capability clamp as a
     // live `/effort` change. Without this, status can claim xhigh before the
     // first turn even though the initial model will actually run at high.
-    this.effectiveEffort = primary
-      ? resolveCandidateModel(primary, this.requestedEffort, false).effective
-      : this.requestedEffort;
+    this.effectiveEffort = resolveCandidateModel(primary, this.requestedEffort, false).effective;
   }
 
   get isReady(): boolean { return this._isReady; }
@@ -166,18 +172,22 @@ export class PiCoreTransport implements IKiroTransport {
   /**
    * #1619: change the attached session's reasoning effort. Resolves the
    * request against the primary Pi model's clamping semantics, stores the
-   * effective level, and returns both. Never reaches into an active host, so
-   * an in-flight provider request remains unchanged; the next turn carries it.
+   * effective level, and returns both. Applied live to open sessions via
+   * Pi's setThinkingLevel so the conversation is kept; the next turn
+   * carries it.
    */
   setReasoningEffort(level: ReasoningEffort): ReasoningEffortState {
     this.requestedEffort = level;
-    const primary = this.config.candidates[0];
-    if (!primary) {
-      this.effectiveEffort = level;
-      return { requested: level, effective: level };
-    }
+    const primary = this.config.candidate;
     const resolved = resolveCandidateModel(primary, level, false);
     this.effectiveEffort = resolved.effective;
+    if (this.agentSessions) {
+      for (const key of this.agentSessions.sessionKeys()) {
+        try {
+          this.agentSessions.setThinkingLevel(key, resolved.effective);
+        } catch { /* best effort; next ensureSession carries it */ }
+      }
+    }
     return { requested: level, effective: resolved.effective };
   }
 
@@ -186,26 +196,71 @@ export class PiCoreTransport implements IKiroTransport {
     this.currentContextTokens = null;
   }
 
-  /** #1619: resolve a candidate's model with the session's requested effort. */
-  private resolveModel(
-    candidate: Parameters<typeof resolveCandidateModel>[0],
-    hasImage: boolean,
-  ) {
-    return resolveCandidateModel(candidate, this.requestedEffort, hasImage);
-  }
-
   setSystemPrompt(prompt: string): void {
     this.config.systemPrompt = prompt;
   }
 
+  /**
+   * #1940 R3: the role system prompt, fetched once when a Pi session is
+   * created. Main (A) gets its complete SOUL bundle from abmind (soul,
+   * profile, notes, memory tools, core facts) — it stays the session system
+   * prompt through Pi compaction. Without ready memory Main gets the minimal
+   * bundle; with ready memory a failed fetch fails session creation visibly.
+   * Every other role keeps the prompt installed for its type.
+   */
+  private async systemPromptForNewSession(type: import("../spin-types.js").SessionType | undefined): Promise<string> {
+    if (type !== "A") return this.config.systemPrompt;
+    const { buildSoulBundle, fetchMainSoulBundle } = await import("../soul-bundle.js");
+    const runtime = this._memoryToolDeps.current?.runtime;
+    if (!runtime || runtime.state !== "ready") return buildSoulBundle("A", null) ?? "";
+    // Main's bundle is the owner's (master) bundle, as at boot.
+    const { loadUsers } = await import("../user-registry.js");
+    const principal = loadUsers().users.find((u) => u.role === "master")?.userId ?? "master";
+    const bundle = await fetchMainSoulBundle(runtime, principal);
+    return buildSoulBundle("A", bundle, "system-prompt") ?? "";
+  }
+
+  /** #1940: whether this transport holds a live Pi session for the key; a
+   *  new Pi session is a session start (hydration in its first message). */
+  hasLiveSession(sessionKey: string): boolean {
+    return this.agentSessions?.hasLive(sessionKey) ?? false;
+  }
+
+  /** #1940 marker for the Pi AgentSession route (spin-profiles SOUL skip). */
+  readonly piAgentSessionRoute = true;
+
+  /** Manual compaction through Pi; the system prompt survives. */
+  async compactSession(sessionKey: string, customInstructions?: string): Promise<unknown> {
+    const store = this.sessionStore();
+    return store.compact(sessionKey, customInstructions);
+  }
+
+  /** #1940: lazy AgentSession store, one per transport. */
+  private sessionStore(): PiAgentSessionStore {
+    if (!this.agentSessions) {
+      this.agentSessions = new PiAgentSessionStore({
+        ...(this.sessionFactoryLoader !== undefined ? { loadFactory: this.sessionFactoryLoader } : {}),
+      });
+    }
+    return this.agentSessions;
+  }
+
+  /** /model and /effort keep the conversation: resolve the model through
+   *  Pi's runtime and switch the live session without disposing it. */
   async setModel(model: string, endpoint?: string, maxContext?: number): Promise<void> {
-    const primary = this.config.candidates[0];
-    if (!primary) throw new Error("No model candidate configured");
+    const primary = this.config.candidate;
     primary.model = model;
     if (endpoint) primary.endpoint = endpoint;
     if (maxContext) primary.maxContext = maxContext;
-    this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
     this.effectiveEffort = resolveCandidateModel(primary, this.requestedEffort, false).effective;
+    if (this.agentSessions) {
+      const switched = this.agentSessions.modelForSwitch(primary);
+      for (const key of this.agentSessions.sessionKeys()) {
+        try {
+          await this.agentSessions.setModel(key, switched);
+        } catch { /* best effort; next turn resolves again */ }
+      }
+    }
   }
 
   setTimeoutOverride(ms: number | null): void { this.timeoutOverrideMs = ms; }
@@ -214,66 +269,122 @@ export class PiCoreTransport implements IKiroTransport {
 
   /**
    * #1531: Per-lease steering acknowledgement. Captures the current execution
-   * slot, waits for its host readiness, rechecks that the same execution is
-   * still current, then delegates to the host's per-lease operation. Never
-   * waits for the execution-wide settlement latch and never returns response
-   * text — the initial send promise owns the final response.
+   * slot, waits for conversation readiness, rechecks that the same execution
+   * is still current, then hands the instruction message to the live SDK
+   * agent. Never waits for the execution-wide settlement latch and never
+   * returns response text — the initial send promise owns the final response.
    */
   async steer(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void> {
-    const host = await this.waitActiveHost("steer");
-    await host.steer(content, lease);
+    await this.handoffInstruction("steer", content, lease);
   }
 
   async followUp(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void> {
-    const host = await this.waitActiveHost("follow-up");
-    await host.followUp(content, lease);
+    await this.handoffInstruction("followUp", content, lease);
+  }
+
+  private async handoffInstruction(
+    kind: "steer" | "followUp",
+    content: string,
+    lease: InstructionLease,
+  ): Promise<void> {
+    const slot = this.activeSlot;
+    if (!slot) throw new Error(`No active Pi execution to ${kind === "steer" ? "steer" : "follow-up"}`);
+    try {
+      await slot.ready;
+    } catch (err) {
+      throw new Error(`Pi execution failed before ${kind} readiness: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (this.activeSlot !== slot || slot.settled) {
+      throw new Error(`Pi execution is no longer current — ${kind} rejected`);
+    }
+    if (lease.sessionId !== slot.sessionKey) {
+      throw new Error(`Steering lease belongs to session ${lease.sessionId}, execution is ${slot.sessionKey}`);
+    }
+    if (this.outstandingLeases.size > 0) {
+      const pending = this.outstandingLeases.keys().next().value as string;
+      throw new Error(`Cannot ${kind} — outstanding lease ${pending} not yet consumed`);
+    }
+    const store = this.agentSessions;
+    if (!store || !store.hasLive(slot.sessionKey)) {
+      throw new Error(`Cannot ${kind} — AgentSession not opened`);
+    }
+    // #1940: steering goes through Pi's steer/followUp with the abtars
+    // lease and generation fence only. Pi owns the queue; the handoff to
+    // Pi is the backend acknowledgement that resolves the lease.
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const deferred = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    this.outstandingLeases.set(lease.leaseId, { lease, resolve, reject });
+    if (this.session) markDelivered(lease);
+    try {
+      if (kind === "steer") store.steer(slot.sessionKey, content);
+      else store.followUp(slot.sessionKey, content);
+    } catch (err) {
+      logWarn(TAG, `${kind}() threw before queue insertion: ${err instanceof Error ? err.message : String(err)}`);
+      this.outstandingLeases.delete(lease.leaseId);
+      if (this.session) failAfterDelivery(lease, this.session, `${kind}_handoff_failed`);
+      const e = err instanceof Error ? err : new Error(String(err));
+      reject(e);
+      throw e;
+    }
+    if (this.session) markConsumed(lease, this.session);
+    this.outstandingLeases.delete(lease.leaseId);
+    resolve();
+    await deferred;
+  }
+
+  // #1940: no instruction-message ack matching. Steering resolves when
+  // the handoff to Pi's queue succeeds (see handoffInstruction); Pi never
+  // persists abtars instruction roles.
+
+  private rejectOutstandingLeases(reason: string): void {
+    for (const [, outstanding] of this.outstandingLeases) {
+      if (this.session) {
+        const fakeLease: InstructionLease = {
+          leaseId: outstanding.lease.leaseId,
+          sessionId: outstanding.lease.sessionId,
+          executionId: outstanding.lease.executionId,
+          kind: outstanding.lease.kind,
+          instructions: outstanding.lease.instructions,
+        };
+        failAfterDelivery(fakeLease, this.session, reason);
+      }
+      outstanding.reject(new Error(`Pi execution settled before lease ${outstanding.lease.leaseId} completed`));
+    }
+    this.outstandingLeases.clear();
   }
 
   /**
-   * #1531: Resolve the active execution's host for a per-lease handoff.
-   * Throws when no execution slot exists, when readiness fails (pre-host send
-   * failure), or when the execution is no longer current after the wait.
+   * #1691: one active provider prompt per transport. A second sendPrompt()
+   * is rejected before it can construct or assign a new slot, replace the
+   * active conversation, or reset shared per-call state — the first call keeps
+   * exclusive ownership of its conversation, slot, and finalizer until
+   * settlement. The rejection propagates to Spin as an execution failure once
+   * a durable run has bound, so the existing bounded failure release owns
+   * the run.
    */
-  private async waitActiveHost(op: "steer" | "follow-up"): Promise<PiCoreExecutionHost> {
-    const slot = this.activeSlot;
-    if (!slot) throw new Error(`No active Pi execution to ${op}`);
-    let host: PiCoreExecutionHost;
-    try {
-      host = await slot.hostReady;
-    } catch (err) {
-      throw new Error(`Pi execution failed before ${op} readiness: ${err instanceof Error ? err.message : String(err)}`);
+  private createActiveSlot(sessionKey: string, executionId: string): ActivePiExecution {
+    if (this.activeSlot) {
+      throw new Error("Pi execution already active — overlapping sendPrompt rejected");
     }
-    if (this.activeSlot !== slot || slot.settled) {
-      throw new Error(`Pi execution is no longer current — ${op} rejected`);
-    }
-    // Wait for native-steering readiness (state "running"): an instruction
-    // accepted while the host is still opening must wait, not fail spuriously.
-    try {
-      await host.ready;
-    } catch (err) {
-      throw new Error(`Pi execution never became steerable: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (this.activeSlot !== slot || slot.settled || host.isSettled) {
-      throw new Error(`Pi execution is no longer active — ${op} rejected`);
-    }
-    return host;
-  }
-
-  private createActiveSlot(): ActivePiExecution {
-    let resolveHost!: (host: PiCoreExecutionHost) => void;
-    let rejectHost!: (error: unknown) => void;
-    const hostReady = new Promise<PiCoreExecutionHost>((resolve, reject) => {
-      resolveHost = resolve;
-      rejectHost = reject;
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
     });
-    // Pre-attach a handler so a rejection nobody awaited (pre-host send
-    // failure without any steer in flight) is never an unhandled rejection.
-    void hostReady.catch(() => {});
+    // Pre-attach a handler so a rejection nobody awaited (pre-conversation
+    // send failure without any steer in flight) is never an unhandled
+    // rejection. The rejection itself is observed by the caller awaiting the
+    // slot.
+    void ready.catch(() => { /* rejection is observed by the slot caller; this pre-attached handler only prevents unhandled-rejection surfacing */ });
     const slot: ActivePiExecution = {
       generation: ++this._executionGeneration,
-      hostReady,
-      resolveHost,
-      rejectHost,
+      sessionKey,
+      executionId,
+      ready,
+      resolveReady,
+      rejectReady,
       settled: false,
     };
     this.activeSlot = slot;
@@ -284,7 +395,27 @@ export class PiCoreTransport implements IKiroTransport {
     if (this.activeSlot === slot) this.activeSlot = null;
   }
 
+  /**
+   * #1573: single readiness gate. Probes the complete executable runtime
+   * contract (agent-core methods, pi-ai createProvider, every configured API
+   * family) before `_isReady` flips or `onReady` fires. A rejection leaves the
+   * transport unready with no cached verdict, so a later explicit
+   * initialization after the operator repairs Pi probes again. Concurrent
+   * callers share one in-flight probe.
+   */
   async initialize(): Promise<void> {
+    if (this._isReady) return;
+    if (!this._initializing) {
+      this._initializing = this.runInitialization().finally(() => {
+        this._initializing = null;
+      });
+    }
+    return this._initializing;
+  }
+
+  private async runInitialization(): Promise<void> {
+    const { validatePiRuntimeContract } = await import("./pi-runtime-contract.js");
+    await validatePiRuntimeContract([this.config.candidate]);
     this._isReady = true;
     this.onReady?.();
   }
@@ -295,214 +426,145 @@ export class PiCoreTransport implements IKiroTransport {
     image?: { mime: string; base64: string },
     context?: PromptRequestContext,
   ): Promise<string> {
+    // Use provided executionId or allocate a new one (before the slot: the
+    // slot carries it for steering-lease identity).
+    const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
     // #1531: the execution slot exists synchronously before the first await so
-    // a steer arriving while the Pi host is still opening can wait on it. It
-    // is resolved with the constructed host, rejected on every pre-host
-    // failure, and cleared only by its owning generation's finalizer.
-    const slot = this.createActiveSlot();
+    // a steer arriving while the SDK conversation is still opening can wait
+    // on it. It is rejected on every pre-conversation failure, and cleared
+    // only by its owning generation's finalizer.
+    const slot = this.createActiveSlot(sessionKey, executionId);
+    let deadlineExceeded = false;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
     try {
       // Reset per-call state
       this._lastResponse = "";
       this._intermediateText = "";
       this._toolCallsSucceeded = 0;
       this._lastToolFailure = null;
-      // #1297: terminal-failure state is allocated per execution — a previous
-      // request's credit failure can never contaminate a later request.
-      const executionState: { terminalFailure: ProviderTerminalFailure | null } = { terminalFailure: null };
 
-      // #1529: fail closed when durable context is required but unavailable.
-      // The intent is computed in prompt construction; an omitted intent means
-      // the caller is outside the inbound durable pipeline (not-required). The
-      // rejection happens before model selection, stream construction, Pi
-      // loading, host construction, fallback, or any provider request.
-      const durableIntent = context?.durableContextIntent ?? { mode: "not_required" as const };
-      const callerUserId = context?.userId;
-      if (durableIntent.mode === "required_unavailable") {
-        logDebug(TAG, "durable intent required_unavailable — rejecting before provider boundary");
-        throw new DurableContextUnavailableError("cursor_unavailable");
-      }
-      if (durableIntent.mode === "durable" && !callerUserId) {
-        logDebug(TAG, "durable intent without caller identity — rejecting before provider boundary");
-        throw new DurableContextUnavailableError("identity_unavailable");
-      }
-
-      // Use provided executionId or allocate a new one
-      const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
-
-      const modelForCandidate = (key: string) => {
-        const candidate = this.config.candidates.find((item) => candidateKey(item.model, item.endpoint) === key);
-        if (!candidate) return undefined;
-        return this.resolveModel(candidate, Boolean(image)).model;
-      };
-      const safety = createPiExecutionSafetyController(this.policy, {
-        maxPromptRounds: this.maxToolRoundsOverride ?? this.maxPromptRounds,
-        maxCandidateRounds: this.maxCandidateRounds,
-        modelForCandidate,
+      const safety = createPiExecutionSafetyController({
+        // #1680: the intent-policy prompt bound overrides transport defaults
+        // when the caller carries it (contract authoring keeps its narrow
+        // 3-round ceiling; execution turns keep the wide bound).
+        maxPromptRounds: context?.maxPromptRounds ?? this.maxToolRoundsOverride ?? this.maxPromptRounds,
       });
 
-      // Build current-turn marker with image content
-      const currentTurn = createCurrentTurnMessage(
-        message,
-        executionId,
-        sessionKey,
-        durableIntent.mode === "durable" ? durableIntent.beforeMessageId : undefined,
-      );
-      if (image) {
-        (currentTurn as { imageContent?: Array<{ mime: string; base64: string }> }).imageContent = [image];
-      }
-
-      // Context seed: durable vs ephemeral. A durable seed requires the
-      // just-persisted cursor and a non-empty caller identity, both enforced by
-      // the #1529 preflight above.
-      const source = durableIntent.mode === "durable"
-        ? { mode: "durable" as const, sessionKey, beforeMessageId: durableIntent.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000, userId: callerUserId! }
-        : { mode: "ephemeral" as const, sessionKey };
-
-      const volatileBlocks: Array<{ kind: string; content: string }> = [];
-      if (context?.directContextTurn?.volatileBlocks) {
-        volatileBlocks.push(...context.directContextTurn.volatileBlocks);
-      }
-
-      const systemPrompt = this.config.systemPrompt;
-
-      // Build the Pi model
-      const first = this.config.candidates[0];
-      const piModel = first
-        ? this.resolveModel(first, Boolean(image)).model
-        : resolveCandidateModel({ model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, this.requestedEffort, Boolean(image)).model;
-
+      // The role system prompt is captured once per session by the store
+      // (#1940 R3); per-turn text carries hydration (first turn) and recall
+      // (later turns) as built by the pipeline.
       const timeoutOverride = this.timeoutOverrideMs;
       const deadlineAt = context?.deadlineAt
         ?? (timeoutOverride && timeoutOverride > 0 ? Date.now() + timeoutOverride : undefined);
 
-      // Build StreamFn — no emergency L0, no legacy conversion
-      const streamFn = createPiStreamFn({
-        policy: this.policy,
-        executionId,
-        telemetry: context?.executionTelemetry,
-        deadlineAt,
-        providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
-        reasoningEffort: this.requestedEffort,
-        onCandidateCommitted: (candidate) => {
-          const successful: CandidateSpec = {
-            model: candidate.model,
-            provider: candidate.provider,
-            endpoint: candidate.endpoint,
-            maxContext: candidate.maxContext,
-            apiFormat: candidate.apiFormat,
-            thinking: candidate.thinking,
-          };
-          this.lastSuccessfulCandidate = successful;
-          this.onLastSuccessfulChanged?.(successful);
-          // #1619: the candidate that actually commits owns live provider/model/
-          // window/effective-effort state. Fallback preserves the requested
-          // level, not the prior candidate's clamped effective level.
-          this.committedCandidate = successful;
-          const resolved = this.resolveModel(candidate, Boolean(image));
-          this.effectiveEffort = resolved.effective;
-          this.currentContextWindow = candidate.maxContext;
-          logDebug(TAG, `Candidate committed: ${candidate.model} (effort: ${this.requestedEffort} → ${resolved.effective})`);
-        },
-        onTerminalFailure: (failure) => {
-          executionState.terminalFailure = failure;
-          logDebug(TAG, `sendPrompt: terminal provider failure ${failure.code} (${failure.attemptedCandidates} candidates attempted)`);
-        },
-      });
-
-      // Build registry-derived tools
+      // Build per-turn tool authority: the session's holder is set at the
+      // start of every execution, never a first-turn capture.
       const toolContext: PiCoreToolContext = {
         executionId,
         userId: context?.userId ?? "unknown",
         signal: undefined,
-        sandboxPolicy: this.sandboxPolicy,
+        // #1786: per-execution override wins (peer deny-all); otherwise the
+        // transport-constructed default. Both presentation (below) and
+        // dispatch (executeToolCall via definitionToAgentTool) read this.
+        sandboxPolicy: context?.sandboxPolicy ?? this.sandboxPolicy,
         safety,
         onToolFailure: (diag) => {
           this._lastToolFailure = diag;
         },
         executionScope: context?.executionScope,
         orcContext: context?.orcContext,
+        // #1850: trusted worker origin for relay containment.
+        workOrigin: context?.workOrigin,
         sessionType: context?.sessionType,
         memoryToolDeps: this._memoryToolDeps,
         // #1629: trusted per-execution tool authorization mode.
         authorizationMode: context?.authorizationMode,
+        // #1680: turn-owned one-shot turn control for the bound Orc turn.
+        orcTurnControl: context?.orcTurnControl,
       };
-      const tools = createPiAgentTools(toolContext);
+      // Ensure the live AgentSession: one Pi session per logical Spin
+      // session, in memory. The role system prompt is captured once here;
+      // restarts and /new//reset start the next conversation fresh.
+      // Failures reject the slot so waiting steerers fail terminally
+      // instead of hanging.
+      const store = this.sessionStore();
+      try {
+        const systemPrompt = store.hasLive(sessionKey)
+          ? ""
+          : await this.systemPromptForNewSession(context?.sessionType);
+        await store.ensureSession(sessionKey, {
+          systemPrompt,
+          candidate: this.config.candidate,
+          sandboxPolicy: context?.sandboxPolicy ?? this.sandboxPolicy,
+          ...(context?.sessionType !== undefined ? { sessionType: context.sessionType } : {}),
+          thinkingLevel: this.requestedEffort,
+        });
+      } catch (err) {
+        slot.rejectReady(err);
+        throw err;
+      }
+      slot.resolveReady();
 
-      // Build context projection with the shared durable provider when available
-      const contextProjection = new PiCoreContextProjection(
-        { source, executionId, currentTurn, volatileBlocks },
-        systemPrompt,
-      );
+      // Unattended attempt/deadline bounds still yield a visible terminal
+      // failure: when the caller's deadline passes, abort the turn and mark
+      // it so the tail below throws instead of returning partial text.
+      // Pi owns retry and overflow recovery; abtars never masks errors.
+      if (deadlineAt !== undefined) {
+        const delay = Math.max(0, deadlineAt - Date.now());
+        deadlineTimer = setTimeout(() => {
+          deadlineExceeded = true;
+          store.abortTurn(sessionKey);
+        }, delay);
+        if (typeof deadlineTimer.unref === "function") deadlineTimer.unref();
+      }
+      const clearDeadline = (): void => {
+        if (deadlineTimer !== null) {
+          clearTimeout(deadlineTimer);
+          deadlineTimer = null;
+        }
+      };
 
-      const hostMessages: AgentMessage[] = [
-        currentTurn as unknown as AgentMessage,
-      ];
-
-      // Collect response text and tool info from events
+      // Collect response text and tool info from session events. The tap
+      // mirrors every SDK session event for this turn; instruction acks
+      // resolve steering leases, everything else feeds delivery callbacks.
+      // Delivery is fire-and-forget with isolation: session dispatch does
+      // not await subscribers, so an interim send failure never rejects the
+      // model turn.
       let responseText = "";
 
       const outputObserver: OutputObserver | undefined = context?.outputObserver;
 
-      const host = new PiCoreExecutionHost({
-        executionId,
-        sessionId: sessionKey,
-        initialState: {
-          systemPrompt,
-          model: piModel,
-          messages: hostMessages,
-          tools: tools as unknown as import("@earendil-works/pi-agent-core").AgentTool<any>[],
-          // #1619: the clamped effective level for the initial model; Pi Agent
-          // turns it into the first request's reasoning option.
-          thinkingLevel: this.resolveModel(first ?? { model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, Boolean(image)).effective,
-        },
-        streamFn,
-        session: this.session,
-        executionTelemetry: context?.executionTelemetry,
-        safety,
-        contextProjection,
-        transformOptions: {
-          signal: undefined,
-          hostGeneration: 0,
-          contextProvider: context?.contextProvider ?? this._contextProvider.current ?? undefined,
-          candidateKeyFn: () => {
-            const candidate = this.policy.selectModel();
-            return candidate ? candidateKey(candidate.model, candidate.endpoint) : executionId;
-          },
-          candidateModelFn: modelForCandidate,
-        },
-        outputObserver,
-        // #1619: pair every safety-selected replacement model with a fresh
-        // effective thinking level derived from the session's requested effort.
-        resolveThinkingLevelForModel: (model) => {
-          const candidate = this.config.candidates.find(
-            (item) => candidateKey(item.model, item.endpoint) === candidateKey(model.id, model.baseUrl ?? model.provider),
-          ) ?? this.config.candidates.find((item) => item.model === model.id);
-          const source = candidate ?? {
-            model: model.id,
-            provider: model.provider ?? "unknown",
-            endpoint: model.baseUrl ?? "",
-            maxContext: this.currentContextWindow ?? this.config.candidates[0]?.maxContext ?? 128000,
-          };
-          return this.resolveModel(source, Boolean(image)).effective;
-        },
-        onEvent: async (event) => {
+      const tap = (event: { type: string } & Record<string, unknown>): void => {
+        const notifyOutput = (action: () => void): void => {
+          try {
+            action();
+          } catch (err) {
+            logWarn(TAG, `Output observer failed (isolated): ${err instanceof Error ? err.name : "unknown"}`);
+          }
+        };
+        try {
           if (event.type === "tool_execution_start") {
-            this.onToolCallStart?.(event.toolName);
+            this.onToolCallStart?.(event["toolName"] as string);
+            if (outputObserver) {
+              const name = event["toolName"] as string;
+              notifyOutput(() => outputObserver.onToolStart?.({ name }));
+            }
           }
           if (event.type === "message_end") {
-            const msg = event.message as unknown as { role?: string; content?: unknown };
-            if (msg.role === "assistant") {
+            const msg = event["message"] as unknown as { role?: string; content?: unknown };
+            if (msg && msg.role === "assistant") {
               const text = extractAssistantText(msg.content);
               responseText = text;
               this._lastResponse = text;
               // #1619: complete user-visible assistant text before a tool
               // round is delivered before tool execution continues. Only tool-
-              // carrying messages are semantic segments — awaited so the
-              // platform pipeline can reconcile before the tool status lands.
-              // An interim send failure never rejects the model turn.
+              // carrying messages are semantic segments.
               if (hasToolCallContent(msg.content) && text) {
                 try {
-                  await this.onSegmentBreak?.(text);
+                  const r = this.onSegmentBreak?.(text);
+                  if (r && typeof (r as Promise<void>).catch === "function") {
+                    (r as Promise<void>).catch((err) => logWarn(TAG, `Segment break delivery failed (isolated): ${err instanceof Error ? err.message : String(err)}`));
+                  }
                 } catch (err) {
                   logWarn(TAG, `Segment break delivery failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
                 }
@@ -510,81 +572,113 @@ export class PiCoreTransport implements IKiroTransport {
             }
           }
           if (event.type === "message_update") {
-            const streamEv = event.assistantMessageEvent as { type?: string; delta?: string } | null;
+            const streamEv = event["assistantMessageEvent"] as { type?: string; delta?: string } | null;
             if (streamEv?.type === "text_delta" && streamEv.delta) {
               this._intermediateText += streamEv.delta;
               this.onIntermediateResponse?.(streamEv.delta);
               this.onOutputDelta?.({ kind: "text", text: streamEv.delta });
+              if (outputObserver) {
+                const text = streamEv.delta;
+                notifyOutput(() => outputObserver.onDelta?.({ kind: "text", text }));
+              }
             }
             if (streamEv?.type === "thinking_delta" && streamEv.delta) {
               this.onOutputDelta?.({ kind: "thinking", text: streamEv.delta });
+              if (outputObserver) {
+                const text = streamEv.delta;
+                notifyOutput(() => outputObserver.onDelta?.({ kind: "thinking", text }));
+              }
             }
           }
-          if (event.type === "tool_execution_end" && !event.isError) {
+          if (event.type === "tool_execution_end" && !event["isError"]) {
             this._toolCallsSucceeded++;
           }
-        },
-      });
+        } catch (err) {
+          logWarn(TAG, `Session event tap failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
 
-      slot.resolveHost(host);
-      this.activeHost = host;
-
+      let turnResult: PiAgentSessionTurnResult;
       try {
-        const { loadAndValidatePiAgentCore } = await import("./pi-core-types.js");
-        const loaded = await loadAndValidatePiAgentCore();
-        await host.start(loaded);
-        // #1506: waitForSettlement() awaits only logical terminal latch.
-        // Deadline enforcement belongs to the scheduled runner via signalCancel.
-        // #1622: the typed reason distinguishes normal completion from a Pi
-        // lifecycle contract violation (prompt returned with no agent_end).
-        const terminalReason = await host.waitForSettlement();
+        turnResult = await store.prompt(sessionKey, message, {
+          executionId,
+          toolContext,
+          ...(image ? { images: [{ type: "image" as const, mimeType: image.mime, data: image.base64 }] } : {}),
+          onEvent: tap,
+        });
+        clearDeadline();
         slot.settled = true;
+        // The configured candidate serves every turn; a settled turn
+        // commits it for live status ownership.
+        this.committedCandidate = {
+          model: this.config.candidate.model,
+          provider: this.config.candidate.provider,
+          endpoint: this.config.candidate.endpoint,
+          maxContext: this.config.candidate.maxContext,
+          apiFormat: this.config.candidate.apiFormat,
+          thinking: this.config.candidate.thinking,
+        };
+        this.currentContextWindow = this.config.candidate.maxContext;
+        if (outputObserver) {
+          const reason = turnResult.aborted ? "cancelled" as const : "complete" as const;
+          try {
+            outputObserver.end?.(reason);
+          } catch (err) {
+            logWarn(TAG, `Output observer failed (isolated): ${err instanceof Error ? err.name : "unknown"}`);
+          }
+        }
 
-        // #1622: a resolved prompt without a terminal agent_end is a Pi
-        // contract violation — the turn never actually settled. Lead with the
-        // contract error before any response/tool/provider outcome selection;
-        // never report this as a successful empty answer. A prior tool failure
-        // is retained as supporting cause only.
-        if (terminalReason === "prompt_completed_without_agent_end") {
-          logWarn(TAG, `sendPrompt: prompt completed without agent_end (${executionId}) — contract error`);
-          throw new PiCoreContractError(
-            "pi-agent-core prompt completed without agent_end",
-            {
-              missingCapability: "agent_end settlement",
-              cause: this._lastToolFailure
-                ? new PiCoreToolExecutionError(this._lastToolFailure)
-                : undefined,
-            },
-          );
+        // #1680: map the typed terminal outcomes onto the turn-owned control
+        // so Spin persists stable bounded failure codes. A cancelled turn
+        // and a prompt-round-limit incident are the two transport-level
+        // terminal classes; the durable run release reads the control.
+        if (turnResult.aborted && context?.orcTurnControl) {
+          context.orcTurnControl.complete({ kind: "cancelled", failureCode: "turn_cancelled" });
+        }
+        if (
+          context?.orcTurnControl
+          && safety.terminalSafetyFailure
+          && safety.lastTerminalIncident?.type === "prompt_round_limit"
+        ) {
+          context.orcTurnControl.complete({ kind: "failed", failureCode: "prompt_round_limit" });
         }
 
         if (context?.executionTelemetry) {
           const snap = context.executionTelemetry.snapshot();
           if (snap) this._lastUsage = snap;
         }
-        // #1612: prefer the host's captured assistant-message usage (real
+        // #1612: prefer the turn's captured assistant-message usage (real
         // provider tokens) over the telemetry scope, which pi-core never
         // populates with token counts.
-        const hostUsage = host.lastUsage;
-        if (hostUsage) {
-          this._lastUsage = hostUsage;
+        if (turnResult.usage) {
+          this._lastUsage = turnResult.usage;
         }
         // #1619: pair the current-context token measurement with the window of
         // the candidate that actually committed. Only valid usage counts.
-        const contextTokens = host.lastContextTokens;
-        if (contextTokens !== null && contextTokens > 0) {
-          this.currentContextTokens = contextTokens;
+        if (turnResult.contextTokens !== null && turnResult.contextTokens > 0) {
+          this.currentContextTokens = turnResult.contextTokens;
           this.currentContextWindow = this.committedCandidate?.maxContext
-            ?? this.config.candidates[0]?.maxContext
-            ?? null;
-          logDebug(TAG, `Context usage captured: ${contextTokens} tokens / ${this.currentContextWindow ?? "?"} window`);
+            ?? this.config.candidate.maxContext;
+          logDebug(TAG, `Context usage captured: ${turnResult.contextTokens} tokens / ${this.currentContextWindow ?? "?"} window`);
+        }
+        // #1932: the session collector counts successful tool executions;
+        // keep the transport-level counter in sync for status consumers.
+        this._toolCallsSucceeded = turnResult.toolCallsSucceeded;
+
+        // #1940: an unattended deadline that fired aborts the turn and
+        // surfaces a visible terminal failure (never silent, never masked).
+        if (deadlineExceeded && turnResult.aborted) {
+          throw new ProviderExecutionError({
+            code: "all_candidates_failed",
+            retryable: false,
+            attemptedCandidates: 1,
+            message: "Turn deadline exceeded — aborted before Pi settled",
+          });
         }
 
         // #1595: the terminal cause leads; a prior tool failure is supporting
         // context only. Never present a stale tool failure as the primary
-        // reason, and never report candidate_exhausted:true for a run that
-        // continued past rotation (sole-candidate or switched) and ended for
-        // another reason.
+        // reason.
         if (safety.terminalSafetyFailure && safety.lastTerminalIncident) {
           const inc = safety.lastTerminalIncident;
           logInfo(TAG, `sendPrompt: terminal safety incident (${inc.type}) — leading with terminal cause, prior tool failure retained as context`);
@@ -596,35 +690,71 @@ export class PiCoreTransport implements IKiroTransport {
           return responseText;
         }
 
-        if (this._lastToolFailure) {
-          logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
-          throw new PiCoreToolExecutionError(this._lastToolFailure);
+        // #1767: R8's silent path is scoped to unattended-sleep execution
+        // only. A plain nonzero_exit (or policy_rejected /
+        // shell_syntax_error) returns "" solely for the sleep pump, which
+        // treats an empty turn after a surfaced tool error as a completed
+        // step (#1752 R8). Every other origin — scheduled unattended-task
+        // runs, interactive chat, unverified provenance, direct transport
+        // callers — fails closed with the thrown diagnostic (pre-R8
+        // behavior): an Orc that stops after its artifact write failed,
+        // without writing the artifact and without any error surfacing, is
+        // a failure (Molty 2026-09-04: finance-daily settled success with
+        // no artifact; daily-ai burned its idle budget in silence).
+        const lastFailure: ToolFailureDiagnosticV1 | null = this._lastToolFailure;
+        if (lastFailure) {
+          const reason = (lastFailure as ToolFailureDiagnosticV1).reason;
+          // #1767: throw unless the sleep origin owns the silent path (see
+          // shouldThrowAfterToolFailure — R8 scoped to unattended-sleep).
+          if (shouldThrowAfterToolFailure(reason, context?.authorizationMode)) {
+            logInfo(TAG, `sendPrompt: empty response with tool failure (${reason}) — throwing diagnostic`);
+            throw new PiCoreToolExecutionError(lastFailure);
+          }
+          logInfo(TAG, `sendPrompt: empty response with non-terminal tool failure (${reason}) — returning "" (sleep origin, recording preserved)`);
         }
 
         // #1297: a committed successful output and a terminal tool failure
-        // already took precedence; only now does a typed terminal provider
-        // failure surface as a non-retryable error. No typed failure → current
-        // generic empty-response behavior.
-        if (executionState.terminalFailure) {
-          logInfo(TAG, `sendPrompt: throwing ProviderExecutionError (${executionState.terminalFailure.code})`);
-          throw new ProviderExecutionError(executionState.terminalFailure);
-        }
-
+        // already took precedence. Real provider errors reach Pi unmodified
+        // so its retry and overflow recovery fire; only the unattended
+        // deadline above and the generic empty-response behavior below
+        // remain. No masked terminal failure → current generic
+        // empty-response behavior.
         logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);
         return "";
       } finally {
-        if (this.activeHost === host) this.activeHost = null;
+        clearDeadline();
+        // Outstanding leases never survive their turn: resolve-or-reject
+        // exactly once, mirroring the old host settlement behavior.
+        if (this.activeSlot === slot) this.rejectOutstandingLeases("turn_settled");
       }
     } catch (err) {
-      slot.rejectHost(err);
+      slot.rejectReady(err);
+      if (deadlineTimer !== null) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
+      const observer = context?.outputObserver;
+      if (observer) {
+        try {
+          observer.end?.("error");
+        } catch (observerErr) {
+          logWarn(TAG, `Output observer failed (isolated): ${observerErr instanceof Error ? observerErr.name : "unknown"}`);
+        }
+      }
       throw err;
     } finally {
       this.clearActiveSlot(slot);
     }
   }
 
-  async resetSession(_sessionKey: string): Promise<void> {
-    this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
+  /**
+   * #1940: ending or replacing a session clears Pi's queues, aborts and
+   * waits for idle, then disposes the session before its successor runs.
+   * The next conversation starts fresh; continuity comes only from abmind
+   * hydration. Requested effort survives on the same transport instance.
+   */
+  async resetSession(sessionKey: string): Promise<void> {
+    await this.agentSessions?.disposeSession(sessionKey).catch(() => { /* teardown errors never fail the reset */ });
     // #1619: reset/compaction invalidates measured usage; requested effort
     // survives on the same transport instance.
     this.currentContextTokens = null;
@@ -633,17 +763,31 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   async sendInterrupt(_reason?: string): Promise<void> {
-    this.activeHost?.cancel();
-    if (this.activeHost) {
-      await this.activeHost.waitForSettlement();
-    }
+    const slot = this.activeSlot;
+    const store = this.agentSessions;
+    if (!slot || !store || !store.hasLive(slot.sessionKey)) return;
+    // Signal-only abort (never waits for provider acquisition); then
+    // observe teardown up to a bound so a wedged provider cannot stall
+    // the interrupt. Cancel keeps the conversation so a steer/follow-up
+    // can still land; dispose is reserved for reset/destroy.
+    store.abortTurn(slot.sessionKey);
+    const bound = this.interruptIdleTimeoutMs;
+    await Promise.race([
+      store.waitForIdle(slot.sessionKey).catch(() => { /* teardown errors never fail the interrupt */ }),
+      new Promise<void>((resolve) => setTimeout(resolve, bound)),
+    ]);
   }
 
   destroy(): void {
-    if (this.activeHost) {
-      this.activeHost.cancel();
+    const slot = this.activeSlot;
+    if (slot && this.agentSessions?.hasLive(slot.sessionKey)) {
+      this.agentSessions.abortTurn(slot.sessionKey);
     }
-    this.activeHost = null;
+    if (this.agentSessions) {
+      void this.agentSessions.disposeAll().catch(() => { /* teardown never fails destroy */ });
+      this.agentSessions = null;
+    }
+    this.rejectOutstandingLeases("transport_destroyed");
     this._isReady = false;
     this.committedCandidate = null;
     this.currentContextTokens = null;
@@ -655,8 +799,7 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   getRuntimeStatus(): RuntimeStatusSnapshot {
-    const live = this.committedCandidate
-      ?? this.config.candidates[0] ?? null;
+    const live = this.committedCandidate ?? this.config.candidate;
     const contextWindow = this.currentContextWindow ?? live?.maxContext ?? undefined;
     const tokens = this.currentContextTokens;
     let contextPercent: number | undefined;

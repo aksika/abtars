@@ -1,26 +1,31 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handleCommand, type CommandContext } from "./commands/index.js";
-import { Spin } from "./spin.js";
-const SessionManager = Spin;
 import { setUserRegistryOverride } from "./user-registry.js";
-import type { CodingMode } from "./coding-mode.js";
+import { createDisabledRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ManagedSession } from "./spin-types.js";
 
+const execFileMock = vi.hoisted(() => vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
+  cb(null, "{}");
+  return { stderr: { resume: vi.fn() } };
+}));
+
 vi.mock("node:child_process", () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-    cb(null, "{}");
-    return { stderr: { resume: vi.fn() } };
-  }),
+  execFile: execFileMock,
 }));
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
+  const replies: string[] = [];
+  const reply = vi.fn(async (text: string): Promise<number> => { replies.push(text); return 1; });
   return {
     sessionKey: "telegram:123",
     chatId: 123,
     userId: "test",
     platform: "telegram",
-    reply: vi.fn().mockResolvedValue(undefined),
+    reply,
     transport: {
       sendPrompt: vi.fn().mockResolvedValue("ok"),
       resetSession: vi.fn().mockResolvedValue(undefined),
@@ -28,13 +33,17 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
       initialize: vi.fn().mockResolvedValue(undefined),
       destroy: vi.fn(),
       isReady: true,
+      transportCommands: [],
+      contextPercent: -1,
+      answerOnly: "",
+      toolCallsSucceeded: 0,
+      intermediateDeliveredText: "",
     },
-    config: { agentTransport: "acp", workingDir: "/tmp", discordA2aEnabled: false },
+    config: { workingDir: "/tmp" },
     startedAt: Date.now(),
-    memory: null,
+    memoryRuntime: createDisabledRuntime(),
     memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
     nlmConfig: { enabled: false },
-    codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessionManager: { endSession: vi.fn(), getActiveSessionId: () => "telegram:123", getActiveSession: () => ({ id: "telegram:123" }), setRuntime: vi.fn() } as any,
     updateCtxStart: vi.fn(),
@@ -124,12 +133,259 @@ describe("command-handlers", () => {
   });
 
   it("/status does NOT call mcporter (moved to /mcp)", async () => {
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    execFile.mockClear();
+    execFileMock.mockClear();
     const ctx = makeCtx();
     await handleCommand("/status", ctx);
-    const mcporterCalls = execFile.mock.calls.filter((c: unknown[]) => c[0] === "mcporter");
+    const mcporterCalls = execFileMock.mock.calls.filter((c: unknown[]) => c[0] === "mcporter");
     expect(mcporterCalls).toHaveLength(0);
   });
 
+  it("/project bare root replies with usage", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/project", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /project unquarantine"));
+  });
+
+  it("/project unquarantine with invalid id replies with usage", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/project unquarantine 0", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith("Usage: /project unquarantine <id>");
+  });
+
+  it("/session new routes to the session handler", async () => {
+    const createSession = vi.fn().mockReturnValue({ shortIndex: 2, id: "s2", sessionKey: "k" });
+    const greetSession = vi.fn();
+    const ctx = makeCtx({
+      sessionManager: { ...(makeCtx().sessionManager as object), createSession, greetSession } as any,
+    });
+    const handled = await handleCommand("/session new code", ctx);
+    expect(handled).toBe(true);
+    expect(createSession).toHaveBeenCalledWith("test", "telegram", "C");
+  });
+
+  it("aliases still route to their canonical handlers", async () => {
+    const ctx = makeCtx();
+    expect(await handleCommand("/ctrlc", ctx)).toBe(true);
+    expect(ctx.transport.sendInterrupt).toHaveBeenCalled();
+    expect(await handleCommand("/model", ctx)).toBe(true);
+    expect(await handleCommand("/health", ctx)).toBe(true);
+    expect(ctx.reply).toHaveBeenCalled();
+  });
+
+  it("/help on telegram includes telegram-only lines", async () => {
+    const ctx = makeCtx();
+    await handleCommand("/help", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("/full — Raw output, TTS disabled");
+    expect(reply).toContain("/help — Show this help");
+  });
+
+  it("/help on discord excludes telegram-only lines", async () => {
+    const ctx = makeCtx({ platform: "discord" as const });
+    await handleCommand("/help", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).not.toContain("/full — Raw output, TTS disabled");
+    expect(reply).not.toContain("/healing — Toggle self-healer on/off");
+    expect(reply).toContain("/help — Show this help");
+  });
+
+  it("non-master users are denied master-only commands but allowed non-master roots", async () => {
+    setUserRegistryOverride({
+      users: [{ userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }],
+      byPlatformId: new Map([["telegram:999", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+      byUserId: new Map([["guest-1", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+    } as any);
+    const ctx = makeCtx({ userId: "guest-1" });
+    await handleCommand("/todo", ctx);
+    expect(ctx.reply).toHaveBeenCalledWith("⛔ Owner-only command.");
+    (ctx.reply as ReturnType<typeof vi.fn>).mockClear();
+    expect(await handleCommand("/status", ctx)).toBe(true);
+    expect(ctx.reply).toHaveBeenCalled();
+  });
+
+});
+
+describe("command-handlers /task validate", () => {
+  const origHome = process.env.HOME;
+  const origAbtarsHome = process.env.ABTARS_HOME;
+  let home: string;
+  let taskRoot: string;
+
+  beforeEach(() => {
+    setUserRegistryOverride({
+      users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }],
+      byPlatformId: new Map([["telegram:123", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+      byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+    } as any);
+    home = mkdtempSync(join(tmpdir(), "cmd-tasks-valid-"));
+    taskRoot = join(home, ".abtars", "tasks");
+    process.env.HOME = home;
+    process.env.ABTARS_HOME = join(home, ".abtars");
+    mkdirSync(taskRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    process.env.HOME = origHome;
+    if (origAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = origAbtarsHome;
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  it("/task validate returns an OK summary for a clean registry", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: OK");
+    expect(reply).toContain(`Path: ${join(taskRoot, "tasks.json")}`);
+    expect(reply).toContain("Entries: 0");
+    expect(reply).toContain("Valid entries: 0");
+    expect(reply).toContain("Findings: 0");
+  });
+
+  it("/task validate reports FAILED with finding details for an invalid registry", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), JSON.stringify([{ id: "bad-one" }]), "utf-8");
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: FAILED");
+    expect(reply).toContain("Entries: 1");
+    expect(reply).toContain("Findings: 1");
+    expect(reply).toContain("entry_invalid");
+    expect(reply).toContain("bad-one");
+  });
+
+  it("/task validate bounds the response and reports omitted findings", async () => {
+    const entries = Array.from({ length: 60 }, (_, i) => ({ id: `bad-${i}`, kind: "agent" }));
+    writeFileSync(join(taskRoot, "tasks.json"), JSON.stringify(entries), "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/task validate", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Findings: 60");
+    expect(reply).toContain("20 more findings omitted");
+    expect(reply.length).toBeLessThan(4000);
+  });
+
+  it("/task validate with arguments returns usage without running validation", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate tasks.json", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith("Usage: /task validate");
+  });
+
+  it("/tasks validate routes to the same dry-run handler", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/tasks validate", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: OK");
+  });
+
+  it("/task validate never enqueues work or spawns the validator CLI", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const enqueueCron = vi.fn();
+    const ctx = makeCtx({ enqueueCron });
+    execFileMock.mockClear();
+    await handleCommand("/task validate", ctx);
+    expect(enqueueCron).not.toHaveBeenCalled();
+    const abtarsTaskCalls = execFileMock.mock.calls.filter((c: unknown[]) => c[0] === "abtars-task");
+    expect(abtarsTaskCalls).toHaveLength(0);
+  });
+
+});
+
+describe("/healing reload (#1708)", () => {
+  let policyHome: string;
+  const savedHome = process.env["ABTARS_HOME"];
+
+  beforeEach(() => {
+    setUserRegistryOverride({
+      users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }],
+      byPlatformId: new Map([["telegram:123", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+      byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+    } as any);
+    policyHome = mkdtempSync(join(tmpdir(), "healing-reload-"));
+    process.env["ABTARS_HOME"] = policyHome;
+  });
+
+  afterEach(async () => {
+    setUserRegistryOverride(null);
+    if (savedHome === undefined) delete process.env["ABTARS_HOME"];
+    else process.env["ABTARS_HOME"] = savedHome;
+    // Drop any cached snapshot pointing at the removed temp home.
+    await import("./sha/sha-policy.js").then((m) => m.reload());
+    rmSync(policyHome, { recursive: true, force: true });
+  });
+
+  function writeCorePolicy(body: unknown): void {
+    mkdirSync(join(policyHome, "config"), { recursive: true });
+    writeFileSync(join(policyHome, "config", "sha-policy.json"), JSON.stringify(body), "utf-8");
+  }
+
+  it("applies a valid edit without restart and reports bounded effective values", async () => {
+    writeCorePolicy({
+      schemaVersion: 2,
+      fixes: [],
+      guardrails: {
+        orc: {
+          sameCard: { failedOrNoProgress: { max: 1 }, startsWithoutProgress: { max: 5 } },
+          bridge: { starts5m: 25, starts1h: 100, newRunRows5m: 50 },
+        },
+        logAnomaly: { notifyMain: true, shaAllowed: false, minimumMode: "full", cooldownMinutes: 120 },
+      },
+    });
+    const ctx = makeCtx();
+    const handled = await handleCommand("/healing reload", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Core: valid-v2");
+    expect(reply).toContain("failed/no-progress 1/10m");
+    expect(reply).toContain("shaAllowed=off");
+    expect(reply).toContain("cooldown=120m");
+    // Bounded operator output: no raw JSON, no file contents.
+    expect(reply).not.toContain("{");
+    expect(reply).not.toContain("guardrails\"");
+
+    const { getEffectiveOrcGuardrails, getLogAnomalyPolicy } = await import("./sha/sha-policy.js");
+    expect(getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(1);
+    expect(getLogAnomalyPolicy().shaAllowed).toBe(false);
+  });
+
+  it("a malformed edit publishes safe defaults instead of retaining the prior policy", async () => {
+    writeCorePolicy({ schemaVersion: 2, fixes: [], guardrails: {
+      orc: { sameCard: { failedOrNoProgress: { max: 2 } } }, logAnomaly: {},
+    } });
+    await handleCommand("/healing reload", makeCtx());
+    expect((await import("./sha/sha-policy.js")).getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(2);
+
+    mkdirSync(join(policyHome, "config"), { recursive: true });
+    writeFileSync(join(policyHome, "config", "sha-policy.json"), "{ broken", "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/healing reload", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Core: invalid-json");
+    expect(reply).toContain("admission disabled");
+    expect((await import("./sha/sha-policy.js")).getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(3);
+  });
+
+  it("reload never mutates SELFHEAL_MODE and is master-only", async () => {
+    const { getEnv } = await import("./env-schema.js");
+    const before = getEnv().selfhealMode;
+    await handleCommand("/healing reload", makeCtx());
+    expect(getEnv().selfhealMode).toBe(before);
+
+    setUserRegistryOverride({
+      users: [{ userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }],
+      byPlatformId: new Map([["telegram:999", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+      byUserId: new Map([["guest-1", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+    } as any);
+    const guestCtx = makeCtx({ userId: "guest-1", chatId: 999, sessionKey: "telegram:999" });
+    await handleCommand("/healing reload", guestCtx);
+    expect(guestCtx.reply).toHaveBeenCalledWith(expect.stringContaining("Owner-only"));
+  });
 });

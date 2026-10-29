@@ -45,7 +45,7 @@ ls -la ~/.abtars/memory/sleep/*.lock 2>/dev/null  # stale locks
 ## Step 5 — Memory DB
 
 ```bash
-sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
+sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'durables', COUNT(*) FROM long_term_memories;"
 sqlite3 ~/.abtars/memory/memory.db "SELECT datetime(timestamp/1000, 'unixepoch', 'localtime'), substr(content,1,60) FROM messages ORDER BY timestamp DESC LIMIT 3;"
 ```
 

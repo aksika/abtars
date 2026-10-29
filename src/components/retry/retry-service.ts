@@ -6,13 +6,15 @@ import { classify } from "./failure-classifier.js";
 import type { FailureClassificationV1, ClassifyInput } from "./failure-classifier.js";
 import { evaluatePolicy, computeBudget } from "./retry-policy.js";
 import type { RetryPolicyDecision, RetryDisposition, RetryBudgetSnapshot } from "./retry-policy.js";
-import { selectExecutor } from "./executor-selector.js";
+import { type SelectionRationale } from "./executor-selector.js";
 import type { SelectionConstraints } from "./executor-selector.js";
 import { buildDirective, deriveContractRevision, validateDirective, validateContractRevision } from "./retry-directive.js";
 import type { RetryDirectiveV1, RetryMode } from "./retry-directive.js";
 import { LocalExecutorCatalog } from "./local-executor-catalog.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import type { AttemptRow } from "../worker-supervision-store.js";
+import { resolveWorkerExecutorIntent } from "../worker-executor-routing.js";
+import type { ProjectMutationAuthority } from "../project-acceptance/project-review-store.js";
 
 const GLOBAL_MAX_TOKENS = 1_000_000;
 
@@ -44,6 +46,9 @@ export interface OrcRetryResponse {
   addedChecks?: string[];
   preferredExecutorId?: string;
   rationale?: string;
+  /** #1638: the answer to a Pi worker's live question. Valid only for an
+   * input_requested source with action retry. */
+  inputAnswer?: string;
 }
 
 export type AcceptRetryResult =
@@ -161,17 +166,22 @@ export class RetryService {
     const attempt = this.supStore.getAttempt(sourceAttemptId);
     if (!attempt) return { kind: "error", message: `attempt ${sourceAttemptId} not found` };
 
+    // #1638: one resolver derives executor intent from the contract. The
+    // catalog still feeds Spin eligibility signals the policy consumes, but
+    // it cannot move an alias contract to Spin or a no-alias contract to Pi.
+    const intent = resolveWorkerExecutorIntent(contract);
     const candidates = this.executorCatalog.getCandidates({
       requiredCapabilities: [...contract.required_capabilities],
     });
-    if (candidates.eligible.length === 0) return { kind: "ineligible_executor" };
-
-    const { selected, rationale } = selectExecutor(
-      candidates.eligible,
-      { requiredCapabilities: [...contract.required_capabilities] },
-      [attempt.executor_id],
-    );
-    if (!selected) return { kind: "ineligible_executor" };
+    if (intent.kind === "agent" && candidates.eligible.length === 0) return { kind: "ineligible_executor" };
+    const selectionRationale: SelectionRationale = {
+      selectedId: intent.id,
+      selectedKind: intent.kind,
+      eligibleCount: candidates.eligible.length,
+      rejected: [],
+      score: intent.kind === "agent" ? 1 : 0,
+      selectionStrategy: "preferred",
+    };
 
     const targetOrdinal = this.supStore.nextOrdinal(cardId);
     const isTransient = classification.primary === "transient_transport" || classification.primary === "executor_unavailable";
@@ -181,7 +191,7 @@ export class RetryService {
       : `Retry with changed approach. Previous attempt ${sourceAttemptId} failed with ${classification.primary}. ${decisionResult.decision.reasonCode}`;
 
     const directive = buildDirective(
-      contract, sourceAttemptId, targetOrdinal, classification, decisionResult.decision, rationale,
+      contract, sourceAttemptId, targetOrdinal, classification, decisionResult.decision, selectionRationale,
       {
         mode,
         instruction,
@@ -209,20 +219,20 @@ export class RetryService {
     const budgetReservation = {
       tokens: Math.min(GLOBAL_MAX_TOKENS - budget.totalTokens, budget.totalTokens > 0 ? budget.totalTokens : 5000),
       cost: 0,
-      switches: attempt.executor_id !== selected.id ? 1 : 0,
+      switches: attempt.executor_id !== intent.id ? 1 : 0,
     };
 
     const outcome = this.retryStore.acceptDirectiveAndAllocateTarget(
       sourceAttemptId, cardId, classification, decisionResult.decision, directive,
-      revisedContract, targetAttemptId, selected.kind, selected.id,
+      revisedContract, targetAttemptId, intent.kind, intent.id,
       earliestClaimAt, budgetReservation,
       {
         id: targetAttemptId,
         card_id: cardId,
         contract_id: revisedContract.id,
         ordinal: targetOrdinal,
-        executor_kind: selected.kind,
-        executor_id: selected.id,
+        executor_kind: intent.kind,
+        executor_id: intent.id,
         status: "pending",
         started_at: this.clock.now(),
         source_attempt_id: sourceAttemptId,
@@ -235,8 +245,8 @@ export class RetryService {
     return outcome as AcceptRetryResult;
   }
 
-  reviewFailure(input: { attemptId: string; cardId: number; response: OrcRetryResponse }): AcceptRetryResult {
-    const { attemptId, cardId, response } = input;
+  reviewFailure(input: { attemptId: string; cardId: number; response: OrcRetryResponse; authority: ProjectMutationAuthority }): AcceptRetryResult {
+    const { attemptId, cardId, response, authority } = input;
 
     const existingDecision = this.retryStore.getDecision(attemptId);
     if (!existingDecision) return { kind: "error", message: `no decision for ${attemptId}` };
@@ -245,13 +255,36 @@ export class RetryService {
     }
 
     if (response.action === "stop") {
-      this.retryStore.compareAndSetDecisionStatus(attemptId, existingDecision.status as DecisionStatus, "stopped");
+      const stopped = this.retryStore.compareAndSetProjectDecisionStatus(
+        attemptId,
+        cardId,
+        existingDecision.status as DecisionStatus,
+        "stopped",
+        authority,
+      );
+      if (!stopped) return { kind: "stale_source" };
       return { kind: "error", message: "Orc chose stop" };
     }
 
     if (response.action === "needs_input") {
-      this.retryStore.compareAndSetDecisionStatus(attemptId, existingDecision.status as DecisionStatus, "needs_input");
+      const needsInput = this.retryStore.compareAndSetProjectDecisionStatus(
+        attemptId,
+        cardId,
+        existingDecision.status as DecisionStatus,
+        "needs_input",
+        authority,
+      );
+      if (!needsInput) return { kind: "stale_source" };
       return { kind: "error", message: "needs fresh input" };
+    }
+
+    // #1638: an input_answer is accepted only for an input_requested source
+    // with action retry — otherwise it is a caller error, not a retry.
+    if (response.inputAnswer) {
+      const classification = this.retryStore.getClassification(attemptId);
+      if (!classification || classification.primary !== "input_requested") {
+        return { kind: "error", message: "input_answer is valid only for an input_requested failure" };
+      }
     }
 
     // Action is "retry" — build directive and allocate
@@ -264,18 +297,21 @@ export class RetryService {
     const attempt = this.supStore.getAttempt(attemptId);
     if (!attempt) return { kind: "error", message: "attempt not found" };
 
+    // #1638: contract-derived intent owns the executor — an Orc preference
+    // cannot move an alias contract to Spin or a no-alias contract to Pi.
+    const intent = resolveWorkerExecutorIntent(contract);
     const candidates = this.executorCatalog.getCandidates({
       requiredCapabilities: [...contract.required_capabilities],
-      preferredId: response.preferredExecutorId,
     });
-    if (candidates.eligible.length === 0) return { kind: "ineligible_executor" };
-
-    const { selected, rationale } = selectExecutor(
-      candidates.eligible,
-      { requiredCapabilities: [...contract.required_capabilities], preferredId: response.preferredExecutorId },
-      [attempt.executor_id],
-    );
-    if (!selected) return { kind: "ineligible_executor" };
+    if (intent.kind === "agent" && candidates.eligible.length === 0) return { kind: "ineligible_executor" };
+    const rationale: SelectionRationale = {
+      selectedId: intent.id,
+      selectedKind: intent.kind,
+      eligibleCount: candidates.eligible.length,
+      rejected: [],
+      score: intent.kind === "agent" ? 1 : 0,
+      selectionStrategy: "preferred",
+    };
 
     const targetOrdinal = this.supStore.nextOrdinal(cardId);
     const mode: RetryMode = response.strategy?.includes("executor") ? "executor_escalation" : "repair";
@@ -284,7 +320,9 @@ export class RetryService {
       contract, attemptId, targetOrdinal, classification, existingDecision.decision, rationale,
       {
         mode,
-        instruction: response.strategy ?? `Repair: ${classification.primary}`,
+        instruction: response.inputAnswer
+          ? `Answer from Orc: ${response.inputAnswer}\n${response.strategy ?? `Repair: ${classification.primary}`}`
+          : response.strategy ?? `Repair: ${classification.primary}`,
         doNotRepeat: response.doNotRepeat,
         addedInputs: response.addedInputs,
         addedChecks: response.addedChecks,
@@ -308,25 +346,26 @@ export class RetryService {
     const budgetReservation = {
       tokens: Math.min(GLOBAL_MAX_TOKENS - budget.totalTokens, 5000),
       cost: 0,
-      switches: attempt.executor_id !== selected.id ? 1 : 0,
+      switches: attempt.executor_id !== intent.id ? 1 : 0,
     };
 
     const outcome = this.retryStore.acceptDirectiveAndAllocateTarget(
       attemptId, cardId, classification, existingDecision.decision, directive,
-      revisedContract, targetAttemptId, selected.kind, selected.id,
+      revisedContract, targetAttemptId, intent.kind, intent.id,
       earliestClaimAt, budgetReservation,
       {
         id: targetAttemptId,
         card_id: cardId,
         contract_id: revisedContract.id,
         ordinal: targetOrdinal,
-        executor_kind: selected.kind,
-        executor_id: selected.id,
+        executor_kind: intent.kind,
+        executor_id: intent.id,
         status: "pending",
         started_at: startedAt,
         source_attempt_id: attemptId,
         earliest_claim_at: earliestClaimAt,
       },
+      authority,
     );
 
     if (outcome.kind === "created") return { kind: "created" as const, targetAttemptId };

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { lockDirPath, OWNER_FILE } from "./shared-native-deps-paths.js";
 import type { LockOwner, NativeConsumer } from "./shared-native-deps-types.js";
 import { PROTOCOL_VERSION } from "./shared-native-deps-types.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 
 export class LockError extends Error {
   constructor(msg: string) { super(msg); this.name = "LockError"; }
@@ -28,10 +29,7 @@ export function acquireLock(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    try {
-      mkdirSync(dir, { recursive: true });
-    } catch {
-    }
+    mkdirSync(dir, { recursive: true });
 
     if (!existsSync(dir)) {
       wait(200);
@@ -82,7 +80,8 @@ export function releaseLock(token: string): void {
     if (owner.token === token) {
       rmSync(lockDirPath(), { recursive: true, force: true });
     }
-  } catch {
+  } catch (err) {
+    logAndSwallow("shared-native-deps-lock", "release native dependency lock", err);
   }
 }
 

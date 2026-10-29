@@ -36,9 +36,21 @@ export class ScriptedProvider {
   private seq = 0;
   private port = 0;
   private closed = false;
+  // #1900: bounded registered synthetic markers for full-request recognition.
+  // Matched against complete message text before preview truncation or
+  // volatile-context stripping. Bounded to 8 markers of 256 chars each;
+  // persisted evidence carries only these registered identities.
+  private registeredMarkers: Set<string> = new Set();
+  private openSockets: Set<import("node:net").Socket> = new Set();
 
   constructor() {
     this.server = createServer((req, res) => void this.handle(req, res));
+    this.server.on("connection", (socket) => {
+      this.openSockets.add(socket);
+      socket.on("close", () => {
+        this.openSockets.delete(socket);
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -79,15 +91,61 @@ export class ScriptedProvider {
     this.scripts.set(script.candidate, queue);
   }
 
+  /**
+   * Drop queued (not-yet-matched) scripts for a candidate. Scenarios that
+   * enqueue speculative scripts on several candidates (e.g. a hold on both
+   * A and B when the serving model is not known yet) must discard the
+   * losers once the serving candidate is known. A stale hold whose
+   * current-turn marker survives inside a later turn's recall hydration
+   * would otherwise shadow that turn's own script: popScript matches the
+   * first fully-matching constrained script in queue order. Returns the
+   * number of removed scripts.
+   */
+  removeQueuedScripts(candidate: string, predicate: (script: ProviderScript) => boolean): number {
+    const queue = this.scripts.get(candidate);
+    if (!queue || queue.length === 0) return 0;
+    const kept: ProviderScript[] = [];
+    let removed = 0;
+    for (const script of queue) {
+      if (predicate(script)) removed++;
+      else kept.push(script);
+    }
+    this.scripts.set(candidate, kept);
+    return removed;
+  }
+
+  /** #1900: register one exact synthetic goal for full-text recognition.
+   *  Bounded: at most 8 markers, each at most 256 chars. */
+  registerMarker(marker: string): void {
+    if (marker.length === 0 || marker.length > 256) {
+      throw new Error(`registered marker must be 1-256 chars (got ${marker.length})`);
+    }
+    if (!this.registeredMarkers.has(marker) && this.registeredMarkers.size >= 8) {
+      throw new Error("registered marker limit reached (8)");
+    }
+    this.registeredMarkers.add(marker);
+  }
+
   clear(): void {
     this.scripts.clear();
     this.summaries = [];
     this.seq = 0;
+    this.registeredMarkers.clear();
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    // #1900: terminate held/idle connections so cleanup cannot hang on open
+    // provider sockets. Destroying sockets resolves acquisitionHold waits via
+    // their close listener and aborts held generations.
+    for (const socket of [...this.openSockets]) {
+      try {
+        socket.destroy();
+      } catch {
+        // best effort — server close still proceeds
+      }
+    }
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
@@ -123,6 +181,12 @@ export class ScriptedProvider {
     }
 
     const request = this.normalize(payload);
+    // #1900: full-request recognition against complete message text before
+    // preview truncation or volatile-context stripping, so a goal beyond
+    // character 300 or inside decorated context is still recognized.
+    const matchedMarkers = [...this.registeredMarkers].filter((marker) =>
+      request.messages.some((m) => m.text.includes(marker)),
+    );
     const summary: ProviderSummary = {
       seq: ++this.seq,
       candidate: request.model,
@@ -134,6 +198,9 @@ export class ScriptedProvider {
       // Bounded synthetic user-message texts (markers only — the fixture
       // never receives real content) so scenarios can substring-match.
       markerTexts: request.userTexts.map((t) => t.slice(0, 300)),
+      matchedMarkers,
+      systemTexts: request.systemTexts,
+      declaredTools: request.declaredTools,
     };
 
     const queue = this.scripts.get(request.model);
@@ -202,8 +269,13 @@ export class ScriptedProvider {
         // placeholder the host immediately replaces on steer.
         this.sseStart(res);
         this.sseChunk(res, request.model, "…");
-        await script.action.release;
-        if (res.writableEnded) {
+        // #1900: race the release against connection close so provider
+        // shutdown terminates held generations instead of hanging.
+        const released = await Promise.race([
+          script.action.release.then(() => true),
+          new Promise<boolean>((resolve) => res.once("close", () => resolve(false))),
+        ]);
+        if (!released || res.writableEnded) {
           summary.aborted = true;
           return;
         }
@@ -220,26 +292,34 @@ export class ScriptedProvider {
         res.end();
         break;
       }
+    case "acquisitionHold": {
+        // #1506: simulate a provider whose request/stream NEVER opens — no
+        // response headers are ever written, so the client's acquisition
+        // promise stays pending with no iterator for any stream watchdog to
+        // observe. The executing bridge must bound the attempt itself (abort
+        // signal or inactivity deadline). The connection close on abort (or an
+        // explicit release) resolves the wait; never a fixed sleep.
+        await Promise.race([
+          script.action.release,
+          new Promise<void>((resolve) => res.once("close", resolve)),
+        ]);
+        break;
+      }
     }
 
     // Finalize abort state for held connections that died during the wait.
-    if (script.action.kind === "hold" && summary.aborted && !res.writableEnded) {
+    if ((script.action.kind === "hold" || script.action.kind === "acquisitionHold") && summary.aborted && !res.writableEnded) {
       res.destroy();
     }
   }
 
   private popScript(queue: ProviderScript[] | undefined, request: ReturnType<ScriptedProvider["normalize"]>): ProviderScript | undefined {
     if (!queue || queue.length === 0) return undefined;
-    // Unconstrained scripts (no expectation) are consumed FIFO by the next
-    // request on this candidate — the smoke one-shot pattern.
-    const unconstrainedIndex = queue.findIndex((s) => !s.expectation);
-    if (unconstrainedIndex >= 0) return queue.splice(unconstrainedIndex, 1)[0];
-    // Constrained scripts are consumed only by a request whose semantic
-    // expectation fully matches. A request that matches nothing (a boot
-    // greeting, a fail-closed turn that never reached the provider, or any
-    // other unexpected turn) is unscripted and MUST NOT consume queued
-    // scripts — otherwise one stray turn mis-pops a later scenario's script
-    // and the expectation failure poisons the candidate health registry.
+    // #1900: constrained scripts win over unconstrained FIFO. A scheduled
+    // request must receive its constrained scheduled response even when an
+    // unrelated unconstrained script is queued on the same candidate;
+    // otherwise the unconstrained script shadows the scheduled one and the
+    // scheduled evidence is consumed by the wrong traffic.
     for (let i = 0; i < queue.length; i++) {
       const script = queue[i]!;
       if (!script.expectation) continue;
@@ -250,6 +330,14 @@ export class ScriptedProvider {
         // not this script — keep looking
       }
     }
+    // Unconstrained scripts (no expectation) are consumed FIFO by the next
+    // request on this candidate that matched no constrained script — the
+    // smoke one-shot pattern. A request that matches nothing (a boot
+    // greeting, a fail-closed turn that never reached the provider, or any
+    // other unexpected turn) is unscripted when no unconstrained script
+    // remains and MUST NOT consume queued constrained scripts.
+    const unconstrainedIndex = queue.findIndex((s) => !s.expectation);
+    if (unconstrainedIndex >= 0) return queue.splice(unconstrainedIndex, 1)[0];
     return undefined;
   }
 
@@ -262,9 +350,24 @@ export class ScriptedProvider {
     toolCalls: string[];
     markerHashes: string[];
     userTexts: string[];
+    systemTexts: string[];
+    declaredTools: string[];
   } {
     const rec = payload as Record<string, unknown>;
     const model = typeof rec["model"] === "string" ? rec["model"] : "unknown";
+    // #1940: Pi's tool declarations ride alongside messages. Capture the
+    // declared function names so scenarios can prove exactly the authorized
+    // abtars tools are declared (no Pi built-ins).
+    const declaredTools: string[] = [];
+    const rawTools = rec["tools"];
+    if (Array.isArray(rawTools)) {
+      for (const rawTool of rawTools) {
+        const tool = rawTool as Record<string, unknown>;
+        const fn = tool["function"] as Record<string, unknown> | undefined;
+        const name = typeof fn?.["name"] === "string" ? fn["name"] : typeof tool["name"] === "string" ? tool["name"] : null;
+        if (name) declaredTools.push(name);
+      }
+    }
     const rawMessages = Array.isArray(rec["messages"]) ? rec["messages"] as unknown[] : [];
     const messages: NormalizedMessage[] = [];
     const roleCounts: Record<string, number> = {};
@@ -309,10 +412,11 @@ export class ScriptedProvider {
     const normalizedText = (text: string): string => text.replace(/^\[[^\]]*\]\s*/, "");
     const userTexts = messages
       .filter((m) => m.role === "user")
-      .map((m) => normalizedText(m.text));
+      .map((m) => normalizedText(stripVolatileContext(m.text)));
     const markerHashes = userTexts.map((t) => createHash("sha256").update(t).digest("hex").slice(0, 16));
 
-    return { model, messages, roleCounts, toolCalls, markerHashes, userTexts };
+    const systemTexts = messages.filter((m) => m.role === "system").map((m) => m.text.slice(0, 2000));
+    return { model, messages, roleCounts, toolCalls, markerHashes, userTexts, systemTexts, declaredTools };
   }
 
   // ── Semantic expectation validation ───────────────────────────────────────
@@ -339,6 +443,18 @@ export class ScriptedProvider {
         if (!found) {
           throw new FixtureExpectationError(`ordered marker missing after index ${cursor - 1}: ${shortHash(marker)}`);
         }
+      }
+    }
+
+    if (expectation.containsInOrder) {
+      const full = messages.map((m) => m.text).join("\n");
+      let cursor = 0;
+      for (const marker of expectation.containsInOrder) {
+        const idx = full.indexOf(marker, cursor);
+        if (idx < 0) {
+          throw new FixtureExpectationError(`ordered-across-text marker missing: ${shortHash(marker)}`);
+        }
+        cursor = idx + marker.length;
       }
     }
 
@@ -440,26 +556,37 @@ export class ScriptedProvider {
   private async streamToolCall(res: ServerResponse, name: string, args: unknown): Promise<void> {
     this.sseStart(res);
     const argsText = typeof args === "string" ? args : JSON.stringify(args);
-    const toolPayload = JSON.stringify({
-      id: `chatcmpl-fixture-${this.seq}`,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: "fixture",
-      choices: [{
-        index: 0,
-        delta: {
-          role: "assistant",
-          tool_calls: [{
-            index: 0,
-            id: `call_fixture_${this.seq}`,
-            type: "function",
-            function: { name, arguments: argsText },
-          }],
-        },
-        finish_reason: null,
-      }],
-    });
-    res.write(`data: ${toolPayload}\n\n`);
+    // #1780: deliver the argument JSON fragmented across multiple deltas so
+    // the real Pi parser must reassemble it. A single complete chunk cannot
+    // detect normalized tool-call delta drift (lost/duplicated fragments).
+    const fragments = splitIntoFragments(argsText, 3);
+    const callId = `call_fixture_${this.seq}`;
+    for (let i = 0; i < fragments.length; i++) {
+      const functionPayload: Record<string, unknown> =
+        i === 0
+          ? { name, arguments: fragments[i] }
+          : { arguments: fragments[i] };
+      const chunkPayload = JSON.stringify({
+        id: `chatcmpl-fixture-${this.seq}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "fixture",
+        choices: [{
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [{
+              index: 0,
+              ...(i === 0 ? { id: callId, type: "function" } : {}),
+              function: functionPayload,
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      res.write(`data: ${chunkPayload}\n\n`);
+      await delay(2);
+    }
     res.write(`data: ${JSON.stringify({
       id: `chatcmpl-fixture-${this.seq}`,
       object: "chat.completion.chunk",
@@ -483,8 +610,31 @@ function extractText(content: unknown): string {
   return "";
 }
 
+// #1776: session-start hydration wraps volatile context in a [CONTEXT]
+// block ahead of the current turn. Marker matching targets the current
+// turn, so strip the volatile decoration before the bounded slice —
+// otherwise a legitimately hydrated first turn pushes its marker past it.
+function stripVolatileContext(text: string): string {
+  return text.replace(/\[CONTEXT[\s\S]*?\[\/CONTEXT\]\s*/, "");
+}
+
 function shortHash(marker: string): string {
   return createHash("sha256").update(marker).digest("hex").slice(0, 8);
+}
+
+/**
+ * Split text into N roughly equal fragments for multi-delta tool-call
+ * delivery (#1780). Splits by character count — the fragments are only
+ * reassembled by the real Pi parser, never parsed here.
+ */
+function splitIntoFragments(text: string, parts: number): string[] {
+  if (parts <= 1 || text.length <= parts) return [text];
+  const size = Math.ceil(text.length / parts);
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) {
+    out.push(text.slice(i, i + size));
+  }
+  return out;
 }
 
 function readBounded(req: IncomingMessage): Promise<Buffer> {

@@ -20,9 +20,30 @@ export interface AbmindCapabilitiesLike {
   features: Record<string, unknown>;
 }
 
+// ── #1659: structural mutation failure contract ─────────────────────────────
+
+/** What the caller should do with a mutation failure. */
+export type AbmindFailureActionLike = "fix_input" | "re_recall" | "retry" | "reconcile" | "stop";
+
+/** Where the failure was classified in the mutation lifecycle. */
+export type AbmindFailureStageLike = "pre_dispatch" | "dispatch" | "response";
+
+/**
+ * Structural protocol failure raised by either client (local abmind or the
+ * abtars-owned signed WSS client). Callers must never derive retry safety
+ * from message text.
+ */
+export interface AbmindClientErrorLike extends Error {
+  readonly code: string;
+  readonly requestId: string;
+  readonly retryable: boolean;
+  readonly action: AbmindFailureActionLike;
+  readonly stage: AbmindFailureStageLike;
+  readonly current?: unknown;
+}
+
 export interface AbmindPrivateMemoryLike {
   instantStore(params: unknown, idempotencyKey?: string): Promise<unknown>;
-  editMemory(params: unknown, idempotencyKey?: string): Promise<unknown>;
   recall(params: unknown): Promise<unknown>;
   rebuildFtsIndexes(): Promise<unknown>;
   embed(input: { texts: string[] }): Promise<unknown>;
@@ -31,13 +52,17 @@ export interface AbmindPrivateMemoryLike {
   assembleSessionContext(input: unknown): Promise<unknown>;
   getRuntimeStatus(input?: unknown): Promise<unknown>;
   getCoreKnowledge(input: unknown): Promise<unknown>;
-  recordFeedback(input: unknown, idempotencyKey?: string): Promise<unknown>;
-  /** #1527: daemon-owned durable context projection (private read). */
-  projectConversationContext(input: unknown): Promise<unknown>;
-  /** #1406: daemon-owned durable compaction prepare (private read). */
-  prepareConversationCompaction(input: unknown): Promise<unknown>;
-  /** #1406: daemon-owned durable compaction commit (private mutate). */
-  commitConversationCompaction(input: unknown, idempotencyKey?: string): Promise<unknown>;
+  /** #1515: owner-scoped durable Dreamy clarification questions. */
+  dreamQuestions: {
+    nextPending(userId: string): Promise<unknown>;
+    list(userId: string, status?: string, limit?: number): Promise<unknown>;
+    markAsked(input: { userId: string; questionId: string; deliveryKey: string }, idempotencyKey?: string): Promise<unknown>;
+    dismiss(input: { userId: string; questionId: string }, idempotencyKey?: string): Promise<unknown>;
+  };
+  /** #1660: owner-only sealed label search (metadata only). */
+  findSealedSecrets(input: unknown): Promise<unknown>;
+  /** #1660: local-only plaintext resolution, revision-checked. */
+  resolveSealedSecret(input: unknown): Promise<unknown>;
 }
 
 export interface SleepStartResultLike {
@@ -55,6 +80,9 @@ export interface SleepRuntimeNextLike {
     stepId: string;
     prompt: string;
     deadline: number;
+    /** #1859: the host must withhold every state-changing tool for this
+     *  turn; abmind applies only validated proposals. */
+    proposalOnly?: boolean;
   };
 }
 
@@ -67,10 +95,17 @@ export interface SleepEventsResultLike {
 }
 
 export interface AbmindSleepRuntimeLike {
-  open(providerInstanceId: string, idempotencyKey?: string): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
+  /** #1859: `capabilities` declares the enforcement the provider can give —
+   *  `{ proposalOnly: true }` acknowledges it can withhold state-changing
+   *  tools on proposal-only turns. Abmind refuses proposal-only completions
+   *  to a lease that never declared it. */
+  open(providerInstanceId: string, idempotencyKey?: string, capabilities?: { proposalOnly?: boolean }): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
   next(leaseId: string, waitMs?: number): Promise<SleepRuntimeNextLike>;
-  complete(leaseId: string, completionId: string, text: string, idempotencyKey?: string): Promise<{ status: string }>;
-  fail(leaseId: string, completionId: string, code: string, idempotencyKey?: string): Promise<{ status: string }>;
+  complete(leaseId: string, completionId: string, text: string, outcomeOrKey?: string, idempotencyKey?: string): Promise<{ status: string }>;
+  /** #1912: `failure` may carry normalized execution facts (failureClass,
+   *  retryAfterMs, reachedModel, effects, reasonCode) for supervision.
+   *  Additive — older daemons ignore the fields they do not know. */
+  fail(leaseId: string, completionId: string, code: string, failure?: { cause: string; detail?: string; commandFingerprint?: string; failureClass?: string; retryAfterMs?: number; reachedModel?: boolean; effects?: string; reasonCode?: string }, idempotencyKey?: string): Promise<{ status: string }>;
   close(leaseId: string, idempotencyKey?: string): Promise<{ status: string }>;
 }
 

@@ -1,13 +1,14 @@
 import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
 import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "./task-state-store.js";
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
-import { kanbanAttachResult, kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
+import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanCompleteProject, kanbanFail, kanbanFailProject, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure, AUTO_PAUSE_FAILURE_THRESHOLD, AUTO_RESUME_COOLDOWN_MS } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun, DeferredAdmission, RunTerminalRequest, TaskRunPhase, TaskRuntimeState } from "./task-state-store.js";
 import type { TaskOutcome } from "./task-history-store.js";
+import type { ScheduledFailureEvent } from "../sha/sha-types.js";
 
 const TAG = "task-run-settler";
 const RETRY_DELAY_MS = 10 * 60 * 1000;
@@ -61,11 +62,14 @@ export interface SettleOptions {
   /** Pause notification, emitted once per false→true transition. */
   onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1, notice: PauseNotice) => void;
   /**
-   * #1588: failure cascade, fired exactly once per settled failed/timed_out
+   * #1588/#1688: failure cascade, fired exactly once per settled failed/timed_out
    * run — after the append-once write and the cleared reservation check, so
-   * duplicate and late settlements never re-report.
+   * duplicate and late settlements never re-report. The event carries the
+   * complete typed payload: task identity, run identity, `TaskKind`, the
+   * optional card, and the structured diagnostic. No downstream layer
+   * reconstructs `TaskKind` or run identity from text.
    */
-  onFailure?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  onFailure?: (event: ScheduledFailureEvent) => void;
   /**
    * #1539: the terminal fact's own occurrence time — card updated_at /
    * acceptance decision time, process exit time, or provider completion time.
@@ -221,7 +225,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   // run row; a late/duplicate settler never reaches here.
   setRunOutcome(run.runId, effectiveOutcome);
 
-  applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, deliveryText: safeDeliveryText, resultPath, diagnostic, releaseDelivery, attachResult });
+  applyPostSettlementSideEffects({ cardId, runId: run.runId, outcome: effectiveOutcome, detail: safeDetail, deliveryText: safeDeliveryText, resultPath, diagnostic, releaseDelivery, attachResult });
 
   const nowPaused = patch.autoPaused === true;
   if (nowPaused && !wasPaused) {
@@ -237,12 +241,22 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     });
   }
 
-  // #1588: exactly-once failure cascade. Fired only after both guards above —
-  // a duplicate settlement (append-once miss) and a late settlement (reservation
-  // lost) return before reaching here, so a settled run reports at most once.
-  // deferred and cancelled are deliberate non-failures and stay quiet.
+  // #1588/#1688: exactly-once failure cascade. Fired only after both guards
+  // above — a duplicate settlement (append-once miss) and a late settlement
+  // (reservation lost) return before reaching here, so a settled run reports
+  // at most once. deferred and cancelled are deliberate non-failures and stay
+  // quiet. The typed event keeps `TaskKind` and run identity intact for SHA
+  // classification downstream.
   if (effectiveOutcome === "failed" || effectiveOutcome === "timed_out") {
-    opts.onFailure?.(entry.id, diagnostic);
+    opts.onFailure?.({
+      source: "scheduled",
+      entryId: entry.id,
+      runId: run.runId,
+      taskKind: entry.kind,
+      cardId,
+      diagnostic,
+      occurredAt: finishedAt,
+    });
   }
 
   logInfo(TAG, `Run "${entry.id}" settled as ${effectiveOutcome}${nowPaused ? " (auto-paused)" : ""}`);
@@ -266,6 +280,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
 
   applyPostSettlementSideEffects({
     cardId: event.kanbanCardId,
+    runId: event.runId,
     outcome: event.outcome,
     detail: safeDetail,
     deliveryText: sanitizeText(event.deliveryText, 4000),
@@ -280,6 +295,9 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
 
 function applyPostSettlementSideEffects(opts: {
   cardId?: number;
+  /** The settling run's identity — a supervised root fails only when this
+   * run still owns the card's callback, never on a successor's behalf. */
+  runId?: string;
   outcome: TerminalOutcome;
   detail?: string;
   deliveryText?: string;
@@ -288,22 +306,76 @@ function applyPostSettlementSideEffects(opts: {
   releaseDelivery?: boolean;
   attachResult?: boolean;
 }): void {
-  const { cardId, outcome, detail, deliveryText, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
+  const { cardId, runId, outcome, detail, deliveryText, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
   if (cardId === undefined) return;
   if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
     // #1610: the user-facing payload wins when present; operational detail and
     // the truthful fallback follow. Normal settlement and history-led repair
     // share this one selection.
     const summary = deliveryText || detail || "completed";
-    if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
-    else kanbanComplete(cardId, resultPath ?? null, summary);
-    if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
+    // #1644: a supervised project root's artifact attach and delivery release
+    // are fenced to the exact root/run/project-generation authority — a late
+    // success callback for a terminal-blocked root, mismatched generation, or
+    // failed run loses its predicate and mutates nothing. Plain cards keep the
+    // existing unfenced settlement path.
+    const card = kanbanGetCard(cardId);
+    const generation = card?.type === "O" ? readProjectSupervisionGeneration(cardId) : undefined;
+    // A task-sourced project is scheduled even when its source_id is
+    // malformed. Treat the missing run identity as a failed closed admission,
+    // rather than falling through to the non-scheduled delivery path.
+    const scheduledProject = card && card.type === "O" && card.source === "task";
+    // A scheduled O root without supervision is not a legacy card: fail
+    // closed rather than allowing a task callback to complete it. Non-
+    // scheduled O cards without supervision retain their pre-project path.
+    if (scheduledProject && (generation === undefined || card.source_id == null)) return;
+    const projectAuthority = scheduledProject
+      ? { scheduledRunId: card!.source_id! }
+      : card && card.type === "O" && generation !== undefined ? {} : undefined;
+    if (projectAuthority !== undefined && generation !== undefined) {
+      const authority = { projectGeneration: generation, ...projectAuthority };
+      if (attachResult && resultPath) kanbanAttachProjectResult(cardId, resultPath, summary, authority);
+      else kanbanCompleteProject(cardId, resultPath ?? null, summary, authority);
+      if (releaseDelivery && outcome === "success") kanbanSetProjectDeliveryReady(cardId, authority);
+    } else {
+      if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
+      else kanbanComplete(cardId, resultPath ?? null, summary);
+      if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
+    }
   } else if (outcome !== "deferred") {
     // `unknown` still terminates its card: the project was not delivered and
     // the owner is gone, so a running card would orphan forever. The message
     // carries the owner_lost diagnostic — a truthful statement, not a claim
     // about whether the run's side effects completed.
-    kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
+    // #1778: a supervised project root fails only under its exact
+    // generation/run authority — the settling run must still own the card's
+    // callback, so a late failure from a superseded run cannot fail the
+    // successor's root. Unsupervised cards keep the plain path.
+    const message = formatTaskFailure(diagnostic).slice(0, 1000);
+    const card = kanbanGetCard(cardId);
+    const generation = card?.type === "O" ? readProjectSupervisionGeneration(cardId) : undefined;
+    const scheduledProject = card && card.type === "O" && card.source === "task";
+    if (scheduledProject && generation !== undefined && runId !== undefined) {
+      kanbanFailProject(cardId, message, { projectGeneration: generation, scheduledRunId: runId });
+    } else if (card && card.type === "O" && generation !== undefined) {
+      kanbanFailProject(cardId, message, { projectGeneration: generation });
+    } else {
+      kanbanFail(cardId, message);
+    }
+  }
+}
+
+/**
+ * #1644: current supervision generation for a project root card, read on the
+ * shared task database. Only used to build the delivery-side authority — the
+ * mutating statements re-check generation inside their own predicates.
+ */
+function readProjectSupervisionGeneration(cardId: number): number | undefined {
+  try {
+    const db = requireTaskDatabase();
+    const row = db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { generation: number } | undefined;
+    return row?.generation;
+  } catch {
+    return undefined;
   }
 }
 

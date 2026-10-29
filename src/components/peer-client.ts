@@ -1,22 +1,26 @@
 /**
- * peer-client.ts — HTTP client for peer_session tool (#392).
- * POST /v1/chat/completions with Ed25519 sig auth + TLS cert verify (#1293).
+ * peer-client.ts — broker-backed client for peer_session chat (#392, #1786).
+ *
+ * Lane-1 quick chat rides the authenticated WS broker (`peer.chat.v1`,
+ * ephemeral — no outbox, no retry). The pre-broker direct TLS dial to
+ * peer.host:port is retired: it cannot traverse asymmetric firewalls and
+ * races connection management. No route → explicit unavailable error.
  */
 
-import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
+import { loadPeerConfig } from "./peer-config.js";
 import { resolvePeerName } from "./transport/peer-resolver.js";
 import { logInfo } from "./logger.js";
-import { createPinnedPeerHttpsAgent } from "./peer-transport/pinned-peer-tls.js";
 
 const TAG = "peer-client";
 
-export type PeerError = "timeout" | "unreachable" | "hop_exceeded" | "auth_failed" | "peer_error" | "unknown_peer";
+export type PeerError =
+  | "timeout" | "unreachable" | "hop_exceeded" | "auth_failed" | "peer_error" | "unknown_peer"
+  | "unavailable" | "busy" | "session_expired" | "session_busy" | "invalid_request";
 
 /**
  * Module-level hop budget for the current request. Set by agent-api-server
- * before dispatching a prompt that came with X-Peer-Hops. Read by peer_session
- * tool to know what hops value to forward. Safe in single-threaded Node
- * because agent-api-server processes one prompt at a time per session.
+ * before dispatching a prompt that came with X-Peer-Hops. Retained for the
+ * HTTP ingress path; broker chat carries no relay budget (direct route only).
  */
 let _currentHops: number | null = null;
 export function setCurrentPeerHops(hops: number | null): void { _currentHops = hops; }
@@ -29,98 +33,61 @@ export class PeerCallError extends Error {
   }
 }
 
+export interface PeerChatCallOptions {
+  sessionId?: string;
+  messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  timeoutMs?: number;
+}
+
 /**
- * Call a peer's /v1/chat/completions endpoint.
+ * Chat with a peer over the WS broker (`peer.chat.v1`).
  * @param peerName — key in peers.json
- * @param prompt — user message to send
- * @param hops — remaining hop budget (decremented before sending)
+ * @param prompt — user message (used when `messages` is omitted)
+ * @param _hops — legacy relay budget, unused on direct broker routes
  */
-export async function callPeer(peerName: string, prompt: string, hops: number, _opts?: { skipWakeup?: boolean }): Promise<string> {
+export async function callPeer(
+  peerName: string,
+  prompt: string,
+  _hops: number,
+  opts?: PeerChatCallOptions,
+): Promise<string> {
   const config = loadPeerConfig();
   const resolved = resolvePeerName(peerName, config);
   if (!resolved.ok) throw new PeerCallError("unknown_peer", `${resolved.code}: ${resolved.message}`);
-  const peer = config.peers[resolved.peer]!;
   peerName = resolved.peer;
 
-  // Sign outgoing message if we have a signing key (#416)
-  let signedPrompt = prompt;
-  if (config.self.signingKey) {
-    const { signMessage } = await import("./digital-signature.js");
-    const { tag } = signMessage(config.self.signingKey, config.self.name, peerName, prompt);
-    signedPrompt = `${prompt} ${tag}`;
-  }
+  const { getPeerWsBroker } = await import("./peer-transport/peer-ws-broker.js");
+  const { parsePeerChatResponse } = await import("./peer-transport/peer-chat.js");
+  const broker = getPeerWsBroker();
+
+  const timeoutMs = Math.min(opts?.timeoutMs ?? config.timeoutMs ?? 60_000, 120_000);
+  const deadlineAt = Date.now() + timeoutMs;
+  const messages = opts?.messages ?? [{ role: "user" as const, content: prompt }];
+  const sessionId = opts?.sessionId ?? `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   const start = Date.now();
   try {
-    const response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
-    logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
-    return response;
+    const raw = await broker.sendEphemeralRequest<unknown>(peerName, "peer.chat.v1", {
+      version: 1,
+      session_id: sessionId,
+      messages,
+      deadline_at: deadlineAt,
+    }, { timeoutMs });
+    const parsed = parsePeerChatResponse(raw);
+    if (!parsed.ok) throw new PeerCallError("peer_error", `Peer returned malformed chat response: ${parsed.detail}`);
+    logInfo(TAG, `PEER_CALL ${peerName} — chat ${messages.length} msg → ${parsed.response.text.length}ch (${Date.now() - start}ms)`);
+    return parsed.response.text;
   } catch (err) {
-    throw err;
+    throw toPeerCallError(peerName, err);
   }
 }
 
-function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops: number, timeoutMs: number, selfName: string): Promise<string> {
-  const { signRequest } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
-  const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-  const config = loadPeerConfig();
-
-  const body = JSON.stringify({
-    model: "default",
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const sigHeaders = signRequest("POST", "/v1/chat/completions", body, config.self.signingKey, selfName);
-
-  const useTls = !!(peer.verifyKey);
-  const requestFn = useTls
-    ? (require("node:https") as typeof import("node:https")).request
-    : require("node:http").request;
-
-  const tlsAgent = useTls ? createPinnedPeerHttpsAgent({ peerName, verifyKey: peer.verifyKey }) : undefined;
-
-  return new Promise((resolve, reject) => {
-    const req = requestFn({
-      hostname: peer.host,
-      port: peer.port,
-      path: "/v1/chat/completions",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-        ...sigHeaders,
-        "X-Peer-Hops": String(hops),
-      },
-      timeout: timeoutMs,
-      ...(useTls ? { minVersion: "TLSv1.3" as const, agent: tlsAgent } : {}),
-    } as any, (res: any) => {
-      let data = "";
-      res.on("data", (c: any) => data += c);
-      res.on("end", () => {
-        if (res.statusCode === 401 || res.statusCode === 403) {
-          reject(new PeerCallError("auth_failed", `Peer rejected auth (${res.statusCode})`));
-          return;
-        }
-        if (res.statusCode === 429 || res.statusCode === 508) {
-          reject(new PeerCallError("hop_exceeded", `Peer refused — hop limit reached`));
-          return;
-        }
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new PeerCallError("peer_error", `Peer returned ${res.statusCode}: ${data.slice(0, 200)}`));
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data);
-          const content = parsed?.choices?.[0]?.message?.content ?? "";
-          resolve(content);
-        } catch {
-          reject(new PeerCallError("peer_error", `Peer returned non-JSON: ${data.slice(0, 100)}`));
-        }
-      });
-    });
-    req.on("timeout", () => { req.destroy(); reject(new PeerCallError("timeout", `Peer '${peer.host}:${peer.port}' timed out (${timeoutMs}ms)`)); });
-    req.on("error", (err: Error) => reject(new PeerCallError("unreachable", `Peer unreachable: ${err.message}`)));
-    req.write(body);
-    req.end();
-  });
+function toPeerCallError(peerName: string, err: unknown): PeerCallError {
+  if (err instanceof PeerCallError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.startsWith("unavailable")) return new PeerCallError("unavailable", message);
+  if (message.startsWith("busy")) return new PeerCallError("busy", message);
+  if (message.startsWith("timeout")) return new PeerCallError("timeout", `Peer '${peerName}' timed out (${message})`);
+  if (message.startsWith("invalid_request")) return new PeerCallError("invalid_request", message);
+  return new PeerCallError("peer_error", message);
 }

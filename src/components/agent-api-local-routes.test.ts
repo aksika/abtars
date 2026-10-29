@@ -191,10 +191,13 @@ describe("local routes production defaults", () => {
     expect([201, 400]).toContain(res._written.status);
   });
 
-  it("orc status runs against the production tool registry", async () => {
+  it("orc status against the production tool registry reports the deleted tool as unavailable (#1792)", async () => {
     const res = makeRes();
     await handleOrcStatus(res, {});
-    expect(res._written.status).toBe(200);
-    expect(JSON.parse(res._written.body!).ok).toBe(true);
+    // The supervised Orc tools are deleted — getOrcTools() is empty, so the
+    // handler keeps its historical { ok:false } 500 shape with the
+    // not-available error instead of reaching a tool.
+    expect(res._written.status).toBe(500);
+    expect(JSON.parse(res._written.body!).error).toContain("orc tool 'check_workers' not available");
   });
 });
