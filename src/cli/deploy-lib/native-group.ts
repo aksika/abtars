@@ -783,6 +783,10 @@ export function ensureNativeGroup(product: "abtars", operation: "install" | "upd
         case "refresh":
           return refreshNativeGroup(product);
         case "adopt": {
+          // #1948: a drifted tree whose binaries do not load must repair, not adopt.
+          if (!nativeProbesPass(liveNmDir())) {
+            return repairNativeGroup(product);
+          }
           const adopted = adoptNativeGroup(product);
           if (!adopted.ok) return adopted;
           continue;

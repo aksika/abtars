@@ -684,3 +684,84 @@ describe("ensureNativeGroup staged repair/refresh (#1514)", () => {
     expect(observeNativeGroup().state).toBe("ready");
   });
 });
+
+// ── #1948: failed live probes fall back to repair instead of failing adoption ─
+
+describe("ensureNativeGroup failed probes fall back to repair (#1948)", () => {
+  let savedPath: string | undefined;
+
+  beforeEach(() => {
+    process.env["AB_SHARED_DEPS_ROOT"] = tmpDir;
+    savedPath = process.env["PATH"];
+    writeFakeNpm(join(tmpDir, "fake-bin"));
+    process.env["PATH"] = join(tmpDir, "fake-bin") + (savedPath ? `:${savedPath}` : "");
+  });
+
+  afterEach(() => {
+    if (savedPath !== undefined) process.env["PATH"] = savedPath;
+    delete process.env["AB_SHARED_DEPS_ROOT"];
+    delete process.env["FAKE_NPM_TRANSITIVE"];
+  });
+
+  function writeBrokenRoots(nm: string): void {
+    mkdirSync(join(nm, "better-sqlite3"), { recursive: true });
+    writeFileSync(join(nm, "better-sqlite3", "package.json"), JSON.stringify({ name: "better-sqlite3", version: "12.11.1" }));
+    writeFileSync(join(nm, "better-sqlite3", "index.js"), `throw new Error("ABI drift simulated");\n`);
+    mkdirSync(join(nm, "sqlite-vec"), { recursive: true });
+    writeFileSync(join(nm, "sqlite-vec", "package.json"), JSON.stringify({ name: "sqlite-vec", version: "0.1.9" }));
+    writeFileSync(join(nm, "sqlite-vec", "index.js"), `module.exports = { load() {} };\n`);
+  }
+
+  // The Molty ABI-drift shape: binaries built for the old Node, manifest
+  // records still native-owned but stale. Repair must overwrite these.
+  async function writeStaleOwnedManifest(): Promise<void> {
+    const { createEmptyManifest, writeManifest, upsertRecord } = await import("./shared-native-deps-manifest.js");
+    const { nativeTargetVersion } = await import("./native-dep-targets.js");
+    let m = createEmptyManifest();
+    for (const pkg of ["better-sqlite3", "sqlite-vec"] as const) {
+      m = upsertRecord(m, pkg, {
+        version: nativeTargetVersion(pkg),
+        nodeAbi: "stale-abi",
+        nodeVersion: "v0.0.0",
+        platform: process.platform,
+        arch: process.arch,
+        contentHash: "stalehashstaleha",
+        installedAt: new Date().toISOString(),
+        installedBy: "abtars",
+        consumers: ["abtars"],
+        probe: nativeTargetProbeId(pkg),
+      });
+    }
+    writeManifest(m);
+  }
+
+  it("install on a drifted group with failing probes ends in repair", async () => {
+    const nm = join(tmpDir, "node_modules");
+    mkdirSync(nm, { recursive: true });
+    writeBrokenRoots(nm);
+    await writeStaleOwnedManifest();
+
+    const { ensureNativeGroup, observeNativeGroup } = await import("./native-group.js");
+    expect(observeNativeGroup().state).toBe("drifted");
+    const result = ensureNativeGroup("abtars", "install");
+
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("repair");
+    expect(observeNativeGroup().state).toBe("ready");
+  });
+
+  it("update on a drifted group with failing probes ends in repair", async () => {
+    const nm = join(tmpDir, "node_modules");
+    mkdirSync(nm, { recursive: true });
+    writeBrokenRoots(nm);
+    await writeStaleOwnedManifest();
+
+    const { ensureNativeGroup, observeNativeGroup } = await import("./native-group.js");
+    expect(observeNativeGroup().state).toBe("drifted");
+    const result = ensureNativeGroup("abtars", "update");
+
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("repair");
+    expect(observeNativeGroup().state).toBe("ready");
+  });
+});
