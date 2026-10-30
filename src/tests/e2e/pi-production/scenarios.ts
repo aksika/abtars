@@ -43,6 +43,9 @@ export interface PiAcceptanceContext {
   writeArtifact: (name: string, data: string) => void;
   /** #1528: last successfully persisted exchange (set by fail-closed, asserted by recovery). */
   durableHistory?: string[];
+  /** #1946 R4: markers of the degraded turn, asserted non-durable after the
+   *  owner returns (the fixture cannot be queried while the owner is down). */
+  degradedMarkers?: string[];
 }
 
 export class MarkerFactory {
@@ -201,19 +204,23 @@ function releaseHold(): { promise: Promise<void>; release: () => void } {
 }
 
 /**
- * #1946 R4 — wait for an observable route-ready signal after an owner
- * restart instead of a reply heuristic or fixed sleep. The R1
+ * #1946 R4 — wait for an observable route-ready signal after an owner or
+ * bridge restart instead of a reply heuristic or fixed sleep. The R1
  * `route ready generation=` line in the bridge log is the signal; the wait
  * is bounded by the existing owner-recovery budget and a missing signal
- * fails the cell. Scoped by log timestamp so a stale ready line from an
- * earlier generation can never satisfy it. Remote-wss only: the local
- * transport has no route controller and emits no such lines.
+ * fails the cell.
+ *
+ * `sinceMs` must be captured BEFORE the restart begins: memory composes
+ * during bridge boot (before the TUI socket exists), and the owner fixture
+ * may report re-readiness only after the bridge already reconnected, so a
+ * "now"-scoped wait can miss the very line it is waiting for. Timestamp
+ * scoping still excludes earlier generations' ready lines.
  */
 async function waitForMemoryRouteReady(
   ctx: PiAcceptanceContext,
+  sinceMs: number,
   timeoutMs: number = TIMEOUTS.ownerRecoveryMs,
 ): Promise<void> {
-  const startMs = Date.now();
   await waitFor(
     async () => {
       const tail = ctx.readBridgeLog()
@@ -221,12 +228,39 @@ async function waitForMemoryRouteReady(
         .filter((line) => {
           if (line.length < 23 || !line.includes("route ready generation=")) return false;
           const t = Date.parse(line.slice(0, 23));
-          return Number.isFinite(t) && t >= startMs;
+          return Number.isFinite(t) && t >= sinceMs;
         });
       return tail.length > 0 ? true : undefined;
     },
     timeoutMs,
     "memory route ready signal in bridge log",
+  );
+}
+
+/**
+ * #1946 R4 — wait for the R1 route-lost line before sending the degraded
+ * turn, so "the runtime is not ready" is an observed fact rather than a
+ * race against the WebSocket close event. Remote-wss only; the local
+ * transport has no route controller and emits no such lines.
+ */
+async function waitForMemoryRouteLost(
+  ctx: PiAcceptanceContext,
+  sinceMs: number,
+  timeoutMs: number = TIMEOUTS.turnMs,
+): Promise<void> {
+  await waitFor(
+    async () => {
+      const tail = ctx.readBridgeLog()
+        .split("\n")
+        .filter((line) => {
+          if (line.length < 23 || !line.includes("route lost generation=")) return false;
+          const t = Date.parse(line.slice(0, 23));
+          return Number.isFinite(t) && t >= sinceMs;
+        });
+      return tail.length > 0 ? true : undefined;
+    },
+    timeoutMs,
+    "memory route lost signal in bridge log",
   );
 }
 
@@ -842,7 +876,6 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
   const a1 = ctx.markers.next("F1A");
   const f2 = ctx.markers.next("F2");
   const a2 = ctx.markers.next("F2A");
-  const since = await durableReadCursor(ctx);
   const logStartMs = Date.now();
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: f1 }, a1));
@@ -850,9 +883,16 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
   // The f1/a1 exchange is durable history that precedes route loss; f2/a2 is
   // a degraded turn whose archive write is skipped and must not become history.
   ctx.durableHistory = [f1, a1];
+  ctx.degradedMarkers = [f2, a2];
 
   const before = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
+  const lossSince = Date.now();
   await ctx.owner.stopOwner();
+  // #1946 R4: observe the route loss before sending the degraded turn, so
+  // "runtime not ready" is a fact rather than a race with the close event.
+  if (ctx.lane === "remote-wss") {
+    await waitForMemoryRouteLost(ctx, lossSince);
+  }
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
     candidate: FIXTURE_MODEL_A,
     currentTurn: f2,
@@ -869,7 +909,7 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
   // assistant writes are each logged at WARN (same shape as a failed
   // write, never content). The logger buffers, so poll for the flushed
   // lines; timestamp scoping keeps earlier generations out. Local-unix has
-  // no route controller: its writes are attempted and fail instead.
+  // no route controller: its writes are attempted instead.
   if (ctx.lane === "remote-wss") {
     await waitFor(
       async () => {
@@ -889,11 +929,6 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
       "skipped archive-write WARN lines for the degraded turn",
     );
   }
-  const rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 100);
-  const joined = rows.map((r) => r.content).join("\n");
-  if (joined.includes(f2) || joined.includes(a2)) {
-    throw new Error("degraded turn entered durable history");
-  }
 }
 
 // ── Scenario 5: Owner recovery (full) ───────────────────────────────────────
@@ -903,14 +938,24 @@ async function ownerRecovery(ctx: PiAcceptanceContext): Promise<void> {
   const a3 = ctx.markers.next("F3A");
   const preLossHistory = ctx.durableHistory ?? [];
 
+  const readySince = Date.now();
   await ctx.owner.restartOwner();
 
   // #1946 R4: the bridge renegotiates memory asynchronously after the owner
   // restart. Wait for the observable route-ready signal before the next
   // turn, so post-recovery durability never depends on reconnect timing.
-  // Local-unix has no route signal; its runtime is synchronously ready.
+  // Local-unix has no route signal; its runtime stays synchronously ready.
   if (ctx.lane === "remote-wss") {
-    await waitForMemoryRouteReady(ctx);
+    await waitForMemoryRouteReady(ctx, readySince);
+    // The degraded turn's skipped writes were never queued: now that the
+    // owner is readable again they must be absent from durable history.
+    const rows = await ctx.owner.conversationRows(MASTER_USER_ID, 0, 100);
+    const joined = rows.map((r) => r.content).join("\n");
+    for (const marker of ctx.degradedMarkers ?? []) {
+      if (joined.includes(marker)) {
+        throw new Error(`degraded turn ${marker.slice(0, 40)} entered durable history`);
+      }
+    }
   }
 
   // The recovered turn must carry the pre-loss durable history and its own
@@ -922,7 +967,6 @@ async function ownerRecovery(ctx: PiAcceptanceContext): Promise<void> {
     exactlyOnce: [f3],
   }, a3));
   await sendExpectReply(ctx.tui, f3, a3, "post-recovery reply");
-  ctx.durableHistory = [...preLossHistory, f3, a3];
 }
 
 // ── Scenario 6: Bridge restart (full) ───────────────────────────────────────
@@ -941,17 +985,18 @@ async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
 
   // Terminate the exact bridge PID and boot the production entry point with
   // the same isolated home and owner.
+  const bootSince = Date.now();
   ctx.bridge = await ctx.restartBridge();
 
   // Reconnect the TUI client to the restarted bridge.
   ctx.tui.close();
   await ctx.tui.connect("resume");
 
-  // The fresh bridge renegotiates memory at boot; wait for its ready signal
-  // on remote-wss before the post-restart turn so hydration — and the
-  // durability assertion below — never depends on boot timing.
+  // The fresh bridge renegotiates memory at boot (before the TUI socket
+  // exists); wait for its ready signal since the restart began, so hydration —
+  // and the durability assertion below — never depends on boot timing.
   if (ctx.lane === "remote-wss") {
-    await waitForMemoryRouteReady(ctx);
+    await waitForMemoryRouteReady(ctx, bootSince);
   }
 
   // #1940: restart starts the next conversation fresh — the post-restart

@@ -343,8 +343,9 @@ export class AbtarsRouteController {
     this.state_ = "reconnecting";
     this.reasonCode_ = "transport_closed";
     this.socket = null;
-    // #1946 R1 — route loss is logged with generation and reason; the
-    // return to ready is logged at the negotiate site above.
+    // #1946 R1 — log before publishing so a callback failure cannot suppress
+    // the visible loss line; the return to ready is logged at the negotiate
+    // site.
     logWarn(TAG, `route lost generation=${gen} reason=transport_closed`);
     this.callbacks.onRouteLost(gen);
     this.scheduleReconnect();
