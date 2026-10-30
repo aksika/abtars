@@ -1074,6 +1074,27 @@ function emptySoulBundle(): SessionSoulBundle {
 export type MemoryWritePhase = "before_model" | "after_delivery";
 
 /**
+ * #1946 R2 — log a skipped archive write with the same shape as a failed
+ * write in `attemptMemoryMutation` (phase, family, key fingerprint; never
+ * content). Called when memory applies to the turn but the runtime is not
+ * ready. Nothing is recorded and nothing is queued.
+ */
+export function logSkippedMemoryMutation(input: {
+  phase: MemoryWritePhase;
+  family: MemoryMutationFamily;
+  operationKey: string;
+}): void {
+  const keyFingerprint = createHash("sha256")
+    .update(input.operationKey, "utf-8")
+    .digest("hex")
+    .slice(0, 12);
+  logWarn(
+    "memory-mutation",
+    `phase=${input.phase} family=${input.family} error=route_not_ready key=${keyFingerprint}..`,
+  );
+}
+
+/**
  * Attempt a memory mutation with safe isolation: catches typed abmind errors,
  * logs one bounded diagnostic, and never retries.
  *

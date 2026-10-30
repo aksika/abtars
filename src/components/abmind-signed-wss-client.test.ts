@@ -422,6 +422,86 @@ describe("AbtarsSignedWssClient", () => {
     }
   }, 20_000);
 
+  it("keeps reconnecting past the former attempt limit after first ready (#1946 R3)", async () => {
+    const server = await startFakeServer(root, { respond: negotiateReply });
+    const outboxPath = join(root, "outbox.json");
+    const client = new AbtarsSignedWssClient(profile(root, server.port), outboxPath, {
+      reconnectBaseMs: 5,
+      reconnectMaxMs: 20,
+      reconnectMaxAttempts: 2,
+    });
+    const seen: string[] = [];
+    const unsubscribe = client.onRouteChange((snapshot) => seen.push(snapshot.state));
+    try {
+      await client.negotiate();
+      expect(client.routeSnapshot.state).toBe("ready");
+      const port = server.port;
+      await server.close();
+      await waitFor(() => client.routeSnapshot.state !== "ready");
+      // Past the former 2-attempt limit the route must still be
+      // reconnecting — never permanently retry_exhausted.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(client.routeSnapshot.state).not.toBe("unavailable");
+      expect(client.routeSnapshot.reasonCode).not.toBe("retry_exhausted");
+      // The endpoint returns: the route becomes ready again on its own.
+      const server2 = await startFakeServer(root, { respond: negotiateReply, port });
+      await waitFor(() => client.routeSnapshot.state === "ready", 5_000);
+      expect(client.routeSnapshot.generation).toBeGreaterThan(1);
+      // Exactly one reconnect timer: one initial ready plus one recovery.
+      expect(seen.filter((s) => s === "ready").length).toBe(2);
+      await server2.close();
+    } finally {
+      unsubscribe();
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
+  it("keeps the attempt limit before first ready (#1946 R3)", async () => {
+    const dead = await startFakeServer(root, { respond: negotiateReply });
+    const port = dead.port;
+    await dead.close();
+    const client = new AbtarsSignedWssClient(profile(root, port), join(root, "outbox.json"), {
+      reconnectBaseMs: 5,
+      reconnectMaxMs: 20,
+      reconnectMaxAttempts: 2,
+    });
+    try {
+      await expect(client.negotiate()).rejects.toThrow();
+      // Boot composition still gives up: the supervisor owns retries there.
+      await waitFor(() => client.routeSnapshot.state === "unavailable", 5_000);
+      expect(client.routeSnapshot.reasonCode).toBe("retry_exhausted");
+    } finally {
+      await client.close();
+      await dead.close();
+    }
+  }, 20_000);
+
+  it("runs no reconnect attempt after close (#1946 R3)", async () => {
+    const server = await startFakeServer(root, { respond: negotiateReply });
+    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"), {
+      reconnectBaseMs: 5,
+      reconnectMaxMs: 20,
+      reconnectMaxAttempts: 2,
+    });
+    try {
+      await client.negotiate();
+      const port = server.port;
+      await server.close();
+      await waitFor(() => client.routeSnapshot.state !== "ready");
+      await client.close();
+      expect(client.routeSnapshot.state).toBe("closed");
+      const server2 = await startFakeServer(root, { respond: negotiateReply, port });
+      await new Promise((r) => setTimeout(r, 200));
+      expect(client.routeSnapshot.state).toBe("closed");
+      expect(server2.frames.length).toBe(0);
+      await server2.close();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
   it("close settles a pending negotiate with a rejection (no hang)", async () => {
     // A TCP server that accepts but never completes the TLS handshake keeps
     // negotiate in flight until close() rejects it.

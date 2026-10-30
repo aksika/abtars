@@ -11,7 +11,7 @@ import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation, asSessionSoulBundle } from "../memory-runtime.js";
+import { attemptMemoryMutation, logSkippedMemoryMutation, asSessionSoulBundle } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -174,14 +174,28 @@ export async function buildPrompt(
   // #1940 R1: memory is decided at abtars start. The inbound archive write is
   // attempted when memory applies to this turn; a failure is reported and
   // logged, never turned into a turn rejection or a retry subsystem.
+  // #1946 R2: when memory applies but the runtime is not ready, the skip is
+  // logged at WARN (family + key fingerprint, never content).
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
-  const recordInbound =
+  const memoryAppliesToInbound =
     deps.memoryConfig.memoryEnabled
-    && memoryRuntime?.state === "ready"
     && memoryMode !== "skill-isolated"
     && userRole !== "guest"
     && !text.startsWith("[SESSION START]");
+  const recordInbound = memoryAppliesToInbound && memoryRuntime?.state === "ready";
+  const inboundKey = (): string => {
+    const trustedAnnouncement = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal : undefined;
+    const messageIdStr = trustedAnnouncement?.eventId
+      ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
+    const messageTimestamp = msg.timestamp;
+    return messageIdStr
+      ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)
+      : inboundExecutionKey(msg.platform, msg.channelId, msg.threadId, userId, `${sessionKey}:${messageTimestamp}`);
+  };
+  if (memoryAppliesToInbound && memoryRuntime != null && memoryRuntime.state !== "ready") {
+    logSkippedMemoryMutation({ phase: "before_model", family: "inbound", operationKey: inboundKey() });
+  }
   if (recordInbound) {
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the
@@ -189,19 +203,14 @@ export async function buildPrompt(
     // #1873: that row records the historical form from trusted metadata; the
     // live text (one-time announcement instruction) is never persisted.
     const trustedAnnouncement = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal : undefined;
-    const messageIdStr = trustedAnnouncement?.eventId
-      ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
-    const messageTimestamp = msg.timestamp;
-    const operationKey = messageIdStr
-      ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)
-      : inboundExecutionKey(msg.platform, msg.channelId, msg.threadId, userId, `${sessionKey}:${messageTimestamp}`);
+    const operationKey = inboundKey();
     const phase: MemoryWritePhase = "before_model";
     const result = await attemptMemoryMutation({
       phase,
       family: "inbound",
       operationKey,
       run: () => memoryRuntime!.recordMessage(
-        { role: "user", content: trustedAnnouncement?.savedText ?? text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
+        { role: "user", content: trustedAnnouncement?.savedText ?? text, timestamp: msg.timestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
         operationKey,
       ),
     });

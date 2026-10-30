@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildPrompt } from "./prompt-builder.js";
 import { createDisabledRuntime } from "../memory-runtime.js";
+import * as logger from "../logger.js";
 
 vi.mock("../spin.js", () => ({ spin: { getSessionById: vi.fn(() => undefined) } }));
 
@@ -202,10 +203,34 @@ describe("buildPrompt inbound archive write (#1940 R1)", () => {
     expect(recordMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("memory not ready: no write attempt and no rejection", async () => {
-    const notReady = { state: "unavailable" as const, capabilities: new Set<string>() } as never;
-    const result = await buildPrompt(masterMsg("m4"), "hello", baseDeps(notReady), masterRegistry());
-    expect(result.prompt).toContain("hello");
+  it("memory not ready: skipped inbound write is logged at WARN, nothing recorded (#1946 R2)", async () => {
+    const warnSpy = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+    try {
+      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+      const notReady = { state: "unavailable" as const, capabilities: new Set<string>(), recordMessage } as never;
+      const result = await buildPrompt(masterMsg("m4"), "hello", baseDeps(notReady), masterRegistry());
+      expect(result.prompt).toContain("hello");
+      expect(recordMessage).not.toHaveBeenCalled();
+      const line = warnSpy.mock.calls.map((c) => String(c[1])).find((s) => s.includes("family=inbound"));
+      expect(line).toBeDefined();
+      expect(line).toContain("error=route_not_ready");
+      expect(line).toMatch(/key=[0-9a-f]{12}\.\./);
+      expect(line).not.toContain("hello");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("memory ready: no skip WARN is logged (#1946 R2)", async () => {
+    const warnSpy = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+    try {
+      const recordMessage = vi.fn().mockResolvedValue({ id: 42 });
+      await buildPrompt(masterMsg("m1b"), "hello", baseDeps(readyRuntime(recordMessage)), masterRegistry());
+      expect(recordMessage).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls.some((c) => String(c[1]).includes("route_not_ready"))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("guests, [SESSION START] and skill-isolated turns are not recorded", async () => {

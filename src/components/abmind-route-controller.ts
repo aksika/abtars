@@ -8,6 +8,9 @@
 
 import WebSocket from "ws";
 import type { AbmindRouteReasonCodeLike, AbmindRouteSnapshotV1Like, AbmindRouteStateLike } from "./abmind-route-contract.js";
+import { logInfo, logWarn } from "./logger.js";
+
+const TAG = "memory-route";
 
 export const ROUTE_RECONNECT_BASE_MS_DEFAULT = 1_000;
 export const ROUTE_RECONNECT_MAX_MS_DEFAULT = 60_000;
@@ -78,6 +81,14 @@ export class AbtarsRouteController {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed_ = false;
+  /**
+   * #1946 R3 — set on the first successful negotiation. A route that was
+   * once ready keeps reconnecting with the existing backoff until it is
+   * ready again or the client is closed; the attempt limit below applies
+   * only before first ready (boot composition belongs to
+   * `MemoryRecompositionSupervisor`).
+   */
+  private everReady_ = false;
 
   constructor(
     profileUrl: string,
@@ -218,6 +229,9 @@ export class AbtarsRouteController {
           this.reasonCode_ = reason;
           this.capabilities_ = null;
           this.negotiatedGeneration = -1;
+          // #1946 R1 — a terminal transition reached by a failed reconnect
+          // is never published; log it here with generation and reason.
+          logWarn(TAG, `route unavailable generation=${gen} reason=${reason}`);
           reject(err);
         }
       };
@@ -253,6 +267,8 @@ export class AbtarsRouteController {
             this.reconnectAttempts = 0;
             this.state_ = "ready";
             this.reasonCode_ = undefined;
+            this.everReady_ = true;
+            logInfo(TAG, `route ready generation=${gen}`);
             resolve(caps);
             this.callbacks.onReady(gen);
           }).catch((err: Error) => {
@@ -327,6 +343,9 @@ export class AbtarsRouteController {
     this.state_ = "reconnecting";
     this.reasonCode_ = "transport_closed";
     this.socket = null;
+    // #1946 R1 — route loss is logged with generation and reason; the
+    // return to ready is logged at the negotiate site above.
+    logWarn(TAG, `route lost generation=${gen} reason=transport_closed`);
     this.callbacks.onRouteLost(gen);
     this.scheduleReconnect();
   }
@@ -343,9 +362,14 @@ export class AbtarsRouteController {
 
   private scheduleReconnect(): void {
     if (this.closed_ || this.reconnectTimer) return;
-    if (this.reconnectAttempts >= this.reconnectMaxAttempts()) {
+    // #1946 R3 — after the route was once ready, reconnect continues with
+    // the existing backoff (capped at the existing maximum interval) until
+    // ready or closed. Non-transient failures keep their terminal
+    // classification in fail() and never reach here.
+    if (!this.everReady_ && this.reconnectAttempts >= this.reconnectMaxAttempts()) {
       this.state_ = "unavailable";
       this.reasonCode_ = "retry_exhausted";
+      logWarn(TAG, `route unavailable generation=${this.generation_} reason=retry_exhausted`);
       return;
     }
     this.reconnectAttempts++;

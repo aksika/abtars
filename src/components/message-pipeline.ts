@@ -13,7 +13,7 @@ import { ModelNotFoundError } from "./transport/acp-transport.js";
 import { isProviderExecutionError } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
-import { attemptMemoryMutation } from "./memory-runtime.js";
+import { attemptMemoryMutation, logSkippedMemoryMutation } from "./memory-runtime.js";
 import { assistantMessageKey } from "./memory-operation-key.js";
 import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence } from "./answer-evidence.js";
 
@@ -747,7 +747,15 @@ export async function handleInboundMessage(
       // #1515: generic synthetic greetings stay excluded; a question-bearing
       // boot greeting is recorded with a storage-only marker so the user's
       // reply appears beside the question in the next sleep transcript.
-      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
+      // #1946 R2: when memory applies but the runtime is not ready, the skip
+      // is logged at WARN (family + key fingerprint, never content).
+      const simpleAssistantApplies = !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && (!text.startsWith("[SESSION START]") || bootQuestionDelivered);
+      if (simpleAssistantApplies && deps.memoryRuntime != null && deps.memoryRuntime.state !== "ready") {
+        const timestamp = Date.now();
+        const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
+        logSkippedMemoryMutation({ phase: "after_delivery", family: "assistant", operationKey: assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId) });
+      }
+      if (deps.memoryRuntime?.state === "ready" && simpleAssistantApplies) {
         const timestamp = Date.now();
         const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
         const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -853,8 +861,16 @@ export async function handleInboundMessage(
     // --- Record to memory (skipped for K — skill-isolated; guests and generic
     // greeting injects). #1515: a question-bearing boot greeting is recorded
     // with a storage-only marker; settlement follows only a durable ID. ---
+    // #1946 R2: when memory applies but the runtime is not ready, the skip
+    // is logged at WARN (family + key fingerprint, never content).
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
+    const assistantApplies = !isSkillSession && !isGuest && (!text.startsWith("[SESSION START]") || bootQuestionDelivered);
+    if (assistantApplies && deps.memoryRuntime != null && deps.memoryRuntime.state !== "ready") {
+      const timestamp = Date.now();
+      const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
+      logSkippedMemoryMutation({ phase: "after_delivery", family: "assistant", operationKey: assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId) });
+    }
+    if (deps.memoryRuntime?.state === "ready" && assistantApplies) {
       const timestamp = Date.now();
       const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
       const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);

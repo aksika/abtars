@@ -200,40 +200,34 @@ function releaseHold(): { promise: Promise<void>; release: () => void } {
   return { promise, release: releaseFn };
 }
 
-/** The bounded production reply for a fail-closed durable turn (#1529). */
-const UNAVAILABLE_REPLY = "Memory context is temporarily unavailable. Please retry.";
-
 /**
- * Send a durable turn that may fail closed while the bridge renegotiates
- * memory after an owner or bridge restart. On the bounded unavailability
- * reply (the production response itself tells the user to retry), wait and
- * retry with a fresh marker; the final attempt MUST reach the provider with
- * the requested durable history — bounded, evidence-based readiness, never a
- * fixed sleep. Failed attempts make no provider request and persist nothing.
+ * #1946 R4 — wait for an observable route-ready signal after an owner
+ * restart instead of a reply heuristic or fixed sleep. The R1
+ * `route ready generation=` line in the bridge log is the signal; the wait
+ * is bounded by the existing owner-recovery budget and a missing signal
+ * fails the cell. Scoped by log timestamp so a stale ready line from an
+ * earlier generation can never satisfy it. Remote-wss only: the local
+ * transport has no route controller and emits no such lines.
  */
-async function sendWithRecoveryRetry(
+async function waitForMemoryRouteReady(
   ctx: PiAcceptanceContext,
-  prefix: string,
-  makeScript: (marker: string) => ProviderScript,
-  replyMarker: string,
-  what: string,
-  attempts = 12,
-): Promise<string> {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const marker = ctx.markers.next(attempt === 1 ? prefix : `${prefix}R`);
-    ctx.provider.enqueue(makeScript(marker));
-    const reply = await ctx.tui.sendAndAwaitReply(marker, TIMEOUTS.turnMs);
-    if (reply.markdown.includes(replyMarker)) {
-      await settleBetweenTurns();
-      return marker;
-    }
-    if (reply.markdown.includes(UNAVAILABLE_REPLY) && attempt < attempts) {
-      await settleBetweenTurns(1500);
-      continue;
-    }
-    throw new Error(`${what}: TUI reply did not contain scripted marker ${replyMarker.slice(0, 60)} (got: ${reply.markdown.slice(0, 200)})`);
-  }
-  throw new Error(`${what}: bridge never reached memory readiness after ${attempts} attempts`);
+  timeoutMs: number = TIMEOUTS.ownerRecoveryMs,
+): Promise<void> {
+  const startMs = Date.now();
+  await waitFor(
+    async () => {
+      const tail = ctx.readBridgeLog()
+        .split("\n")
+        .filter((line) => {
+          if (line.length < 23 || !line.includes("route ready generation=")) return false;
+          const t = Date.parse(line.slice(0, 23));
+          return Number.isFinite(t) && t >= startMs;
+        });
+      return tail.length > 0 ? true : undefined;
+    },
+    timeoutMs,
+    "memory route ready signal in bridge log",
+  );
 }
 
 // ── Scenario 1: Main continuity and cursor (core) ───────────────────────────
@@ -848,11 +842,13 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
   const a1 = ctx.markers.next("F1A");
   const f2 = ctx.markers.next("F2");
   const a2 = ctx.markers.next("F2A");
+  const since = await durableReadCursor(ctx);
+  const logStartMs = Date.now();
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: f1 }, a1));
   await sendExpectReply(ctx.tui, f1, a1, "owner-loss baseline reply");
   // The f1/a1 exchange is durable history that precedes route loss; f2/a2 is
-  // a degraded turn whose archive write fails and must not become history.
+  // a degraded turn whose archive write is skipped and must not become history.
   ctx.durableHistory = [f1, a1];
 
   const before = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
@@ -864,55 +860,84 @@ async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> 
   }, a2));
   await sendExpectReply(ctx.tui, f2, a2, "degraded-memory reply");
   // Existing sessions keep running: the provider is reached without a
-  // per-turn memory admission, while the failed archive write stays visible
-  // in the bridge log and out of durable history.
+  // per-turn memory admission, while the skipped archive write stays visible
+  // in the bridge log (#1946 R2) and out of durable history.
   if (ctx.provider.requestCountFor(FIXTURE_MODEL_A) <= before) {
     throw new Error("degraded-memory turn did not reach the provider");
+  }
+  // #1946 R2: on remote-wss the degraded turn's skipped inbound and
+  // assistant writes are each logged at WARN (same shape as a failed
+  // write, never content). The logger buffers, so poll for the flushed
+  // lines; timestamp scoping keeps earlier generations out. Local-unix has
+  // no route controller: its writes are attempted and fail instead.
+  if (ctx.lane === "remote-wss") {
+    await waitFor(
+      async () => {
+        const tail = ctx.readBridgeLog()
+          .split("\n")
+          .filter((line) => {
+            if (line.length < 23) return false;
+            const t = Date.parse(line.slice(0, 23));
+            return Number.isFinite(t) && t >= logStartMs;
+          })
+          .join("\n");
+        const hasInboundSkip = tail.includes("family=inbound") && tail.includes("error=route_not_ready");
+        const hasAssistantSkip = tail.includes("family=assistant") && tail.includes("error=route_not_ready");
+        return hasInboundSkip && hasAssistantSkip ? true : undefined;
+      },
+      TIMEOUTS.turnMs,
+      "skipped archive-write WARN lines for the degraded turn",
+    );
+  }
+  const rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 100);
+  const joined = rows.map((r) => r.content).join("\n");
+  if (joined.includes(f2) || joined.includes(a2)) {
+    throw new Error("degraded turn entered durable history");
   }
 }
 
 // ── Scenario 5: Owner recovery (full) ───────────────────────────────────────
 
 async function ownerRecovery(ctx: PiAcceptanceContext): Promise<void> {
+  const f3 = ctx.markers.next("F3");
   const a3 = ctx.markers.next("F3A");
   const preLossHistory = ctx.durableHistory ?? [];
 
   await ctx.owner.restartOwner();
 
-  // The bridge renegotiates memory asynchronously after the owner restart;
-  // fail-closed turns are expected until it completes. Retry on the bounded
-  // unavailability reply; the successful attempt must carry the pre-loss
-  // durable history and its own marker exactly once.
-  await sendWithRecoveryRetry(
-    ctx,
-    "F3",
-    (marker) => textScript(FIXTURE_MODEL_A, {
-      candidate: FIXTURE_MODEL_A,
-      currentTurn: marker,
-      orderedContains: preLossHistory,
-      exactlyOnce: [marker],
-    }, a3),
-    a3,
-    "post-recovery reply",
-  );
+  // #1946 R4: the bridge renegotiates memory asynchronously after the owner
+  // restart. Wait for the observable route-ready signal before the next
+  // turn, so post-recovery durability never depends on reconnect timing.
+  // Local-unix has no route signal; its runtime is synchronously ready.
+  if (ctx.lane === "remote-wss") {
+    await waitForMemoryRouteReady(ctx);
+  }
+
+  // The recovered turn must carry the pre-loss durable history and its own
+  // marker exactly once.
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: f3,
+    orderedContains: preLossHistory,
+    exactlyOnce: [f3],
+  }, a3));
+  await sendExpectReply(ctx.tui, f3, a3, "post-recovery reply");
+  ctx.durableHistory = [...preLossHistory, f3, a3];
 }
 
 // ── Scenario 6: Bridge restart (full) ───────────────────────────────────────
 
 async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
+  const b1 = ctx.markers.next("B1");
   const a1 = ctx.markers.next("B1A");
+  const b3marker = ctx.markers.next("B3");
   const a3 = ctx.markers.next("B3A");
   const preRestart = await durableReadCursor(ctx);
 
-  // The bridge may still be renegotiating memory after the owner recovery;
-  // retry on the bounded unavailability reply like the recovery scenario.
-  const b1 = await sendWithRecoveryRetry(
-    ctx,
-    "B1",
-    (marker) => textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: marker }, a1),
-    a1,
-    "pre-restart reply",
-  );
+  // The owner-recovery cell already waited for route readiness, so the
+  // pre-restart turn runs against a ready route.
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: b1 }, a1));
+  await sendExpectReply(ctx.tui, b1, a1, "pre-restart reply");
 
   // Terminate the exact bridge PID and boot the production entry point with
   // the same isolated home and owner.
@@ -922,26 +947,24 @@ async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
   ctx.tui.close();
   await ctx.tui.connect("resume");
 
+  // The fresh bridge renegotiates memory at boot; wait for its ready signal
+  // on remote-wss before the post-restart turn so hydration — and the
+  // durability assertion below — never depends on boot timing.
+  if (ctx.lane === "remote-wss") {
+    await waitForMemoryRouteReady(ctx);
+  }
+
   // #1940: restart starts the next conversation fresh — the post-restart
   // turn runs in a new in-memory Pi session whose history comes only from
   // abmind hydration (orderedContains already proves the pre-restart
   // exchange arrived). No binding or session files exist on either side.
-  const b3marker = await sendWithRecoveryRetry(
-    ctx,
-    "B3",
-    // #1940: the post-restart session is fresh; pre-restart history arrives
-    // only as abmind hydration inside the single session-start message, so
-    // assert across the whole request text rather than successive messages.
-    (marker) => textScript(FIXTURE_MODEL_A, {
-      candidate: FIXTURE_MODEL_A,
-      currentTurn: marker,
-      containsInOrder: [b1, a1, marker],
-      exactlyOnce: [marker],
-    }, a3),
-    a3,
-    "post-restart reply",
-  );
-  void b3marker;
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: b3marker,
+    containsInOrder: [b1, a1, b3marker],
+    exactlyOnce: [b3marker],
+  }, a3));
+  await sendExpectReply(ctx.tui, b3marker, a3, "post-restart reply");
   assertNoPiSessionFiles(ctx.abtarsHome);
 
   // Durable store continuity: the daemon retained the pre-restart transcript

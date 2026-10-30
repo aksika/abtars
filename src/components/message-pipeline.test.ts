@@ -1018,6 +1018,98 @@ describe("citation detection (#1270)", () => {
       );
     });
   });
+
+  describe("skipped archive writes are visible when memory is not ready (#1946 R2)", () => {
+    function notReadyRuntime(recordMessage: ReturnType<typeof vi.fn>) {
+      return {
+        state: "unavailable",
+        capabilities: new Set<string>(),
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordMessage,
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({}),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    beforeEach(async () => {
+      transport = mockTransport();
+      transport.contextPercent = -1;
+      setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+      abmindReturn = null;
+      const spinMod = await import("./spin.js");
+      vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+        session.transport = transport;
+      });
+      vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+        id, userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1, showThinking: false,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        primingTerms: [], completions: [],
+        instructionQueue: [], steeringAccepting: false,
+      }));
+      vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+        id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1, showThinking: false,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        primingTerms: [], completions: [],
+        instructionQueue: [], steeringAccepting: false,
+      }));
+      vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+        async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+          id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+          delivery: "streaming", active: true, status: "ready",
+          idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+          log: [], shortIndex: 1, showThinking: false,
+          busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+          primingTerms: [], completions: [],
+          instructionQueue: [], steeringAccepting: false,
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setUserRegistryOverride(null);
+      vi.restoreAllMocks();
+    });
+
+    it("a not-ready turn logs both families, records nothing, and still delivers", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+      const logMod = await import("./logger.js");
+      const warnSpy = vi.spyOn(logMod, "logWarn").mockImplementation(() => {});
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: notReadyRuntime(recordMessage),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 20 }), adapter, deps);
+
+      expect(recordMessage).not.toHaveBeenCalled();
+      expect(adapter.sendMessage).toHaveBeenCalled();
+      const lines = warnSpy.mock.calls.map((c) => String(c[1]));
+      const inbound = lines.find((s) => s.includes("family=inbound"));
+      const assistant = lines.find((s) => s.includes("family=assistant"));
+      expect(inbound).toBeDefined();
+      expect(assistant).toBeDefined();
+      for (const line of [inbound!, assistant!]) {
+        expect(line).toContain("error=route_not_ready");
+        expect(line).toMatch(/key=[0-9a-f]{12}\.\./);
+        expect(line).not.toContain("done text");
+        expect(line).not.toContain("hello");
+      }
+    });
+  });
 });
 
 describe("#1619 incremental block delivery wiring", () => {
