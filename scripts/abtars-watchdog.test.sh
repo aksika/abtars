@@ -169,7 +169,63 @@ wd_assert "$(( ELAPSED < POLL + 5 ))" "1" "timeout path must terminate promptly 
 wd_assert_eq "$LAST_OBSERVED_HB" "5000" "frozen heartbeat must not be misreported as advanced"
 wd_assert_eq "$(ls "$CASE_HOME/signals" 2>/dev/null | wc -l)" "0" "resume timeout must not signal"
 EOF
-  finish_case MA08 $?
+  local r_wait=$?
+
+  # ── Resume grace (#1955): the stale decision is measured from the later of
+  # the heartbeat and the last observed resume; a resume can only defer. ──
+  run_child MA08-grace <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+POLL=60
+STALE=300
+
+# Gap predicate shared by the loop-top check and the pre-stale re-check.
+resume_gap_observed 1000 820
+wd_assert_eq "$?" "1" "a 180s gap is not a resume"
+resume_gap_observed 1001 820
+wd_assert_eq "$?" "0" "a 181s gap is a resume"
+
+# A missing or non-numeric heartbeat is never a stale kill.
+wd_assert_eq "$(stale_decision '' 1000 900)" "none" "missing heartbeat must never kill"
+wd_assert_eq "$(stale_decision 'abc' 1000 900)" "none" "non-numeric heartbeat must never kill"
+
+# Fresh heartbeat: no stale decision.
+wd_assert_eq "$(stale_decision 700000 1000 900)" "none" "a 300s-old heartbeat is not stale"
+
+# Stale heartbeat: kill unless the resume is within STALE.
+wd_assert_eq "$(stale_decision 699000 1000 0)" "kill 301" "stale heartbeat with no resume kills"
+wd_assert_eq "$(stale_decision 699000 1000 900)" "defer 301 100" "a resume within STALE defers"
+wd_assert_eq "$(stale_decision 699000 1000 700)" "defer 301 300" "a resume exactly STALE old defers"
+wd_assert_eq "$(stale_decision 699000 1000 699)" "kill 301" "a resume older than STALE kills"
+
+# Acceptance timelines: each incident kill shape defers, and one line is
+# logged per resume. The ages are the real heartbeat ages from the logs.
+: > "$CASE_HOME/logs/watchdog.log"
+LAST_RESUME_AT=1000000
+LAST_DEFERRAL_RESUME_AT=0
+wd_assert_eq "$(stale_decision 999085000 1000000 1000000)" "defer 915 0" "false-fresh 02:45:18 defers"
+maybe_log_stale_deferral 915 0
+maybe_log_stale_deferral 915 0
+wd_assert_eq "$(grep -c 'Stale-heartbeat kill deferred' "$CASE_HOME/logs/watchdog.log")" "1" "one deferral line per resume"
+
+resume_gap_observed 1000000 999004
+wd_assert_eq "$?" "0" "the 05:40:04 inside-iteration gap is observed"
+wd_assert_eq "$(stale_decision 998977000 1000000 1000000)" "defer 1023 0" "inside-iteration 05:40:04 defers"
+wd_assert_eq "$(stale_decision 998994000 1000060 1000000)" "defer 1066 60" "04:04:10 defers after the wait ends without a tick"
+maybe_log_stale_deferral 1023 0
+wd_assert_eq "$(grep -c 'Stale-heartbeat kill deferred' "$CASE_HOME/logs/watchdog.log")" "1" "the same resume stays silent"
+
+LAST_RESUME_AT=1000300
+maybe_log_stale_deferral 1023 0
+wd_assert_eq "$(grep -c 'Stale-heartbeat kill deferred' "$CASE_HOME/logs/watchdog.log")" "2" "a new resume logs a new deferral line"
+EOF
+  local r_grace=$?
+  if [[ "$r_wait" == "0" && "$r_grace" == "0" ]]; then
+    emit MA08 pass "ok (bounded wait + resume grace)"
+  else
+    emit MA08 fail "$(child_detail MA08)"
+  fi
 }
 
 # ── MA09: apply_command ordering + planned-restart fence/exclusion ──────────

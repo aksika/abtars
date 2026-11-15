@@ -84,6 +84,43 @@ observe_liveness_heartbeat() {
   LAST_OBSERVED_HB="$hb"
 }
 
+# A gap larger than three poll intervals is a host suspend, not a slow tick.
+# One predicate so the loop-top check and the pre-stale re-check cannot drift
+# apart (#1955).
+resume_gap_observed() {
+  local now_s="$1" last_poll_at="$2"
+  (( now_s - last_poll_at > POLL * 3 ))
+}
+
+# Stale-heartbeat decision with the resume grace (#1955). The resume can only
+# defer the kill: it moves the reference time forward, never back.
+#   none                         no stale kill (fresh, missing, non-numeric HB)
+#   defer <hb_age> <resume_age>  stale HB, but the last resume is within STALE
+#   kill <hb_age>                stale HB and no resume within STALE
+stale_decision() {
+  local hb_ms="$1" now_s="$2" last_resume_at="$3" hb_age_s resume_age_s
+  [[ "$hb_ms" =~ ^[0-9]+$ ]] || { echo "none"; return 0; }
+  hb_age_s=$(( (now_s * 1000 - hb_ms) / 1000 ))
+  (( hb_age_s > STALE )) || { echo "none"; return 0; }
+  if (( last_resume_at > 0 )); then
+    resume_age_s=$(( now_s - last_resume_at ))
+    if (( resume_age_s <= STALE )); then
+      echo "defer $hb_age_s $resume_age_s"
+      return 0
+    fi
+  fi
+  echo "kill $hb_age_s"
+}
+
+# One distinct deferral line per observed resume; later poll iterations of the
+# same resume stay silent (#1955).
+maybe_log_stale_deferral() {
+  local hb_age_s="$1" resume_age_s="$2"
+  [[ "${LAST_RESUME_AT:-0}" == "${LAST_DEFERRAL_RESUME_AT:-0}" ]] && return 0
+  logw "Stale-heartbeat kill deferred: heartbeat ${hb_age_s}s old, resume ${resume_age_s}s ago (grace ${STALE}s)"
+  LAST_DEFERRAL_RESUME_AT="${LAST_RESUME_AT:-0}"
+}
+
 if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" != "1" ]]; then
   # ── Singleton: flock (Linux) / lockf (macOS). The inode is never unlinked. ──
   exec 200>>"$AB/.bridge.flock"
@@ -628,6 +665,8 @@ PID=""
 PLANNED_RESTART=0
 START_REASON="watchdog-respawn"
 LAST_OBSERVED_HB=""
+LAST_RESUME_AT=0
+LAST_DEFERRAL_RESUME_AT=0
 OWNERSHIP_EPISODE_OPEN=0
 LAST_EVENT_KEY=""
 RECON_TOKEN=""
@@ -666,9 +705,11 @@ while true; do
 
     # Suspend detection (clock jumped): bounded fresh-heartbeat wait (R4.2).
     _now_s=$(date +%s)
-    _poll_gap=$(( _now_s - LAST_POLL_AT ))
+    _prev_poll_at=$LAST_POLL_AT
     LAST_POLL_AT=$_now_s
-    if (( _poll_gap > POLL * 3 )); then
+    if resume_gap_observed "$_now_s" "$_prev_poll_at"; then
+      _poll_gap=$(( _now_s - _prev_poll_at ))
+      LAST_RESUME_AT=$_now_s
       logw "Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — entering bounded resume wait"
       _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
       wait_for_resume_heartbeat "$_baseline_hb" "$_now_s"
@@ -807,13 +848,32 @@ except Exception:
     # Stale heartbeat? (skip boot grace — 180s from SPAWNED_AT, which for an
     # adopted bridge is its true process age, so no new boot grace is granted)
     (( $(date +%s) - SPAWNED_AT < 180 )) && { sleep "$POLL_INTERVAL"; continue; }
-    HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
-    NOW=$(($(date +%s) * 1000))
-    if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
-      DEATH_REASON="stale-heartbeat:$(( (NOW - HB) / 1000 ))s"
-      svc signal-bridge SIGKILL >/dev/null 2>&1 || true
-      break
+
+    # A suspend that landed after the loop-top check resumes here. Hand it
+    # back to the loop-top branch without advancing LAST_POLL_AT, so there is
+    # one detection path and one "Suspend detected" line (#1955).
+    _now_s=$(date +%s)
+    if resume_gap_observed "$_now_s" "$LAST_POLL_AT"; then
+      continue
     fi
+
+    HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
+    read -r _stale_decision _hb_age_s _resume_age_s <<< "$(stale_decision "$HB" "$_now_s" "${LAST_RESUME_AT:-0}")"
+    case "$_stale_decision" in
+      defer)
+        # Resume grace: the heartbeat is stale, but the host resumed within
+        # STALE. Skip the kill and healthy accounting, like boot grace.
+        maybe_log_stale_deferral "$_hb_age_s" "$_resume_age_s"
+        sleep "$POLL_INTERVAL"
+        continue
+        ;;
+      kill)
+        DEATH_REASON="stale-heartbeat:${_hb_age_s}s"
+        svc signal-bridge SIGKILL >/dev/null 2>&1 || true
+        break
+        ;;
+      *) : ;;
+    esac
 
     # Account for continuous health while it is actually observed. Without
     # this call restartCount/backoff never decay after a successful recovery.
