@@ -18,6 +18,8 @@ npm run bundle       # esbuild single ESM bundle → bundle/
 
 Run `npm run typecheck` before committing. It catches strict-mode errors (`noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`).
 
+Requires Node 26+ (`engines` in `package.json`).
+
 ## Architecture
 
 - **Entry:** `src/main.ts` → `src/bridge-app.ts` → boot phases (`src/boot/phase-*.ts`)

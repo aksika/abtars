@@ -2,7 +2,7 @@
 
 ## Runtime
 
-abTARS requires Node.js 22.19 or newer and npm. Install a supported Node.js release for your operating system, then verify:
+abTARS requires Node.js 26 or newer and npm. Install a supported Node.js release for your operating system, then verify:
 
 ~~~bash
 node --version

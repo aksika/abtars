@@ -12,7 +12,7 @@ Start with [What is abTARS](https://aksika.github.io/abtars/why) and the [quick 
 
 ## Requirements
 
-- Node.js 22.19 or newer
+- Node.js 26 or newer
 - A Telegram or Discord bot, if you want to use a messaging platform
 - A configured provider for your chosen route
 

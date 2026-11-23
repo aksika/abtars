@@ -37,7 +37,7 @@
     "test:e2e:remote-live": "vitest --run scripts/remote-swarm-live-e2e.test.ts"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=26.0.0"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^0.25.0",

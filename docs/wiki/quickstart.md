@@ -5,7 +5,7 @@ This guide covers the choices to make before installing abTARS. For the full set
 ## What you need
 
 1. A machine that can stay available while you use the agent.
-2. Node.js 22.19 or newer and npm.
+2. Node.js 26 or newer and npm.
 3. An interface: a Telegram bot or Discord application for messaging, or the local terminal interface, if enabled.
 4. An execution route:
    - The pi-ai route uses Pi and an API provider configured for your selected model.

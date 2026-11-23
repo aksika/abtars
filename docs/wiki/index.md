@@ -33,7 +33,7 @@ New to abTARS? Start with [What is abTARS](/abtars/why).
 
 ## Requirements
 
-- Node.js 22.19 or newer
+- Node.js 26 or newer
 - A Telegram or Discord bot, if you want to use a messaging platform
 - A configured provider for your chosen route
 

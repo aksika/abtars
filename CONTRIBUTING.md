@@ -12,7 +12,7 @@ npm run build
 npm test
 ```
 
-Requires Node.js 22+.
+Requires Node.js 26+.
 
 ## Code Style
 
